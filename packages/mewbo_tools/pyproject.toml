@@ -24,6 +24,12 @@ dependencies = [
   "pygls>=2.0,<3.0",
 ]
 
+[project.scripts]
+# The sandbox launcher shim. Never invoked by a human: it is prefixed onto an
+# MCP or language server's command line so the ruleset is applied by a process
+# we DO control, and inherited across the exec into one we do not spawn.
+mewbo-sandbox-exec = "mewbo_tools.integration.sandbox_launcher:main"
+
 [build-system]
 requires = ["hatchling>=1.25.0"]
 build-backend = "hatchling.build"

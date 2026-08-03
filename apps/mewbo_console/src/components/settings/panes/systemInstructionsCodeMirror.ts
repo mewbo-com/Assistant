@@ -64,8 +64,8 @@ const markdownHighlightStyle = HighlightStyle.define([
 ]);
 
 // ---------------------------------------------------------------------------
-// Jinja control-flow highlighting — the standalone `jinja2` legacy
-// StreamParser, hand-driven line by line via the public `StringStream` API.
+// Jinja control-flow highlighting — the standalone `jinja2` StreamParser,
+// hand-driven line by line via the public `StringStream` API.
 // ---------------------------------------------------------------------------
 
 const JINJA_TOKEN_CLASS: Record<string, string> = {

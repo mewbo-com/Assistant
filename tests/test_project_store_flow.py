@@ -24,9 +24,9 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from mewbo_core import worktree as worktree_module
 from mewbo_core.config import AppConfig, reset_config, set_app_config_path
-from mewbo_core.project_store import (
+from mewbo_core.workspaces import worktree as worktree_module
+from mewbo_core.workspaces.project_store import (
     JsonProjectStore,
     VirtualProject,
     _render_claude_md,
@@ -407,7 +407,12 @@ class TestJsonProjectStoreThreadSafety:
 # create_project_store() factory  (lines 443–449)
 # ---------------------------------------------------------------------------
 class TestCreateProjectStoreFactory:
-    def test_returns_json_store_by_default(self, tmp_path):
+    def test_returns_json_store_by_default(self, tmp_path, monkeypatch):
+        # "by default" means the config's driver decides, so the env override
+        # that outranks it must be cleared — the repo-root .env sets one and
+        # python-dotenv loads it into any process started from there.
+        monkeypatch.delenv("MEWBO_STORAGE_DRIVER", raising=False)
+
         cfg_path = tmp_path / "app.json"
         AppConfig.model_validate(
             {
@@ -449,7 +454,7 @@ class TestCreateProjectStoreFactory:
         fake_client.__getitem__ = MagicMock(return_value=fake_db)
 
         with patch(
-            "mewbo_core.project_store.MongoProjectStore.__init__", return_value=None
+            "mewbo_core.workspaces.project_store.MongoProjectStore.__init__", return_value=None
         ) as m_init:
             create_project_store()
             assert m_init.called
@@ -460,7 +465,7 @@ class TestCreateProjectStoreFactory:
 # ---------------------------------------------------------------------------
 class TestVirtualProjectDataclass:
     def test_default_path_source_is_auto(self):
-        from mewbo_core.project_store import _utc_now
+        from mewbo_core.workspaces.project_store import _utc_now
 
         vp = VirtualProject(
             project_id="id",
@@ -628,7 +633,7 @@ class TestDeleteWorktree:
 
 class TestVirtualProjectWorktreeDataclass:
     def test_default_path_source_is_auto(self):
-        from mewbo_core.project_store import _utc_now
+        from mewbo_core.workspaces.project_store import _utc_now
 
         vp = VirtualProject(
             project_id="wt:parent:branch",

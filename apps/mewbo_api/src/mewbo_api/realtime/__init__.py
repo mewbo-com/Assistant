@@ -3,10 +3,9 @@
 ``init_realtime`` registers ``POST /v1/draft/stream`` — the session-full,
 token-streaming, tool-light draft path (write-behind persistence).
 
-The no-loop structured synthesis lane (formerly ``POST /v1/structured/fast``) now
-lives as ``mode: "synthesis"`` on ``POST /v1/structured``; this package
-still owns the shared ``RealtimeSessionRecorder`` + ``WikiGroundingProvider`` glue
-it reuses.
+The no-loop structured synthesis lane lives as ``mode: "synthesis"`` on
+``POST /v1/structured``; this package owns the shared
+``RealtimeSessionRecorder`` + ``WikiGroundingProvider`` glue it reuses.
 
 Controller wiring (one line in ``backend.py``)::
 

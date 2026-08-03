@@ -18,12 +18,12 @@ if shutil.which("git") is None:  # pragma: no cover - CI environments without gi
     pytest.skip("git not installed", allow_module_level=True)
 
 from mewbo_core.config import reset_config, set_config_override
-from mewbo_core.project_store import (
+from mewbo_core.workspaces.project_store import (
     JsonProjectStore,
     VirtualProject,
     worktree_project_id,
 )
-from mewbo_core.worktree import (
+from mewbo_core.workspaces.worktree import (
     MEWBO_BRANCH_PREFIX,
     WORKTREES_DIR,
     WorktreeBranchInUseError,
@@ -398,17 +398,17 @@ def test_create_raises_branch_in_use_when_branch_already_checked_out(
 def test_create_branch_in_use_independent_of_git_stderr(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Regression guard for issue: the structured pre-check — NOT git's
-    translatable stderr — is what raises ``WorktreeBranchInUseError``.
+    """The structured pre-check — NOT git's translatable stderr — is what
+    raises ``WorktreeBranchInUseError``.
 
     Git reworded this message (``already checked out at`` →
-    ``already used by worktree at``) in 2.54, silently downgrading the
-    exception to a bare ``RuntimeError`` on CI. Neutralise the stderr regex so
+    ``already used by worktree at``) in 2.54, which silently downgrades the
+    exception to a bare ``RuntimeError``. Neutralise the stderr regex so
     it can never match (simulating that rewording, or a non-English git
     locale); ``create`` must STILL raise the structured error for an
     already-checked-out branch, proving it no longer depends on the wording.
     """
-    import mewbo_core.worktree as worktree_mod
+    import mewbo_core.workspaces.worktree as worktree_mod
 
     # A pattern that can never match any stderr — as if git reworded again.
     monkeypatch.setattr(worktree_mod, "_BRANCH_IN_USE_RE", re.compile(r"(?!)"))

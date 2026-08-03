@@ -58,6 +58,9 @@ class _RecordingSink:
     def spawn(self, item: TranscriptItem) -> None:
         self.calls.append(("spawn", item))
 
+    def append_panel(self, item: TranscriptItem) -> None:
+        self.calls.append(("append_panel", item))
+
     def set_status(self, label: str) -> None:
         self.calls.append(("set_status", label))
 
@@ -331,9 +334,9 @@ def test_completion_blocked_code_overrides_completed_done_reason() -> None:
 
     The loop leaves ``done_reason`` at ``"completed"`` for a run that hit an
     unrecovered repo/network/permission/quota wall, carrying the wall
-    separately as ``blocked_code`` — the false-success regression: reading
-    ``done_reason`` alone (the historical hub behaviour, a raw passthrough)
-    rendered this straight through to the fleet panel as a clean green ✓.
+    separately as ``blocked_code``. Reading ``done_reason`` alone (a raw
+    passthrough) renders this straight through to the fleet panel as a clean
+    green ✓.
     """
     clock = _Clock()
     hub = AgentTranscriptHub(clock=clock)
@@ -375,7 +378,7 @@ def test_completion_halt_and_verification_failure_map_to_unmet_goal() -> None:
         assert hub.transcript(ROOT).status == "unmet_goal"  # type: ignore[union-attr]
 
 
-# --- fleet rollups (Phase 2) --------------------------------------
+# --- fleet rollups ------------------------------------------------
 
 
 def test_llm_call_end_rolls_up_root_tokens() -> None:
@@ -484,6 +487,98 @@ def test_items_for_projects_entries_in_order() -> None:
     assert "probe" in items[2].payload["text"]
 
     assert hub.items_for("nonexistent") == []
+
+
+# --- generative UI panels (alt-text degradation) --------------------------
+#
+# A terminal cannot draw the component tree a ``generative_ui`` event carries,
+# which is exactly why the event also carries ``alt_text`` — the tree rendered
+# as prose, server-side. These tests pin that the CLI shows it.
+#
+# The bug they close was a LAYER confusion worth remembering: the renderer
+# registry's generic fallback (``seams._default_message_renderer``) does handle
+# an unknown ITEM KIND, so this looked already-safe. But an item is only ever
+# minted by the hub's ``_dispatch``, whose if/elif chain had no arm for the
+# event — so no item existed, the fallback was never reached, and the panel was
+# dropped in silence. A renderer alone would have been dead code.
+
+
+def _panel(hub: AgentTranscriptHub, *, alt_text: Any = "Deploys: 3 failed",
+           summary: str = "deploy status", sid: str = "s") -> None:
+    hub.observe(
+        sid,
+        {"type": "generative_ui",
+         "payload": {"ui_id": "gui-1", "session_id": sid, "alt_text": alt_text,
+                     "summary": summary,
+                     "spec": {"root": [{"component": "Text", "props": {"text": "x"}}]}}},
+    )
+
+
+def test_a_panel_renders_its_alt_text_not_its_component_tree() -> None:
+    hub = AgentTranscriptHub()
+    _delta(hub, "checking", step=0)
+    _panel(hub)
+
+    items = hub.items_for(ROOT)
+    assert [it.kind for it in items] == ["assistant", "notice"]
+    text = items[1].payload["text"]
+    assert "Deploys: 3 failed" in text
+    assert "deploy status" in text
+    # The tree is never read — a terminal has no renderer for it.
+    assert "component" not in text
+
+
+def test_a_panel_reaches_the_live_root_sink() -> None:
+    """Drill-in parity is not enough — the live transcript must show it too."""
+    sink = _RecordingSink()
+    hub = AgentTranscriptHub(sink=sink)
+    _delta(hub, "checking", step=0)
+    _panel(hub)
+
+    panels = [c for c in sink.calls if c[0] == "append_panel"]
+    assert len(panels) == 1
+    assert "Deploys: 3 failed" in panels[0][1].payload["text"]
+
+
+def test_a_panel_closes_the_open_narration_span() -> None:
+    """Otherwise it lands inside the streaming slot and the next delta eats it."""
+    sink = _RecordingSink()
+    hub = AgentTranscriptHub(sink=sink)
+    _delta(hub, "checking", step=0)
+    _panel(hub)
+
+    kinds = [c[0] for c in sink.calls]
+    assert kinds.index("stream_end") < kinds.index("append_panel")
+
+
+def test_a_panel_from_a_sub_agent_stays_out_of_the_root_lane() -> None:
+    """Root narration only — the same rule every other sub-agent signal follows."""
+    sink = _RecordingSink()
+    hub = AgentTranscriptHub(sink=sink)
+    hub.observe("s", {"type": "agent_message_delta",
+                      "payload": {"agent_id": CHILD, "depth": 1, "text": "hi", "step": 0}})
+    _panel(hub)
+
+    assert [c for c in sink.calls if c[0] == "append_panel"] == []
+    assert [it.kind for it in hub.items_for(CHILD)] == ["assistant", "notice"]
+
+
+def test_an_empty_or_malformed_panel_is_dropped_not_rendered_blank() -> None:
+    """A panel that degrades to nothing reads as a rendering failure."""
+    hub = AgentTranscriptHub()
+    _delta(hub, "checking", step=0)
+    for bad in ("", "   ", None, 5, {"nested": "thing"}):
+        _panel(hub, alt_text=bad)
+
+    assert [it.kind for it in hub.items_for(ROOT)] == ["assistant"]
+
+
+def test_a_panel_with_no_summary_still_renders_its_text() -> None:
+    hub = AgentTranscriptHub()
+    _delta(hub, "checking", step=0)
+    _panel(hub, summary="")
+
+    assert "Deploys: 3 failed" in hub.items_for(ROOT)[1].payload["text"]
 
 
 # --- authoritative todos ingest + throughput + card suppression ----

@@ -136,6 +136,28 @@ def test_scope_rejects_malformed(raw: str) -> None:
         CredentialScope.from_slug(raw)
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "git.home",  # private TLD
+        "localhost",  # no dot at all — a single-label host is legal
+        "my-workspace",  # a catalog project's slug is shape-identical to a host
+        "git.home:8443",  # host:port — the FE's hostOf keeps the port (u.host)
+        "git.home:8443/org/repo",
+        "org/repo",  # legacy 2-segment slug
+        "gitlab.com/group/subgroup/project",  # subgroup
+    ],
+)
+def test_scope_accepts_every_real_world_shape(raw: str) -> None:
+    """The rejected set is NARROW on purpose.
+
+    Every shape here exists in real stored data. An over-strict validator would
+    make an existing credential un-listable and un-deletable — a far worse
+    failure than letting an odd-but-harmless key through.
+    """
+    assert CredentialScope.from_slug(raw).value == raw
+
+
 def test_scope_coerce_is_tolerant_on_read_paths() -> None:
     """READ paths degrade to "no scope" rather than blowing up a would-be clone."""
     assert CredentialScope.coerce("") is None
@@ -597,8 +619,8 @@ def test_resolve_chain_keeps_same_value_different_username(tmp_path: Path) -> No
         ),
         ("fatal: unable to access '...': Could not resolve host: git.home", False),
         ("fatal: the remote end hung up unexpectedly", False),
-        # L1 regression: a bare "403"/"401" substring in a NETWORK error must
-        # NOT read as an auth failure (this is what misfired the chain before).
+        # A bare "403"/"401" substring in a NETWORK error must NOT read as an
+        # auth failure — treating it as one misfires the credential chain.
         (
             "fatal: unable to connect to git.home:\n"
             "git.home[0:1.2.3.4]: errno=Connection refused port 8403",

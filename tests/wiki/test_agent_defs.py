@@ -1,7 +1,7 @@
 """tests/wiki/test_agent_defs.py"""
 from pathlib import Path
 
-from mewbo_core.agent_registry import parse_agent_def
+from mewbo_core.agents.agent_registry import parse_agent_def
 
 WIKI_AGENTS_DIR = Path(
     "packages/mewbo_graph/src/mewbo_graph/plugins/wiki/agents"
@@ -16,7 +16,7 @@ def test_wiki_indexer_agent_def_loads():
     expected_tools = {
         "wiki_clone_repo", "wiki_scan_tree", "wiki_load_grounder",
         "wiki_commit_plan", "wiki_finalize", "wiki_submit_insight",
-        "spawn_agent", "check_agents", "read_file", "glob", "grep", "ls",
+        "spawn_agent", "check_agents", "read_file",
     }
     actual_tools = set(agent_def.allowed_tools or [])
     assert expected_tools.issubset(actual_tools), \
@@ -39,7 +39,7 @@ def test_wiki_page_writer_agent_def_loads():
     agent_def = parse_agent_def(path, source="plugin:wiki")
     assert agent_def is not None
     assert agent_def.name == "wiki-page-writer"
-    expected_tools = {"read_file", "glob", "grep", "wiki_submit_page"}
+    expected_tools = {"read_file", "wiki_submit_page"}
     actual_tools = set(agent_def.allowed_tools or [])
     assert expected_tools.issubset(actual_tools)
     assert "wiki_submit_page" in agent_def.body
@@ -84,6 +84,28 @@ def test_wiki_qa_probe_agent_def_loads():
         assert kw in agent_def.body
 
 
+def test_wiki_qa_fast_agent_def_loads():
+    """wiki-qa-fast is the fast-mode root: holds the probe's retrieval surface
+    itself plus wiki_emit_answer, with no fan-out."""
+    path = WIKI_AGENTS_DIR / "wiki-qa-fast.md"
+    agent_def = parse_agent_def(path, source="plugin:wiki")
+    assert agent_def is not None
+    assert agent_def.name == "wiki-qa-fast"
+    tools = set(agent_def.allowed_tools or [])
+    expected_tools = {"wiki_query_graph", "wiki_graph_neighbors", "wiki_code_search",
+                      "wiki_search_pages", "wiki_read_page", "wiki_read_file",
+                      "wiki_grep", "wiki_list_files", "wiki_submit_insight",
+                      "wiki_emit_answer"}
+    assert tools == expected_tools, f"tools must match QA_FAST_TOOLS exactly: {tools}"
+    # No hypervisor fan-out on this path — it retrieves and answers itself.
+    assert "spawn_agent" not in tools
+    assert "check_agents" not in tools
+    assert "spawn_agent" in set(agent_def.denied_tools or [])
+    assert "check_agents" in set(agent_def.denied_tools or [])
+    for kw in ["wiki_emit_answer", "no probe fleet", "sources"]:
+        assert kw in agent_def.body
+
+
 def test_plugin_manifest_lists_all_agents():
     """plugin.json declares every wiki agent, including the QA probe leaf."""
     import json
@@ -95,6 +117,7 @@ def test_plugin_manifest_lists_all_agents():
     assert "agents/wiki-page-writer.md" in agent_paths
     assert "agents/wiki-qa.md" in agent_paths
     assert "agents/wiki-qa-probe.md" in agent_paths
+    assert "agents/wiki-qa-fast.md" in agent_paths
 
 
 def test_wiki_enricher_agent_def_loads():
@@ -102,7 +125,7 @@ def test_wiki_enricher_agent_def_loads():
     agent_def = parse_agent_def(path, source="plugin:wiki")
     assert agent_def is not None
     assert agent_def.name == "wiki-enricher"
-    expected_tools = {"read_file", "grep", "wiki_query_graph", "mint_entity",
+    expected_tools = {"read_file", "wiki_query_graph", "mint_entity",
                       "relate_entities", "resolve_entity"}
     assert expected_tools.issubset(set(agent_def.allowed_tools or []))
     for kw in ["mint_entity", "relate_entities", "AST", "source prose"]:
@@ -143,11 +166,26 @@ def test_indexer_page_writer_spawn_grants_entity_tools():
     import re
 
     body = (WIKI_AGENTS_DIR / "wiki-indexer.md").read_text()
-    # The page-writer spawn block names allowed_tools=[...]; pull the LAST one
-    # (the page-writer fan-out spawn) and parse its id list.
-    matches = re.findall(r"allowed_tools=\[([^\]]*)\]", body)
-    assert matches, "indexer playbook declares no spawn allowed_tools"
-    spawn_tools = {t.strip().strip('"').strip("'") for t in matches[-1].split(",")}
+    # The playbook fans out via spawn_agents(tasks=[{"agent_type": ..., ...,
+    # "allowed_tools": [...], ...}, ...]) — one dict entry per source unit /
+    # page. Pair each entry's "agent_type" with ITS OWN "allowed_tools" (the
+    # non-greedy DOTALL match stops at the first allowed_tools after that
+    # agent_type, i.e. the one inside the same dict) and select by name —
+    # never positionally — so this stays correct regardless of how many
+    # spawn_agents blocks the playbook grows or what order they appear in.
+    pairs = re.findall(
+        r'"agent_type":\s*"([^"]+)".*?"allowed_tools":\s*\[([^\]]*)\]',
+        body,
+        re.DOTALL,
+    )
+    assert pairs, "indexer playbook declares no spawn_agents allowed_tools"
+    page_writer_tools = {
+        tools for agent_type, tools in pairs if agent_type == "wiki-page-writer"
+    }
+    assert page_writer_tools, "indexer playbook has no wiki-page-writer spawn entry"
+    spawn_tools = {
+        t.strip().strip('"').strip("'") for t in next(iter(page_writer_tools)).split(",")
+    }
     assert {"resolve_entity", "wiki_submit_insight", "wiki_submit_page"}.issubset(
         spawn_tools
     ), f"page-writer spawn missing entity tools: {spawn_tools}"

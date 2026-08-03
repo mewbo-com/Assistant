@@ -14,8 +14,8 @@ from uuid import uuid4
 
 from mewbo_core.common import get_logger
 from mewbo_core.config import get_config, get_config_value, get_version
-from mewbo_core.run_error import render_exception
-from mewbo_core.types import JsonValue
+from mewbo_core.contracts.run_error import render_exception
+from mewbo_core.contracts.types import JsonValue
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from langfuse.langchain import CallbackHandler as LangfuseCallbackHandler
@@ -191,6 +191,139 @@ def _build_langfuse_trace_context(
     return cast(TraceContext, {"trace_id": trace_id})
 
 
+@dataclass(frozen=True, slots=True)
+class LangfuseTraceLink:
+    """The trace — and the observation inside it — a new span must attach to.
+
+    ``trace_context`` is the ONLY channel through which a span can name a
+    parent observation, and naming one is not optional: given a ``trace_id``
+    with no ``parent_span_id`` the SDK mints a RANDOM 16-hex span id, wraps it
+    in a ``NonRecordingSpan`` and parents the new span to it, so the exported
+    ``parentObservationId`` points at an observation that is never sent. Every
+    span opened that way is an orphan by construction, at every depth — which
+    is why a span tree built from those spans cannot be walked root→child and
+    per-agent token attribution from a trace alone is impossible.
+
+    The cure is to pass ``trace_context`` only where it buys something:
+
+    - **Inside one task**, ambient OTel context already carries the enclosing
+      span, so a nested span needs no ``trace_context`` at all — omitting it is
+      what makes it a real child rather than a phantom-parented root.
+    - **Across an ``asyncio.create_task`` boundary**, the spawning span is no
+      longer the ambient one by the time the child opens its first span. There
+      the link must be captured on the spawning side and handed over, which is
+      the one case where an explicit ``parent_span_id`` is the right answer.
+    - **With nothing ambient at all** (the first span of an invocation) the
+      trace id still has to be pinned, so the phantom parent is unavoidable —
+      it lands once, on a genuine trace root, instead of on every span.
+
+    Every read of live tracer state is best-effort: tracing is a side effect at
+    the edge, so a link that cannot be captured degrades to ``None`` and the
+    span falls back to the behaviour it had before rather than failing a run.
+    """
+
+    trace_id: str
+    parent_span_id: str | None = None
+
+    @classmethod
+    def from_trace_context(cls, trace_context: TraceContext | None) -> LangfuseTraceLink | None:
+        """Read a link out of the SDK's ``TraceContext`` mapping, if it holds one."""
+        if not trace_context:
+            return None
+        trace_id = trace_context.get("trace_id")
+        if not trace_id:
+            return None
+        return cls(trace_id=trace_id, parent_span_id=trace_context.get("parent_span_id"))
+
+    @classmethod
+    def current(cls) -> LangfuseTraceLink | None:
+        """The link bound to this context by :func:`langfuse_session_context`."""
+        return cls.from_trace_context(_LANGFUSE_TRACE_CONTEXT.get())
+
+    @classmethod
+    def capture(cls) -> LangfuseTraceLink | None:
+        """Capture the span a task started from HERE, before the task starts.
+
+        Call this on the spawning side of an ``asyncio.create_task`` boundary,
+        while the spawning span is still ambient. The live ambient observation
+        wins; a context with no ambient span falls back to whatever link is
+        already bound, so capturing twice down one spawn path is idempotent
+        rather than parent-erasing.
+        """
+        bound = cls.current()
+        trace_id, span_id = cls._ambient_ids()
+        if trace_id and span_id:
+            return cls(trace_id=trace_id, parent_span_id=span_id)
+        return bound
+
+    @staticmethod
+    def _ambient_ids() -> tuple[str | None, str | None]:
+        """``(trace_id, observation_id)`` of the live ambient span, best-effort."""
+        try:
+            from langfuse import get_client
+
+            client = get_client()
+            trace_id = client.get_current_trace_id()
+            span_id = client.get_current_observation_id()
+        except Exception:  # pragma: no cover - defensive
+            return None, None
+        if not isinstance(trace_id, str) or not isinstance(span_id, str):
+            return None, None
+        return trace_id, span_id
+
+    def as_trace_context(self) -> TraceContext:
+        """Render this link as the mapping the Langfuse SDK accepts."""
+        ctx: dict[str, str] = {"trace_id": self.trace_id}
+        if self.parent_span_id:
+            ctx["parent_span_id"] = self.parent_span_id
+        return cast(TraceContext, ctx)
+
+    def trace_context_for_new_span(self) -> TraceContext | None:
+        """What a span opening under this link should pass as ``trace_context``.
+
+        ``None`` means "nest ambiently" — the enclosing span of this same trace
+        is already current, so OTel parents the new span for free and passing a
+        context would replace that real parent with a phantom one.
+        """
+        ambient_trace_id, ambient_span_id = self._ambient_ids()
+        if ambient_span_id and ambient_trace_id == self.trace_id:
+            return None
+        return self.as_trace_context()
+
+    @contextmanager
+    def bind(self) -> Iterator[None]:
+        """Bind this link for the duration of the block.
+
+        ``asyncio.create_task`` copies the calling context, so a task created
+        inside this block carries the link and opens its first span as a real
+        child of the captured observation.
+        """
+        token = _LANGFUSE_TRACE_CONTEXT.set(self.as_trace_context())
+        try:
+            yield
+        finally:
+            _LANGFUSE_TRACE_CONTEXT.reset(token)
+
+
+@contextmanager
+def langfuse_child_task_link(link: LangfuseTraceLink | None = None) -> Iterator[None]:
+    """Hand a parent span to tasks created inside this block.
+
+    The one seam for the ``asyncio.create_task`` boundary. It takes both shapes
+    the boundary comes in: pass a *link* captured earlier when the task is
+    launched somewhere other than where it was spawned (a deferred unit), or
+    omit it to capture the ambient span right here. Either way it degrades to a
+    plain no-op when there is nothing to hand over — Langfuse disabled, or no
+    trace bound to this context.
+    """
+    resolved = link if link is not None else LangfuseTraceLink.capture()
+    if resolved is None:
+        yield
+        return
+    with resolved.bind():
+        yield
+
+
 # -- Propagation & spans ------------------------------------------------
 # ``langfuse_propagate`` is defined *before* ``langfuse_session_context``
 # because the latter calls it.
@@ -315,8 +448,8 @@ def langfuse_trace_span(
     if not status.enabled:
         yield None
         return
-    trace_context = _LANGFUSE_TRACE_CONTEXT.get()
-    if not trace_context:
+    link = LangfuseTraceLink.current()
+    if link is None:
         yield None
         return
     try:
@@ -330,10 +463,14 @@ def langfuse_trace_span(
     cm = None
     try:
         langfuse = get_client()
+        # ``None`` here is the load-bearing case, not a degradation: it means an
+        # enclosing span of this trace is ambient, so OTel parents this one for
+        # real. Passing a context unconditionally is what parented every span to
+        # a freshly-minted id that was never exported.
         cm = langfuse.start_as_current_observation(
             as_type="span",
             name=name,
-            trace_context=trace_context,
+            trace_context=link.trace_context_for_new_span(),
         )
         span = cm.__enter__()
         if span is not None:
@@ -380,7 +517,7 @@ def _span_status_message(exc) -> str:
     reads in a trace exactly like a failure nobody classified. The type name is
     always present, so it is the floor.
 
-    Delegates to :func:`mewbo_core.run_error.render_exception`, the SAME
+    Delegates to :func:`mewbo_core.contracts.run_error.render_exception`, the SAME
     renderer ``llm_resilience.py:LlmResilienceExhausted.describe_error`` uses,
     so the two records of one failure never disagree.
     """
@@ -472,7 +609,9 @@ def _attach_langfuse_metadata(
 
 __all__ = [
     "ComponentStatus",
+    "LangfuseTraceLink",
     "build_langfuse_handler",
+    "langfuse_child_task_link",
     "format_component_status",
     "langfuse_invoke_config",
     "langfuse_propagate",

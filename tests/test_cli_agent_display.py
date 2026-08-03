@@ -10,9 +10,9 @@ from mewbo_cli.cli_agent_display import (
     AgentDisplayState,
     _format_elapsed,
 )
+from mewbo_core.agents.hypervisor import AgentHandle
 from mewbo_core.classes import ActionStep
 from mewbo_core.common import MockSpeaker
-from mewbo_core.hypervisor import AgentHandle
 from rich.console import Console
 from rich.panel import Panel
 
@@ -424,7 +424,7 @@ class TestThreadSafety:
 
 
 class TestNewLifecycleStates:
-    """Ref: [A2A v1.0] Expanded agent status states."""
+    """Expanded agent status states."""
 
     def test_submitted_state_renders(self):
         import re

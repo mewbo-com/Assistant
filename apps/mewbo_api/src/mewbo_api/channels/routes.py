@@ -13,18 +13,17 @@ acknowledged — no events are appended, no LLM runs are started.
 
 from __future__ import annotations
 
-import os
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, final
 
 from flask import Blueprint, Flask, request
 from mewbo_core.common import get_logger
-from mewbo_core.config import get_config
-from mewbo_core.exit_plan_mode import session_temp_dir
 from mewbo_core.permissions import auto_approve
-from mewbo_core.token_budget import get_token_budget
+from mewbo_core.session.token_budget import get_token_budget
+from mewbo_core.tooling.exit_plan_mode import session_temp_dir
+from mewbo_core.workspaces.project_catalog import ProjectCatalog, ProjectEntry
 
 from mewbo_api.auth.guard_registry import guard
 from mewbo_api.channels.base import (
@@ -36,9 +35,9 @@ from mewbo_api.channels.nextcloud_talk import NextcloudTalkAdapter
 
 if TYPE_CHECKING:
     from mewbo_core.config import AppConfig
+    from mewbo_core.contracts.types import EventRecord
     from mewbo_core.hooks import HookManager
-    from mewbo_core.session_runtime import SessionRuntime
-    from mewbo_core.types import EventRecord
+    from mewbo_core.loop.session_runtime import SessionRuntime
 
 logger = get_logger(name="channels.routes")
 
@@ -52,6 +51,104 @@ _dedup: DeduplicationGuard = DeduplicationGuard()
 
 # Matches ``/command`` or ``/command args`` after the trigger keyword.
 _COMMAND_RE = re.compile(r"/([\w-]+)[^\S\n]*(.*)")
+
+
+@final
+class ChannelProjectContext:
+    """A channel session's project: how it is listed, switched, and read back.
+
+    One atomic class because the three must agree on the KEYS. The shared reader
+    every other surface goes through (``backend._resolve_session_cwd`` — the diff
+    endpoints, ``/message`` re-engage, a console ``/query`` into the same
+    session) reads ``cwd``/``project``, so ``/switch-project`` writes exactly
+    those. A channel-private pair would leave a room that switched project
+    reporting the wrong directory everywhere except its own next message, and a
+    console follow-up running the turn somewhere else entirely — which is why
+    ``active_project``/``active_project_cwd`` survive only as a READ fallback for
+    rooms whose transcripts already carry them.
+
+    Both collaborators are injected because both live one layer up: the catalog
+    is composed at the API's composition root, and the shared cwd resolution is
+    ``backend``'s — which imports this module, so reaching back for either would
+    cycle. Both arrive as CALLABLES rather than as the objects themselves, the
+    same late-binding the session-spec store uses: the suite swaps the runtime
+    and the project store wholesale, so a catalog captured at wiring time would
+    keep answering from stores the process has already replaced. With neither
+    bound (a test wiring only the adapters) every method degrades to the
+    behaviour of a deployment with no projects, never a raise.
+    """
+
+    def __init__(
+        self,
+        *,
+        catalog_source: Callable[[], ProjectCatalog] | None = None,
+        resolve_session_cwd: Callable[[str], str | None] | None = None,
+    ) -> None:
+        """Bind the project catalog source and the shared session-cwd resolution."""
+        self.catalog_source = catalog_source
+        self.resolve_session_cwd = resolve_session_cwd
+
+    def choices(self) -> tuple[ProjectEntry, ...]:
+        """Every project a room can switch to — the ones on disk right now."""
+        if self.catalog_source is None:
+            return ()
+        return tuple(entry for entry in self.catalog_source().entries() if entry.runnable)
+
+    def find(self, key: str) -> ProjectEntry | None:
+        """The entry a room named, or ``None``. Never raises."""
+        return self.catalog_source().find(key) if self.catalog_source is not None else None
+
+    def format_list(self, header: str) -> str:
+        """Render *header* followed by the switchable projects as a markdown list.
+
+        Lists each project by its catalog KEY rather than a display name, because
+        the key is what ``/switch-project`` takes back — a managed project shown
+        as its bare name would read as switchable and then not resolve.
+        """
+        entries = self.choices()
+        lines = [header, "", "**Available projects:**"]
+        lines.extend(
+            f"- `{entry.key}`" + (f" — {entry.description}" if entry.description else "")
+            for entry in entries
+        )
+        if not entries:
+            lines.append("- _(none configured)_")
+        return "\n".join(lines)
+
+    def cwd_for(
+        self,
+        session_id: str,
+        load_transcript: Callable[[], Sequence[Mapping[str, Any]]],
+    ) -> str | None:
+        """The session's working directory: the SHARED resolution, then ``active_project_cwd``.
+
+        Read both spellings, write only the shared one — a room whose transcript
+        carries only ``active_project_cwd`` keeps resolving off what it already
+        has, with nothing to migrate. The transcript arrives as a LAZY loader so
+        the second leg costs a read only when the shared one misses.
+        """
+        if self.resolve_session_cwd is not None:
+            shared = self.resolve_session_cwd(session_id)
+            if shared:
+                return shared
+        return self._legacy_cwd(load_transcript())
+
+    @staticmethod
+    def _legacy_cwd(transcript: Sequence[Mapping[str, Any]]) -> str | None:
+        """The channel-private ``active_project_cwd`` key; newest event wins."""
+        for event in reversed(transcript):
+            if event.get("type") != "context":
+                continue
+            payload = event.get("payload")
+            if isinstance(payload, dict) and payload.get("active_project_cwd"):
+                return str(payload["active_project_cwd"])
+        return None
+
+
+# Injected by ``init_channels()`` alongside ``_runtime``; see the class docstring
+# for why the catalog and the shared resolution are handed in rather than reached
+# for.
+_projects = ChannelProjectContext()
 
 
 # ------------------------------------------------------------------
@@ -130,19 +227,20 @@ def _cmd_usage(ctx: CommandContext) -> str:
 @command("new", "Start a fresh conversation")
 def _cmd_new(ctx: CommandContext) -> str:
     assert _runtime is not None  # noqa: S101
-    new_id = _runtime.session_store.create_session()
-    _runtime.session_store.tag_session(new_id, ctx.tag)
-    _runtime.session_store.append_event(
+    # Deliberately mint-then-RE-POINT rather than ``resolve_session(session_tag=)``:
+    # resolving the tag would hand back the very conversation this command exists
+    # to leave behind. The tag follows the new session; the old one keeps its
+    # transcript and simply stops being what the room resolves to.
+    new_id = _runtime.resolve_session()
+    _runtime.tag_session(new_id, ctx.tag)
+    _runtime.append_context_event(
         new_id,
         {
-            "type": "context",
-            "payload": {
-                "source_platform": ctx.message.platform,
-                "channel_id": ctx.message.channel_id,
-                "thread_id": ctx.message.thread_id,
-                "sender": ctx.message.sender_name,
-                "room": ctx.message.room_name,
-            },
+            "source_platform": ctx.message.platform,
+            "channel_id": ctx.message.channel_id,
+            "thread_id": ctx.message.thread_id,
+            "sender": ctx.message.sender_name,
+            "room": ctx.message.room_name,
         },
     )
     return "Fresh conversation started. Previous context cleared."
@@ -151,36 +249,30 @@ def _cmd_new(ctx: CommandContext) -> str:
 @command("switch-project", "Switch project context (`<name>`)")
 def _cmd_switch_project(ctx: CommandContext) -> str:
     assert _runtime is not None  # noqa: S101
-    projects = get_config().projects
-    available = {n: c for n, c in projects.items() if c.path and os.path.isdir(c.path)}
     if not ctx.args:
-        return _format_project_list(available, "Usage: `/switch-project <name>`")
-    if ctx.args not in available:
-        return _format_project_list(available, f"Unknown project **{ctx.args}**.")
-    chosen = available[ctx.args]
+        return _projects.format_list("Usage: `/switch-project <name>`")
+    entry = _projects.find(ctx.args)
+    if entry is None or not entry.path or not entry.available:
+        return _projects.format_list(f"Unknown project **{ctx.args}**.")
     _runtime.session_store.append_event(
         ctx.session_id,
         {
             "type": "context",
             "payload": {
                 "source_platform": ctx.message.platform,
-                "active_project": ctx.args,
-                "active_project_cwd": chosen.path,
+                # The SHARED keys — the ones every other surface's cwd
+                # resolution reads. The room-local ``active_project``/
+                # ``active_project_cwd`` pair is invisible outside this module, so
+                # writing only that pair leaves a switched room reporting the
+                # wrong directory on the diff endpoints and running a console
+                # follow-up in the wrong place. That pair is still READ
+                # (:meth:`ChannelProjectContext.cwd_for`); it is never written.
+                "project": entry.key,
+                "cwd": entry.path,
             },
         },
     )
-    return f"Switched to project **{ctx.args}** (`{chosen.path}`)."
-
-
-def _format_project_list(projects: dict[str, Any], header: str) -> str:
-    """Format available projects as a markdown list."""
-    lines = [header, "", "**Available projects:**"]
-    for name, cfg in projects.items():
-        desc = f" — {cfg.description}" if cfg.description else ""
-        lines.append(f"- `{name}`{desc}")
-    if not projects:
-        lines.append("- _(none configured)_")
-    return "\n".join(lines)
+    return f"Switched to project **{entry.key}** (`{entry.path}`)."
 
 
 # ------------------------------------------------------------------
@@ -218,21 +310,21 @@ def _process_inbound(
     else:
         tag = f"{platform}:room:{message.channel_id}"
 
-    session_id = _runtime.session_store.resolve_tag(tag)
-    if session_id is None:
-        session_id = _runtime.session_store.create_session()
-        _runtime.session_store.tag_session(session_id, tag)
-        _runtime.session_store.append_event(
+    # ``resolve_session`` is the one resolve-or-create seam. The pre-read stays
+    # because only a JUST-MINTED session gets the channel-identity context event:
+    # re-writing it per message would let a later sender/room silently overwrite
+    # the pair the conversation was opened with.
+    existing = _runtime.session_store.resolve_tag(tag)
+    session_id = _runtime.resolve_session(session_tag=tag)
+    if existing is None:
+        _runtime.append_context_event(
             session_id,
             {
-                "type": "context",
-                "payload": {
-                    "source_platform": platform,
-                    "channel_id": message.channel_id,
-                    "thread_id": message.thread_id,
-                    "sender": message.sender_name,
-                    "room": message.room_name,
-                },
+                "source_platform": platform,
+                "channel_id": message.channel_id,
+                "thread_id": message.thread_id,
+                "sender": message.sender_name,
+                "room": message.room_name,
             },
         )
 
@@ -302,7 +394,10 @@ def _process_inbound(
         _runtime.enqueue_message(session_id, user_text)
         return {}, 200
 
-    project_cwd = _get_active_project_cwd(session_id) or session_temp_dir(session_id)
+    runtime = _runtime
+    project_cwd = _projects.cwd_for(
+        session_id, lambda: runtime.session_store.load_transcript(session_id)
+    ) or session_temp_dir(session_id)
     client_ctx = getattr(adapter, "system_context", None)
 
     _runtime.start_async(
@@ -383,24 +478,6 @@ def _strip_trigger(message: InboundMessage) -> str:
         return message.text
     pattern = re.compile(re.escape(keyword), re.IGNORECASE)
     return pattern.sub("", message.text, count=1).strip()
-
-
-# ------------------------------------------------------------------
-# Session context helpers
-# ------------------------------------------------------------------
-
-
-def _get_active_project_cwd(session_id: str) -> str | None:
-    """Read the active project CWD from the session's context events."""
-    assert _runtime is not None  # noqa: S101
-    events = _runtime.session_store.load_transcript(session_id)
-    for event in reversed(events):
-        if event.get("type") != "context":
-            continue
-        cwd = event.get("payload", {}).get("active_project_cwd")
-        if cwd:
-            return str(cwd)
-    return None
 
 
 # ------------------------------------------------------------------
@@ -535,14 +612,24 @@ def init_channels(
     runtime: SessionRuntime,
     hook_manager: HookManager,
     config: AppConfig,
+    *,
+    project_catalog: Callable[[], ProjectCatalog] | None = None,
+    resolve_session_cwd: Callable[[str], str | None] | None = None,
 ) -> None:
     """Wire channel adapters into the Flask app.
 
     Called once at API startup.  No-ops if no channels are configured.
+
+    *project_catalog* and *resolve_session_cwd* are the two project
+    collaborators ``/switch-project`` needs; both are composed in ``backend``,
+    which imports this module, so they arrive here rather than being reached
+    for. Both are optional so a test may wire the adapters alone.
     """
     global _runtime, _hook_manager  # noqa: PLW0603
     _runtime = runtime
     _hook_manager = hook_manager
+    _projects.catalog_source = project_catalog
+    _projects.resolve_session_cwd = resolve_session_cwd
 
     nc_cfg = config.channels.get("nextcloud-talk", {})
     if nc_cfg.get("enabled") and nc_cfg.get("bot_secret"):

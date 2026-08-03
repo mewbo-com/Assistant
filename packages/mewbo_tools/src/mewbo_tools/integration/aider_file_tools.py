@@ -121,11 +121,9 @@ class ReadFileTool(AbstractTool):
 
         DEFAULT_LINE_LIMIT = 2000
 
-        # Line-based windowing with line numbers
         lines = text.splitlines(keepends=True)
         total_lines = len(lines)
 
-        # Apply offset
         if request.offset > 0:
             lines = lines[request.offset :]
 
@@ -139,7 +137,6 @@ class ReadFileTool(AbstractTool):
         numbered_lines = []
         for i, line in enumerate(lines):
             line_num = request.offset + i + 1
-            # Strip trailing newline before adding number, then re-add
             stripped = line.rstrip("\n").rstrip("\r")
             numbered_lines.append(f"{line_num}\t{stripped}")
         text = "\n".join(numbered_lines)
@@ -152,11 +149,16 @@ class ReadFileTool(AbstractTool):
             if len(text) > request.max_bytes:
                 text = text[: request.max_bytes] + "\n... (truncated)"
 
+        # ``total_lines`` precedes ``text`` deliberately. A downstream cap that
+        # cuts the serialized envelope does so head-first, so the field that
+        # explains a short read must not sit after the field it explains — the
+        # model would otherwise receive a prefix indistinguishable from a whole
+        # small file, which is exactly how a truncation becomes silent.
         payload: dict[str, object] = {
             "kind": "file",
             "path": request.path,
-            "text": text,
             "total_lines": total_lines,
+            "text": text,
         }
         MockSpeaker = get_mock_speaker()
         return MockSpeaker(content=payload)

@@ -19,12 +19,16 @@
  * stable `SettingsCard id=` prop (it becomes the `<h2 id>` an
  * `aria-labelledby` region is named by — see `settings-plugins-installed` /
  * `settings-triggers` / `settings-managed-projects` in source). `ApiKeysView`
- * / `GitCredentialsView` (Security facet, owned by a concurrent workstream —
- * not touched here) set no such id, so their markers fall back to a
- * SettingsCard `title` that's static under this test's mocks (zero keys,
- * zero credentials). A facet present in `FACET_PANES` but missing from
- * `PANE_MARKERS` throws inside its own test — nobody can register a pane
- * without pinning what proves it rendered.
+ * (Security facet) sets no such id, so its marker falls back to a SettingsCard
+ * `title` that's static under this test's mocks (zero keys). `GitCredentialsView`
+ * moved to the Repositories facet, alongside `RepositoriesPane` (owned by a
+ * concurrent workstream, not touched here); its marker stays a `title`
+ * fallback for the same reason, and `RepositoriesPane`'s own marker is
+ * unverified until that component exists — the Repositories facet's own test
+ * fails on the missing module in the meantime, not on a marker mismatch. A
+ * facet present in `FACET_PANES` but missing from `PANE_MARKERS` throws
+ * inside its own test — nobody can register a pane without pinning what
+ * proves it rendered.
  *
  * Follows `SettingsView.integration.test.tsx`'s pattern: mount against the
  * REAL `configs/app.schema.json` (never a fixture snapshot) so a schema drift
@@ -67,11 +71,15 @@ const PANE_MARKERS: Partial<Record<FacetId, PaneMarker[]>> = {
   security: [
     { id: "settings-secrets-summary" }, // SecretsSummary
     { name: "Create a new key" }, // ApiKeysView
-    { name: "Git credentials" }, // GitCredentialsView
   ],
   // IdentityAccessPane, whose `fetchMe` mock below grants nothing, so it
   // settles into its no-permission branch — exactly the card this id names.
   access: [{ id: "settings-identity-access" }],
+  // RepositoriesPane doesn't exist yet (a concurrent workstream owns it), so
+  // its marker below is a placeholder — confirm or correct it once the
+  // component lands. Until then this facet's own test fails on the missing
+  // module, which is expected and not a marker problem.
+  repositories: [{ id: "settings-repositories" }, { name: "Git credentials" }],
   workspace: [{ id: "settings-managed-projects" }],
 };
 
@@ -184,9 +192,12 @@ vi.mock("../../api/triggers", async (orig) => {
   };
 });
 
-// Security facet -> GitCredentialsView. Stub its data hook + the wiki-projects
-// hint query; the panel's own network calls only fire on user interaction,
-// which this mount-only test never triggers.
+// Repositories facet -> GitCredentialsView (moved off Security) AND
+// RepositoriesPane, which reads the registry and joins the credential list.
+// Stub the data hooks; each pane's own network calls (put/delete/validate/
+// refresh) only fire on user interaction, which this mount-only test never
+// triggers. `useWikiPlatforms` is here because `AddRepositoryDialog` mounts
+// with the pane and previews the detected platform.
 vi.mock("../../hooks/useGitCredentials", () => ({
   useGitCredentials: () => ({
     credentials: [],
@@ -195,8 +206,42 @@ vi.mock("../../hooks/useGitCredentials", () => ({
     refresh: vi.fn(),
   }),
 }));
+vi.mock("../../hooks/useRepositories", () => ({
+  useRepositories: () => ({
+    repositories: [],
+    loading: false,
+    error: null,
+    refresh: vi.fn(),
+  }),
+  useCreateRepository: () => ({
+    mutate: vi.fn(),
+    reset: vi.fn(),
+    isPending: false,
+    error: null,
+  }),
+  useDeleteRepository: () => ({
+    mutate: vi.fn(),
+    isPending: false,
+    error: null,
+    variables: undefined,
+  }),
+  useCheckoutRepository: () => ({
+    mutate: vi.fn(),
+    mutateAsync: vi.fn(),
+    isPending: false,
+    error: null,
+    variables: undefined,
+  }),
+}));
 vi.mock("../wiki/api/hooks", () => ({
   useWikiProjects: () => ({ data: [] }),
+  useWikiPlatforms: () => ({ data: [] }),
+  useDeleteProject: () => ({ mutate: vi.fn(), isPending: false, error: null }),
+  useRequestWikiRefresh: () => ({
+    mutate: vi.fn(),
+    isPending: false,
+    variables: undefined,
+  }),
 }));
 
 // Agent facet -> SystemInstructionsPane. Stub its data hooks; save/preview
@@ -258,6 +303,10 @@ beforeAll(async () => {
     import("./panes/SystemInstructionsPane"),
     import("./panes/IdentityAccessPane"),
     import("../apps/AppsPane"),
+    // The heaviest entry in this list, and the one that most needs warming:
+    // it pulls the table plus three dialogs, so transforming it cold is what
+    // pushes the Repositories case past the budget first on a loaded machine.
+    import("./panes/RepositoriesPane"),
   ]);
 });
 
@@ -282,6 +331,16 @@ beforeEach(() => {
   // browser-location) router. Reset it so a prior test's click doesn't
   // deep-link this one into the wrong facet.
   window.history.replaceState({}, "", "/settings");
+});
+
+// Pure structural check, no rendering: `React.lazy(...)` construction never
+// touches the underlying module, so this stays green independent of whether
+// `RepositoriesPane` exists yet.
+describe("FACET_PANES facet-pane membership", () => {
+  test("moved git credentials off Security onto Repositories, alongside RepositoriesPane", () => {
+    expect(FACET_PANES.security).toHaveLength(2);
+    expect(FACET_PANES.repositories).toHaveLength(2);
+  });
 });
 
 describe("FACET_PANES registry — every entry mounts its pane(s)", () => {

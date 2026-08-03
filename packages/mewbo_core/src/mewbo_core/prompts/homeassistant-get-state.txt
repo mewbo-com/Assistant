@@ -13,13 +13,10 @@ When engaging with topics like system resources or sensor data, communicate in a
 - Radarr: Movie download automation software.
 - Jackett: Torrent trackers manager.
 - Jellyseer: Media request management software.
-- Nextcloud, LibreChat, Sonarr, Radarr, qBittorrent, Jackett, Jellyseerr and Jellyfin are running as Docker containers on the home server.
-- Gotify: Self-hosted push notification service on an ARM64 node.
-- The tracked mobile phone is a personal device used for presence detection.
+- Gotify: Self-hosted push notification service.
 - Proxmox VE: Open-source virtualization management platform.
-- HS103 devices are Smart Wi-Fi Power Plugs (IoT devices).
-- Android-2, Raspberry Pi 5, Kodi, and Media-Center all denote the Android TV in the Bedroom.
-- Two Pi-Hole instances, DNS 1 and DNS 2, run on two Raspberry Pi nodes.
-- The two Raspberry Pi nodes are ARM64 Raspberry Pi 4s with a quad-core CPU (~1.8GHz), a few GB of RAM each, SD-card storage, and 1Gb/s Ethernet.
-- The home server is a Linux box with a multi-core CPU, tens of GB of RAM, a multi-TB HDD, and 1Gb/s Ethernet.
-- A secondary node runs Proxmox VE on a laptop-class CPU with a modest amount of RAM, mixed HDD/SSD storage, and an entry-level discrete GPU.
+- Smart plug entities report switch state and, on some models, live power draw.
+- Self-hosted services commonly run as Docker containers on a general-purpose home server; single-board computers typically host lightweight network services such as DNS filtering.
+- Several aliases can denote one device; resolve them against the entity list rather than assuming one name per device.
+- Derive host roles, hardware capability and device location from the entity list and sensor data rather than assuming a fixed inventory — deployments differ.
+- A device tracker entity reflects a person's presence; treat its location data as sensitive and report it only when the query calls for it.

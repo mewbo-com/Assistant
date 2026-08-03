@@ -490,13 +490,13 @@ describe("ProjectSettingsDialog — errors stay inside the dialog", () => {
 });
 
 describe("ProjectSettingsDialog — credential coverage", () => {
-  it("reports the server-resolved credential and links to Security", async () => {
+  it("reports the server-resolved credential and links to Repositories", async () => {
     renderDialog();
     await awaitSeeded();
 
     expect(screen.getByText(/shared across this host/i)).toBeInTheDocument();
-    const link = screen.getByRole("link", { name: /security & access/i });
-    expect(link).toHaveAttribute("href", "/settings");
+    const link = screen.getByRole("link", { name: /repositories/i });
+    expect(link).toHaveAttribute("href", "/settings?facet=repositories");
   });
 
   it("says so when no stored credential covers the repo", async () => {

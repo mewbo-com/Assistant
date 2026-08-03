@@ -132,7 +132,7 @@ def test_system_reads_the_consolidated_endpoint():
 
 
 # ---------------------------------------------------------------------------
-# pipelines.* (Phase 2) — read-scoped list/invoke over the injected SDK
+# pipelines.* — read-scoped list/invoke over the injected SDK
 # ---------------------------------------------------------------------------
 
 

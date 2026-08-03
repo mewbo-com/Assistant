@@ -31,7 +31,7 @@ import asyncio
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from mewbo_core.worktree import WorktreeManager
+from mewbo_core.workspaces.worktree import WorktreeManager
 
 from mewbo_cli.cli_theme import DEFAULT_PALETTE, Palette
 from mewbo_cli.tui.status.context_meter import ContextMeter

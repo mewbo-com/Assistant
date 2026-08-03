@@ -35,15 +35,15 @@ from urllib.parse import urlparse
 from flask import request
 from flask_restx import Namespace, Resource, fields
 from mewbo_core.common import get_logger
-from mewbo_core.config import get_config, get_config_value
-from mewbo_core.exit_plan_mode import session_temp_dir
+from mewbo_core.config import get_config, get_config_value, register_untrusted_cwd
 from mewbo_core.permissions import auto_approve
+from mewbo_core.tooling.exit_plan_mode import session_temp_dir
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from mewbo_core.hooks import HookManager
-    from mewbo_core.project_store import ProjectStoreBase, VirtualProject
-    from mewbo_core.session_runtime import SessionRuntime
+    from mewbo_core.loop.session_runtime import SessionRuntime
+    from mewbo_core.workspaces.project_store import ProjectStoreBase, VirtualProject
 
 from mewbo_api.auth.guard_registry import guard
 from mewbo_api.responses import ApiResponseKit
@@ -53,7 +53,7 @@ logging = get_logger(name="api.vcs_pickup")
 vcs_ns = Namespace("automation", description="CI/VCS automation endpoints")
 
 # One DRY home for this namespace's error examples (every vcs-pickup error path
-# returns the legacy ``{"message": ...}`` shape). Built at module level so the
+# returns the ``{"message": ...}`` shape). Built at module level so the
 # import-time decorators can see it; ``Vcs`` prefix namespaces the generated
 # model names on the shared Api registry.
 kit = ApiResponseKit(vcs_ns, prefix="Vcs")
@@ -282,9 +282,23 @@ class VcsPickupService:
 
         After creation/lookup the worktree is best-effort fast-forwarded so a
         resumed session picks up from where the remote branch left off.
+
+        **The worktree is marked an untrusted working directory.** *branch* is a
+        pull request's head, so its contents are authored by whoever opened the
+        pull request — running against unaudited code is the whole premise of
+        this feature, not an edge case. Without the mark, a `.mcp.json` at any
+        depth in that branch would name MCP servers at the HIGHEST priority
+        tier, and a server entry is a ``command`` the process SPAWNS while
+        resolving config, before any tool ceiling is consulted.
+
+        Marking it here rather than at the caller is what makes it unmissable:
+        this is the seam that CREATES the directory, so the knowledge sits with
+        the code that has it. The mark covers everything beneath the worktree,
+        which is what closes the subtree walk as well as the root.
         """
         self._ensure_local_branch(target.path, branch)
         wt = self.project_store.create_worktree(target.project_id, branch)
+        register_untrusted_cwd(wt.path)
         # Sync an existing (or freshly created but behind) checkout. Best-effort:
         # a dirty worktree from an interrupted run must not block the pickup.
         if not self._git_ok(wt.path, "merge", "--ff-only", f"origin/{branch}"):

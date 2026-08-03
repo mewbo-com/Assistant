@@ -1,10 +1,9 @@
 /**
  * Frontmatter shape shared by wiki pages.
  *
- * The client-side frontmatter/TOC parser this file used to hold
- * (`parsePageSource`) is gone — `getPage()` (`api/client.ts`) now returns
- * `WikiPage` pre-parsed (frontmatter split, TOC derived) from the server, so
- * nothing here re-parses raw `.md` source anymore.
+ * `getPage()` (`api/client.ts`) returns `WikiPage` pre-parsed (frontmatter
+ * split, TOC derived) from the server, so nothing here re-parses raw `.md`
+ * source.
  */
 
 import type { TocEntry } from "./types";

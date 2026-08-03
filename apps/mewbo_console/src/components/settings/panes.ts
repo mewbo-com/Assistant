@@ -2,11 +2,11 @@
  * FACET_PANES — the facet → custom-panes registry.
  *
  * Some facets carry surfaces that are NOT driven by the backend config schema
- * (API keys, git credentials, projects, plugins, triggers…). They used to be
- * mounted by a hardcoded `activeGroup.id === "security" ? … : …` ternary in
- * `SettingsView`; copy-pasting that branch per facet is the DRY violation this
- * file removes. The shell now knows no facet by name — it looks the active
- * facet up here and renders whatever it finds ABOVE the schema-driven sections.
+ * (API keys, git credentials, projects, plugins, triggers…). Mounting these via
+ * a hardcoded `activeGroup.id === "security" ? … : …` ternary in `SettingsView`,
+ * copy-pasted per facet, is exactly the DRY violation this registry avoids.
+ * The shell knows no facet by name — it looks the active facet up here and
+ * renders whatever it finds ABOVE the schema-driven sections.
  * Adding a pane is ONE line here and zero lines in the shell.
  *
  * ## The pane contract — conform to this or you cannot be registered
@@ -66,6 +66,11 @@ const IdentityAccessPane = lazy(() =>
     default: m.IdentityAccessPane,
   }))
 );
+const RepositoriesPane = lazy(() =>
+  import("./panes/RepositoriesPane").then((m) => ({
+    default: m.RepositoriesPane,
+  }))
+);
 
 /**
  * Facet id → its panes, in render order. Keyed by the `FacetId` union, so a
@@ -78,18 +83,22 @@ const IdentityAccessPane = lazy(() =>
  * reason these four stopped being standalone pages — and it is why a pane and
  * its config section MOVE TOGETHER. Plugins is the worked example: it got its
  * own top-level facet, so `PluginsPane` and `PluginsConfig`'s `x-group`
- * (core `config.py`) both moved off `agent` in one change.
+ * (core `config.py`) both moved off `agent` in one change. Git credentials
+ * moved onto `repositories` for the same reason: a repository and the
+ * credential that reaches it are one user concern, and `security` keeps only
+ * API keys and the secrets it already holds.
  */
 export const FACET_PANES: Partial<Record<FacetId, SettingsPane[]>> = {
   agent: [SystemInstructionsPane],
   plugins: [PluginsPane],
   automation: [TriggersPane],
   apps: [AppsPane],
-  security: [SecretsSummary, ApiKeysView, GitCredentialsView],
+  security: [SecretsSummary, ApiKeysView],
   // `access` carries no schema sections at all — identity lives in the IdP and
   // the IAM stores, not in `app.json`. A facet with only panes is a supported
   // shape: the shell's visibility test is "has sections OR has panes".
   access: [IdentityAccessPane],
+  repositories: [RepositoriesPane, GitCredentialsView],
   workspace: [ProjectsPane],
 };
 

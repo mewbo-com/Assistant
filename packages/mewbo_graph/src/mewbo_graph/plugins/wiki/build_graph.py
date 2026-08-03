@@ -1,6 +1,7 @@
 """``wiki_build_graph`` SessionTool — parses cloned tree into graph + embeddings."""
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import TYPE_CHECKING, Any
 
@@ -9,15 +10,22 @@ from mewbo_core.config import get_config_value
 from pydantic import BaseModel, ConfigDict
 
 from mewbo_graph.plugins.wiki._base import WikiSessionTool, _err_result
-from mewbo_graph.plugins.wiki._ctx import emit_log, emit_phase, resolve_runtime
+from mewbo_graph.plugins.wiki._ctx import (
+    PhaseProgress,
+    WikiJobCtx,
+    emit_log,
+    emit_phase,
+    resolve_runtime,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from mewbo_core.classes import ActionStep
 
     from mewbo_graph.wiki.graph import GraphParseResult
-    from mewbo_graph.wiki.types import GraphEdge, GraphNode
+    from mewbo_graph.wiki.types import GraphEdge, GraphNode, GraphResolution
 
 logging = get_logger(name="mewbo_graph.plugins.wiki.build_graph")
 
@@ -35,12 +43,34 @@ def _resolve_runtime() -> Any:
 
 def _make_embedder() -> Any:
     """Create an Embedder; isolated so tests can stub it."""
-    from mewbo_graph.wiki.embedder import Embedder  # noqa: PLC0415
-    return Embedder()
+    from mewbo_graph.wiki.embedder import make_embedder  # noqa: PLC0415
+    return make_embedder()
 
 
 def _embeddings_enabled() -> bool:
-    return bool(get_config_value("wiki", "embedding", "enabled", default=True))
+    """Read the embedding switch; isolated so tests can stub it."""
+    from mewbo_graph.wiki.embedder import Embedder  # noqa: PLC0415
+    return Embedder.enabled()
+
+
+# DEFAULT for how long the off-loop graph build may run before the tool stops
+# waiting on it; the operator sizes the real value (``wiki.phase_timeouts.graph_build_s``).
+# A build is minutes on a real repository — the largest measured pass ran for the
+# better part of half an hour — so this is a WEDGE detector, not a pacing knob:
+# responsiveness comes from running the work off the event loop, never from
+# clipping it. The default sits well above any observed honest build so that
+# expiring means something is stuck rather than that the repository is big — but
+# "well above" depends on the repositories and the hardware a deployment has, so
+# it cannot be a number baked in here.
+_GRAPH_BUILD_BUDGET_S: float = 3600.0
+
+# Headroom between this tool's own deadline and the loop's outer ceiling, so the
+# TOOL is what expires and the model reads a result rather than a failed call.
+# Deliberately NOT operator-tunable, mirroring ``ask_user.QUESTION_TIMEOUT_MARGIN_S``:
+# it encodes which layer expires first, not a quantity about this deployment, and
+# the only settings that would change anything are the ones that invert the
+# invariant and silently trade the readable result back for a failed tool call.
+_CEILING_MARGIN_S: float = 60.0
 
 
 class WikiBuildGraphTool(WikiSessionTool):
@@ -49,6 +79,77 @@ class WikiBuildGraphTool(WikiSessionTool):
     tool_id = "wiki_build_graph"
     args_cls = WikiBuildGraphArgs
     schema = pydantic_to_openai_tool(WikiBuildGraphArgs, name="wiki_build_graph")
+
+    #: Recorded by :meth:`handle`, drained by the loop's ``tool_result`` emit.
+    _headline: str | None = None
+
+    def result_headline(self) -> str | None:
+        """The one-line trace title for the graph phase that just finished.
+
+        The declared-headline convention (``mewbo_core.tooling.session_tools``): read
+        once and cleared, so it can never title a later call.
+        """
+        headline, self._headline = self._headline, None
+        return headline
+
+    def _budget_s(self) -> float:
+        """This deployment's ceiling for one graph build, in seconds.
+
+        Read from config at CALL time rather than frozen at import, so the two
+        readers — the wait in :meth:`handle` and the ceiling this tool declares
+        to the loop — resolve the same number and cannot drift apart. A wedge on
+        a small repository behind a fast proxy and a wedge on a large monorepo
+        behind a slow one are not the same duration, which is exactly why the
+        module constant is the DEFAULT and not the value.
+        """
+        return float(
+            get_config_value(
+                "wiki", "phase_timeouts", "graph_build_s", default=_GRAPH_BUILD_BUDGET_S
+            )
+        )
+
+    def execution_timeout(self, tool_input: object) -> float | None:
+        """The loop's outer ceiling for this call: this tool's budget + margin.
+
+        A SessionTool carries no ``ToolSpec``, so an undeclared ceiling is the
+        registry's flat 120s fallback — a number sized for shell and MCP output,
+        inherited by a tool that legitimately runs for tens of minutes. That
+        fallback was inert only for as long as the body blocked the event loop:
+        the ceiling is an ``asyncio.wait_for``, and a timer cannot fire on a loop
+        that is not turning, so the declared bound expired unobserved and the
+        call returned normally whenever it finished. Moving the work off the loop
+        (see :meth:`handle`) arms that ceiling for the first time, which is why
+        it has to be declared here in the same change.
+
+        The margin keeps this tool, not the loop, the thing that expires: an
+        over-budget build then returns a readable RESULT the model can act on
+        instead of the loop's flat "timed out" failure — the same inversion
+        ``ask_user_question`` states for its own deadline.
+        """
+        return self._budget_s() + _CEILING_MARGIN_S
+
+    def _over_budget_result(self, ctx: WikiJobCtx, budget_s: float) -> MockSpeaker:
+        """The bounded outcome for a build that outran its configured budget.
+
+        Abandoning the wait does NOT stop the work: a thread inside tree-sitter
+        reaches no cancellation point, so the parse runs on and, if it finishes,
+        persists a graph a later resume reuses. Saying so is the whole point of
+        writing this message by hand — a bare "timed out" reads as "nothing
+        happened" and invites an immediate re-run, which would put a second parse
+        of the same tree on top of the first and have both upsert the same nodes.
+        The same fact goes into the job timeline, because that is the surface
+        somebody watching the index is actually looking at.
+        """
+        budget = f"{budget_s:g}s"
+        emit_log(ctx, f"Graph build exceeded its budget of {budget}", level="warn")
+        self._headline = f"Graph build exceeded its budget of {budget}"
+        return _err_result(
+            "timeout",
+            f"graph build exceeded its budget of {budget}. The parse is still "
+            "running in the background and its result, if it completes, is "
+            "persisted for a resume to reuse — do not call wiki_build_graph "
+            "again for this job.",
+        )
 
     async def handle(self, action_step: ActionStep) -> MockSpeaker:
         """Execute a ``wiki_build_graph`` tool call."""
@@ -68,6 +169,12 @@ class WikiBuildGraphTool(WikiSessionTool):
         rp = ctx.resume_plan
         if rp is not None and rp.should_skip("graph"):
             emit_log(ctx, f"Graph already built ({rp.node_count} nodes) — skipped on resume")
+            # A skip and a rebuild are the same ~6-minute-shaped step in the
+            # trace unless the title says which one ran.
+            self._headline = (
+                f"Graph reused from checkpoint: {rp.node_count} nodes "
+                "(skipped on resume)"
+            )
             return MockSpeaker(content=str({
                 "nodeCount": rp.node_count,
                 "skipped": "graph already built — reused on resume",
@@ -81,17 +188,35 @@ class WikiBuildGraphTool(WikiSessionTool):
         # 2-4. Parse + persist + embed via the shared deterministic core (reused
         # by the zero-LLM GraphOnlyIndexer so tree-sitter parsing + the embedding
         # fallback live in exactly ONE place).
-        result = build_graph_core(ctx)
+        #
+        # OFF THE EVENT LOOP. ``handle`` is a coroutine, but this body is
+        # tree-sitter, blocking driver writes and a synchronous embedding call —
+        # not one suspension point among them. Awaited inline it did not merely
+        # take a long time, it OWNED the loop for the whole build: no
+        # cancellation, no watchdog tick, no sibling coroutine, and no progress
+        # emission from anything that was not already writing from this same
+        # frame. ``GraphOnlyIndexer`` has always driven this exact function from
+        # a worker thread, so running it off-loop here is the shape that was
+        # already load-bearing, not a new assumption about its thread-safety.
+        budget_s = self._budget_s()
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(build_graph_core, ctx), timeout=budget_s
+            )
+        except asyncio.TimeoutError:
+            return self._over_budget_result(ctx, budget_s)
+        self._headline = (
+            f"Built graph: {result.get('nodeCount', 0)} nodes, "
+            f"{result.get('edgeCount', 0)} edges"
+        )
 
-        # The ``enrich`` phase is deliberately NOT stamped here. It used to be —
-        # build_graph is the last tool before the wiki-enricher fan-out, and
-        # stamping its successor closed the "graph plateau" the snapshot showed
-        # during the enrich window. But stamping a phase when its PREDECESSOR ends
-        # claims work that has not begun: a run cancelled moments after this
-        # returned left a job reading ``enrich`` forever for a fan-out that never
-        # spawned. The enrichers stamp it themselves on their first mint
-        # (``mint_entity`` → ``emit_phase_once``), so the phase now marks work that
-        # actually started.
+        # The ``enrich`` phase is deliberately NOT stamped here. build_graph is
+        # the last tool before the wiki-enricher fan-out, and stamping a phase
+        # when its PREDECESSOR ends claims work that has not begun: a run
+        # cancelled moments after this returns would leave a job reading
+        # ``enrich`` forever for a fan-out that never spawned. The enrichers
+        # stamp it themselves on their first mint (``mint_entity`` →
+        # ``emit_phase_once``), so the phase marks work that actually started.
         return MockSpeaker(content=str(result))
 
 
@@ -114,11 +239,42 @@ def build_graph_core(ctx: Any) -> dict[str, object]:
     files = [p for p in repo_root.rglob("*") if p.is_file() and ".git" not in p.parts]
     emit_log(ctx, f"Parsing {len(files)} files with tree-sitter…")
     gi = GraphIndex()
-    parsed = gi.parse_repo(slug=ctx.slug, repo_root=repo_root, files=files)
+    # The parse loop is minutes long on a real repository, so it reports
+    # progress rather than going silent between its start and its end — see
+    # ``PhaseProgress``, which owns the throttle so this stays one injected
+    # callback.
+    progress = PhaseProgress(ctx, label="Parsing", unit="files")
+    parsed = gi.parse_repo(
+        slug=ctx.slug,
+        repo_root=repo_root,
+        files=files,
+        on_progress=lambda done, total, path: progress.advance(
+            done, total, detail=path, force=done == total
+        ),
+    )
     # Replace tree-sitter's name-matched PYTHON relationship edges with the
     # faithful resolver's exact edges when scip-python is available. No-op (the
-    # parse passes straight through) when the resolver can't run — see helper.
-    parsed = _apply_resolver(ctx.slug, repo_root, parsed)
+    # parse passes straight through) when the resolver can't run — but never a
+    # SILENT one: the fallback graph looks healthy, so the outcome is written to
+    # the job log either way and "which leg ran" is answerable after the fact.
+    #
+    # The outcome is CAPTURED as well as logged: a job-log line is only ever read
+    # by someone who already suspects something, and a total resolution outage
+    # sat unnoticed behind exactly such a line. ``_record_resolution`` below puts
+    # the same fact on the records a reader consults first.
+    resolution: GraphResolution | None = None
+
+    def _capture(outcome: GraphResolution) -> None:
+        nonlocal resolution
+        resolution = outcome
+
+    parsed = _apply_resolver(
+        ctx.slug,
+        repo_root,
+        parsed,
+        on_report=lambda message: emit_log(ctx, message),
+        on_outcome=_capture,
+    )
     emit_log(ctx, f"Built graph: {len(parsed.nodes)} nodes, {len(parsed.edges)} edges")
 
     # 1b. Validate the whole graph ONCE at ingest (schema v2): node-id
@@ -126,7 +282,7 @@ def build_graph_core(ctx: Any) -> dict[str, object]:
     # fails loudly HERE rather than corrupting the persisted store silently.
     from pydantic import ValidationError  # noqa: PLC0415
 
-    from mewbo_graph.wiki.types import CodeGraph  # noqa: PLC0415
+    from mewbo_graph.wiki.types import CodeGraph, IndexFingerprint  # noqa: PLC0415
 
     try:
         code_graph = CodeGraph(nodes=parsed.nodes, edges=parsed.edges)
@@ -159,12 +315,18 @@ def build_graph_core(ctx: Any) -> dict[str, object]:
     # model.
     embedded_count = 0
     embedding_error: str | None = None
+    # ``None`` unless a vector actually gets persisted below — mirrors
+    # ``embedded_count`` exactly (both stay at their zero/None default
+    # together, both get set together). This is deliberate, not incidental:
+    # see ``IndexFingerprint.embedding_model``'s own docstring — a fingerprint
+    # records what happened, never a config fallback for "what would have run".
+    embedding_model: str | None = None
     if _embeddings_enabled() and parsed.nodes:
         try:
             embedder = _make_embedder()
-            items = [(n.node_id, _node_text_for_embedding(n)) for n in parsed.nodes]
+            items = [(n.node_id, n.embedding_text) for n in parsed.nodes]
             emit_log(ctx, f"Embedding {len(items)} nodes via {embedder.model}…")
-            embeddings = embedder.embed_nodes(items, slug=ctx.slug)
+            embeddings = _embed_with_progress(ctx, embedder, items)
         except Exception as exc:  # noqa: BLE001 — degrade gracefully
             embedding_error = str(exc)
             logging.warning(
@@ -183,12 +345,66 @@ def build_graph_core(ctx: Any) -> dict[str, object]:
                 ctx.slug, embeddings, commit_sha=commit_sha, job_id=ctx.job_id
             )
             embedded_count = len(embeddings)
+            embedding_model = embedder.model
             emit_log(
                 ctx,
                 f"Embedded {embedded_count} nodes (dim={embeddings[0].dim})",
             )
     elif not _embeddings_enabled():
         emit_log(ctx, "Embeddings disabled (wiki.embedding.enabled=false)", level="warn")
+
+    # 4. Stamp this run's index fingerprint onto the job — the non-content
+    # inputs that can later invalidate a hash-identical reuse decision.
+    # Captured live HERE, at the moment the graph was actually built, and
+    # NEVER re-derived at finalize: a re-probe there would answer "what is
+    # available now", not "what built the artifacts actually in the store",
+    # and those disagree exactly when a resume skips this whole phase
+    # (``WikiBuildGraphTool.handle``'s ``rp.should_skip("graph")`` short
+    # circuit above) — the earlier invocation's stamp on the SAME job_id is
+    # what a resume must read, not a fresh probe of "now".
+    #
+    # ``update_job`` is an unlocked read-modify-write on both backends (a
+    # known, separately-tracked defect) — a concurrent writer on another
+    # thread (a Cancel arriving from the request thread is the documented
+    # case) can lose this stamp. That failure mode is SAFE by construction:
+    # an absent fingerprint later reads as
+    # ``FingerprintDecision(reason="unknown")``, which forces a full rebuild
+    # rather than silently permitting reuse of artifacts nothing actually
+    # fingerprinted. Do not "optimise" a missing value into an assumed match.
+    try:
+        fingerprint = IndexFingerprint(
+            embedding_model=embedding_model,
+            graph_schema_version=code_graph.schema_version,
+            grammar_pack_version=_tree_sitter_pack_version(),
+            # ``_apply_resolver`` above already probed this once but doesn't
+            # return the answer to its caller; the probe is cheap and
+            # stateless (``shutil.which``), so a second call costs nothing.
+            resolver_available=_resolver_available(),
+        )
+        ctx.store.update_job(
+            ctx.job_id, fingerprint=fingerprint, resolution=resolution
+        )
+    except Exception as exc:  # pragma: no cover — best-effort, see comment above
+        logging.warning(
+            "wiki_build_graph: failed to stamp index fingerprint for {} ({})",
+            ctx.slug, exc,
+        )
+
+    # 4b. Put the same resolution outcome on the PROJECT row, which is what a
+    # reader consults to ask "are this wiki's cross-file edges exact?" without
+    # replaying a job log. ``update_project`` is a no-op when the project record
+    # does not exist yet (a first index creates it at finalize), so this write
+    # lands on a RE-index; the first index's copy has to be carried across by
+    # finalize, which builds the record wholesale. Best-effort in either case —
+    # a graph that built is not worth failing over a display field.
+    if resolution is not None:
+        try:
+            ctx.store.update_project(ctx.slug, {"resolution": resolution})
+        except Exception as exc:  # pragma: no cover — best-effort
+            logging.warning(
+                "wiki_build_graph: failed to record symbol resolution for {} ({})",
+                ctx.slug, exc,
+            )
 
     languages = sorted({_lang_from_ext(n.file) for n in parsed.nodes if n.type != "Module"})
 
@@ -206,11 +422,58 @@ def build_graph_core(ctx: Any) -> dict[str, object]:
     return result
 
 
+# Nodes per embedding slice. The embedder batches internally, so slicing the
+# CALL SITE adds no requests worth counting — it exists only to create a place
+# where progress can be reported at all. Large enough that the slicing is free
+# next to the request it wraps, small enough that a slice is not itself a
+# multi-minute silence.
+_EMBED_SLICE = 500
+
+
+def _embed_with_progress(ctx: Any, embedder: Any, items: list[tuple[str, str]]) -> list[Any]:
+    """Embed *items* slice by slice so the graph phase reports while it embeds.
+
+    Fixing only the parse loop left a smaller copy of the same blackout in the
+    same phase: one ``embed_nodes`` call over tens of thousands of nodes is
+    minutes of silence immediately after a loop that had just been taught to
+    report every few seconds.
+
+    Failure semantics are UNCHANGED and that is deliberate: a raise propagates
+    to the caller's handler, which degrades the WHOLE pass to BM25. Returning
+    the slices that happened to succeed would persist a partial vector set that
+    nothing downstream would ever finish, and retrieval would silently rank
+    against a fraction of the graph.
+    """
+    progress = PhaseProgress(ctx, label="Embedding", unit="nodes")
+    out: list[Any] = []
+    total = len(items)
+    for start in range(0, total, _EMBED_SLICE):
+        out.extend(embedder.embed_nodes(items[start : start + _EMBED_SLICE], slug=ctx.slug))
+        done = min(start + _EMBED_SLICE, total)
+        progress.advance(done, total, force=done == total)
+    return out
+
+
 # Edge kinds the faithful resolver SUPERSEDES for Python sources. tree-sitter
 # emits these cross-file edges by NAME (every same-named symbol collapses onto
 # one node); the resolver replaces them with exact, real-id REFERENCES/EXTENDS.
 _RESOLVER_SUPERSEDED_EDGES = frozenset({"IMPORTS", "CALLS", "EXTENDS"})
 _PYTHON_SUFFIXES = (".py", ".pyi")
+
+
+def _tree_sitter_pack_version() -> str | None:
+    """Installed ``tree-sitter-language-pack`` version, or ``None`` if absent.
+
+    Mirrors ``mewbo_core.config.get_version``'s try/except
+    ``PackageNotFoundError`` shape: the ``treesitter`` extra is optional, so
+    an uninstalled pack is an honest absence, never a raise.
+    """
+    from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415
+
+    try:
+        return version("tree-sitter-language-pack")
+    except PackageNotFoundError:
+        return None
 
 
 def _resolver_available() -> bool:
@@ -237,7 +500,12 @@ def _make_resolver(slug: str) -> Any:
 
 
 def _apply_resolver(
-    slug: str, repo_root: Path, result: GraphParseResult
+    slug: str,
+    repo_root: Path,
+    result: GraphParseResult,
+    *,
+    on_report: Callable[[str], None] | None = None,
+    on_outcome: Callable[[GraphResolution], None] | None = None,
 ) -> GraphParseResult:
     """Swap tree-sitter's name-matched Python edges for the resolver's exact ones.
 
@@ -255,14 +523,77 @@ def _apply_resolver(
     Degrades to a byte-identical ``result`` when the resolver can't run (binaries
     absent / extra uninstalled) or indexes nothing (``not res.available``) — NO
     behaviour change from the tree-sitter-only path.
+
+    **Superseding is all-or-nothing across the repository, and that is a
+    deliberate floor rather than the shape we would choose.** ``available`` is
+    merely "at least one root was indexed", so superseding on it alone would let
+    a pass that indexed 6 of 9 roots drop the name-matched edges of ALL NINE —
+    leaving the three roots the resolver never reached with no cross-file edges
+    whatsoever, which is worse than the guesses it removed. The precise repair
+    is per-root: drop only the
+    edges whose source file sits under a root that actually indexed. That is not
+    derivable here — ``ResolutionResult``/``ResolutionStats`` carry root COUNTS
+    and no root identities, so this asks :attr:`GraphResolution.faithful` for the
+    conservative question it CAN answer ("did every discovered root index?") and
+    keeps every name-matched edge otherwise. A partial pass still contributes its
+    exact edges: they are additive and correct, and only the destructive half is
+    withheld.
+
+    ``on_outcome`` receives the :class:`GraphResolution` for the branch taken —
+    on EVERY branch, including the two that return early. It is what makes the
+    degradation answerable from the indexed project itself rather than from a
+    line buried in a job log, and it is injected for the same reason
+    ``on_report`` is: this helper resolves symbols and knows nothing about the
+    record the outcome belongs on.
+
+    **That degradation announces itself through ``on_report``, and must.** The
+    graph it produces is not visibly broken — it is fully populated, passes
+    validation, and renders — so a silent fallback is indistinguishable from a
+    healthy index until someone counts cross-file edges by hand. A deployment
+    whose image lacked the binaries degraded every index it ever ran, unnoticed,
+    for exactly that reason. The callback is INJECTED for the same reason
+    ``parse_repo`` takes ``on_progress``: this helper resolves symbols and knows
+    nothing about the indexing job the message belongs to.
     """
     from mewbo_graph.wiki.graph import GraphParseResult  # noqa: PLC0415
+    from mewbo_graph.wiki.types import GraphResolution  # noqa: PLC0415
 
+    report = on_report or (lambda _message: None)
+    record = on_outcome or (lambda _resolution: None)
     if not _resolver_available():
+        report(
+            "Faithful Python symbol resolution unavailable (scip / scip-python "
+            "not on PATH) — Python cross-file edges fall back to name matching."
+        )
+        record(GraphResolution(available=False))
         return result
     res = _make_resolver(slug).resolve(repo_root, result.nodes)
+    resolution = GraphResolution(
+        available=True,
+        rootsDiscovered=res.stats.project_roots,
+        rootsIndexed=res.stats.indexed_roots,
+        resolvedEdges=len(res.edges),
+    )
     if not res.available:
+        report(
+            "Faithful Python symbol resolution indexed no project root — "
+            f"Python cross-file edges fall back to name matching. {res.stats.describe()}"
+        )
+        record(resolution)
         return result
+    report(f"Resolved Python symbols: {res.stats.describe()}")
+    record(resolution)
+
+    if not resolution.faithful:
+        # A partial pass ADDS its exact edges and drops none: the roots it never
+        # reached would otherwise be left with no cross-file edges at all. Said
+        # at warn level because the counters alone read as a successful pass.
+        report(f"Keeping every name-matched Python edge: {resolution.describe()}")
+        return GraphParseResult(
+            nodes=result.nodes + res.externals,
+            edges=result.edges + res.edges,
+            skipped=result.skipped,
+        )
 
     node_by_id = {n.node_id: n for n in result.nodes}
     kept_edges = [
@@ -285,20 +616,16 @@ def _is_superseded_python_edge(
     ``file`` tells us the source language. An unmappable source (shouldn't happen
     for these synthetic kinds) is conservatively KEPT — only edges we KNOW the
     resolver supersedes are dropped.
+
+    Asks only about ONE edge. Whether superseding may happen at all is a
+    property of the PASS, and it is asked once by the caller through
+    :attr:`GraphResolution.faithful` — a per-edge re-derivation of that would be
+    the same question answered in two places.
     """
     if edge.type not in _RESOLVER_SUPERSEDED_EDGES:
         return False
     src = node_by_id.get(edge.source)
     return src is not None and src.file.endswith(_PYTHON_SUFFIXES)
-
-
-def _node_text_for_embedding(node: GraphNode) -> str:
-    parts = [node.name]
-    if node.docstring:
-        parts.append(node.docstring)
-    if node.file and node.file != node.name:
-        parts.append(node.file)
-    return " — ".join(parts)
 
 
 def _lang_from_ext(file_path: str) -> str:

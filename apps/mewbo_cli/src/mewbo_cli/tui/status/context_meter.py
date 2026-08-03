@@ -4,25 +4,35 @@
 One atomic class that turns a live token count into the two honest numbers the
 status bar shows:
 
-- **context-window %** — ``used / total``. ``total`` comes from the configured
-  ``llm.model_context_windows`` map (exact, by model name), else the configured
-  ``llm.default_context_window`` (an *estimate* — flagged with a ``~`` prefix so
-  the user knows it is not the real window for this model).
+- **context-window %** — ``used / total``. ``total`` comes from
+  :func:`get_model_max_input_tokens` — the one place window resolution is
+  implemented (user override under ``token_budget.model_context_windows`` →
+  LiteLLM's catalogue → ``token_budget.default_context_window``). ``estimated``
+  is ``True`` only on the last leg — flagged with a ``~`` prefix so the user
+  knows it is not the real window for this model.
 - **cost ($)** — derived from input/output tokens via LiteLLM's per-token price
   table (the same pricing the proxy bills on). When LiteLLM has no price for the
   model we degrade *honestly* to ``None`` (the status bar renders ``—``) rather
   than inventing a number.
 
 KISS/DRY: pricing comes from LiteLLM (already a project dependency for every LLM
-call), the window map comes from the existing config accessor. No bespoke
-pricing table, no hardcoded numbers.
+call); window resolution comes from the one resolver ``token_budget.py`` already
+implements — this module used to re-read a ``llm.*`` config section that has no
+matching ``LLMConfig`` field, which made the meter silently hardcode 128000 for
+every model. Reusing the resolver both fixes that and keeps a config-key rename
+in one place.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from mewbo_core.config import get_config_value
+from mewbo_core.session.token_budget import (
+    _litellm_max_input_tokens,
+    _load_context_overrides,
+    _strip_provider_prefix,
+    get_model_max_input_tokens,
+)
 
 
 @dataclass(frozen=True)
@@ -47,9 +57,11 @@ class ContextUsage:
 class ContextMeter:
     """Compute context-window % and session cost from token counts.
 
-    Reads ``llm.model_context_windows`` / ``llm.default_context_window`` once per
-    call (cheap getattr walk) so a config change mid-session is honored. Inject
-    overrides in tests via the constructor rather than patching config.
+    Delegates window resolution to :func:`get_model_max_input_tokens` — the one
+    resolver the LLM call path itself uses — so a config change or a new LiteLLM
+    catalogue entry is honored without a second implementation to keep in sync.
+    Inject ``windows``/``default_window`` in tests to pin the total without a
+    real config or LiteLLM catalogue lookup.
     """
 
     #: Usage at or above this percent is rendered in the warning style.
@@ -61,7 +73,7 @@ class ContextMeter:
         windows: dict[str, int] | None = None,
         default_window: int | None = None,
     ) -> None:
-        """Bind optional explicit window overrides (else read live from config)."""
+        """Bind optional explicit window overrides (else resolve live)."""
         self._windows = windows
         self._default_window = default_window
 
@@ -70,26 +82,40 @@ class ContextMeter:
     def _resolve_window(self, model: str | None) -> tuple[int, bool]:
         """Return ``(total_tokens, estimated)`` for ``model``.
 
-        Exact match in the window map → ``estimated=False``. Otherwise the
-        configured default → ``estimated=True``.
+        With no injected override this defers entirely to
+        :func:`get_model_max_input_tokens` for ``total`` — user override, then
+        LiteLLM's catalogue, then the configured default. ``estimated`` is
+        ``True`` only when neither of the first two legs answered.
         """
-        windows = self._windows
-        if windows is None:
-            windows = dict(get_config_value("llm", "model_context_windows", default={}) or {})
+        if self._windows is None and self._default_window is None:
+            total = get_model_max_input_tokens(model)
+            if not model:
+                return total, True
+            overrides = _load_context_overrides()
+            bare = _strip_provider_prefix(model)
+            has_override = model in overrides or bare in overrides
+            # Prefixed name first, matching get_model_max_input_tokens's own
+            # lookup order — a proxy-bridge-hydrated entry lives under the
+            # prefixed spelling and would otherwise read back as "estimated"
+            # despite total already resolving to the real window.
+            known_to_litellm = any(
+                _litellm_max_input_tokens(candidate) is not None
+                for candidate in dict.fromkeys((model, bare))
+            )
+            return total, not (has_override or known_to_litellm)
+
+        # Injected path (tests): exact, then suffix match — config may key by
+        # bare name while the runtime model carries a proxy prefix (or vice
+        # versa) — same matching the live resolver applies.
+        windows = self._windows or {}
         if model:
-            # Exact, then suffix match (config may key by bare name while the
-            # runtime model carries a ``openai/`` proxy prefix, or vice-versa).
             if model in windows:
                 return int(windows[model]), False
             bare = model.rsplit("/", 1)[-1]
             for key, value in windows.items():
                 if key == bare or key.rsplit("/", 1)[-1] == bare:
                     return int(value), False
-        default = self._default_window
-        if default is None:
-            default = int(
-                get_config_value("llm", "default_context_window", default=128000) or 128000
-            )
+        default = self._default_window if self._default_window is not None else 128000
         return int(default), True
 
     def usage(self, *, used_tokens: int, model: str | None) -> ContextUsage:

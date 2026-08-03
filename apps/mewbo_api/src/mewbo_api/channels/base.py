@@ -111,7 +111,7 @@ class DeduplicationGuard:
         """Return ``True`` if *key* was already seen within the TTL window."""
         now = time.monotonic()
         with self._lock:
-            # Prune expired entries lazily (keep it simple)
+            # Prune lazily rather than on a timer — this runs under the lock.
             if len(self._seen) > 10_000:
                 cutoff = now - self._ttl
                 self._seen = {k: v for k, v in self._seen.items() if v > cutoff}

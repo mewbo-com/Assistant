@@ -25,14 +25,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage
-from mewbo_core.agent_context import AgentContext
-from mewbo_core.agent_registry import AgentDef, AgentRegistry
+from mewbo_core.agents.agent_context import AgentContext
+from mewbo_core.agents.agent_registry import AgentDef, AgentRegistry
+from mewbo_core.agents.hypervisor import (
+    AgentHandle,
+    AgentHypervisor,
+    AgentResult,
+    ScheduledSpawn,
+    SpawnUnit,
+)
+from mewbo_core.agents.spawn_agent import AgentError, SpawnAgentTool
 from mewbo_core.classes import ActionStep
 from mewbo_core.hooks import HookManager
-from mewbo_core.hypervisor import AgentHandle, AgentHypervisor, AgentResult
 from mewbo_core.permissions import PermissionDecision, PermissionPolicy
-from mewbo_core.spawn_agent import AgentError, SpawnAgentTool, _coerce_list
-from mewbo_core.tool_registry import ToolRegistry, ToolSpec
+from mewbo_core.tooling.tool_registry import ToolRegistry, ToolSpec
 
 # ---------------------------------------------------------------------------
 # Shared helpers (mirrors test_spawn_agent.py patterns)
@@ -153,7 +159,7 @@ async def _spawn_non_blocking(
     bound = MagicMock()
     bound.ainvoke = AsyncMock(return_value=_text_response("Child done"))
 
-    with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+    with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
         mock_build.return_value = MagicMock()
         mock_build.return_value.bind_tools.return_value = bound
         await tool.run_async(_step(task))
@@ -184,23 +190,27 @@ _BAD_GATEWAY_MESSAGE = (
 
 
 class TestCoerceList:
-    """Unit tests for _coerce_list helper (lines 55–61)."""
+    """Unit tests for the ``SpawnAgentTool._coerce_list`` argument coercion."""
 
     def test_list_input_converted(self):
-        assert _coerce_list(["a", "b", "c"]) == ["a", "b", "c"]
+        assert SpawnAgentTool._coerce_list(["a", "b", "c"]) == ["a", "b", "c"]
 
     def test_list_with_falsy_skipped(self):
-        assert _coerce_list(["a", "", None, "b"]) == ["a", "b"]  # type: ignore[list-item]
+        assert SpawnAgentTool._coerce_list(["a", "", None, "b"]) == ["a", "b"]  # type: ignore[list-item]
 
     def test_comma_string_splits(self):
-        assert _coerce_list("tool_a, tool_b, tool_c") == ["tool_a", "tool_b", "tool_c"]
+        assert SpawnAgentTool._coerce_list("tool_a, tool_b, tool_c") == [
+            "tool_a",
+            "tool_b",
+            "tool_c",
+        ]
 
     def test_comma_string_strips_whitespace(self):
-        assert _coerce_list("  x  ,  y  ") == ["x", "y"]
+        assert SpawnAgentTool._coerce_list("  x  ,  y  ") == ["x", "y"]
 
     def test_non_string_non_list_returns_empty(self):
-        assert _coerce_list(42) == []
-        assert _coerce_list(None) == []
+        assert SpawnAgentTool._coerce_list(42) == []
+        assert SpawnAgentTool._coerce_list(None) == []
 
 
 # ---------------------------------------------------------------------------
@@ -262,11 +272,11 @@ class TestAcceptanceCriteriaIntegration:
                 received_tasks.append(task_desc)
                 return await orig_run(task_desc, **kwargs)
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
 
-                from mewbo_core.tool_use_loop import ToolUseLoop
+                from mewbo_core.loop.tool_use_loop import ToolUseLoop
 
                 orig_run = ToolUseLoop.run
 
@@ -349,7 +359,7 @@ class TestAgentTypeResolution:
             bound = MagicMock()
             bound.ainvoke = AsyncMock(return_value=_text_response("done"))
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
 
@@ -401,7 +411,7 @@ class TestAgentTypeResolution:
 
             spawned_models: list[str] = []
 
-            import mewbo_core.tool_use_loop as tul_mod
+            import mewbo_core.loop.tool_use_loop as tul_mod
 
             original_build = tul_mod.build_chat_model
 
@@ -491,7 +501,7 @@ class TestAgentTypeResolution:
 
             bound = MagicMock()
             bound.ainvoke = AsyncMock(return_value=_text_response("done"))
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
 
@@ -548,35 +558,150 @@ class TestAgentTypeResolution:
 
 
 class TestAdmissionControl:
-    """Ref: [AgentCgroup §4.2] Semaphore gates concurrent agent count."""
+    """Bounded concurrency WITHOUT discarding work."""
 
-    def test_admit_blocked_returns_error(self):
+    def test_a_full_fleet_defers_the_spawn_and_starts_it_on_a_settle(self):
+        """The real path, end to end: no patched admission anywhere.
+
+        Patching ``hv.admit`` and asserting a disjunction any error string
+        satisfies exercises no production code and cannot fail. The contract
+        itself is what gets pinned: an over-cap spawn is ACCEPTED as
+        ``submitted`` with a real agent_id, waits, and is started by the
+        settling sibling's own release.
+        """
+
         async def _test():
-            # Create a saturated semaphore so admit() times out quickly
-            hv = AgentHypervisor(max_concurrent=1)
-            # Drain the one slot
-            await hv._semaphore.acquire()
+            hv = _make_hypervisor(max_concurrent=1)
+            ctx, tool = await _register_root(hv)
 
+            gate = asyncio.Event()
+
+            async def gated(*_a, **_k):
+                await gate.wait()
+                return _text_response("child done")
+
+            bound = MagicMock()
+            bound.ainvoke = AsyncMock(side_effect=gated)
+
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mb:
+                mb.return_value = MagicMock()
+                mb.return_value.bind_tools.return_value = bound
+
+                first = json.loads((await tool.run_async(_step("first"))).content)
+                assert first["status"] == "submitted"
+                assert hv.free_slots == 0
+
+                # The fleet is full. The spawn is not refused — it waits.
+                second = json.loads((await tool.run_async(_step("second"))).content)
+                assert second["status"] == "submitted"
+                assert second["agent_id"]
+                assert hv.pending_dispatch == 1
+
+                # A deferred child is a real, visible, non-terminal agent, and
+                # ``submitted`` is exactly the state for it — without it the
+                # never-admitted are invisible to every liveness reader.
+                deferred = await hv.get(second["agent_id"])
+                assert deferred is not None
+                assert deferred.status == "submitted"
+                assert {h.agent_id for h in await hv.collect_running(ctx.agent_id)} == {
+                    first["agent_id"],
+                    second["agent_id"],
+                }
+
+                # Settling the first hands its slot straight to the second.
+                gate.set()
+                await tool.await_lifecycle_managers(timeout=5.0)
+
+            assert hv.pending_dispatch == 0
+            started = await hv.get(second["agent_id"])
+            assert started is not None
+            assert started.status == "completed"
+            assert hv.free_slots == 1
+
+        asyncio.run(_test())
+
+    def test_a_permanent_refusal_is_rejected_and_never_deferred(self):
+        """Capacity is transient; a bad argument is not. They must not look alike."""
+
+        async def _test():
+            hv = _make_hypervisor(max_concurrent=1)
             ctx = _make_root_ctx(hypervisor=hv)
-            tool = _make_spawn_tool(ctx)
+            tool = _make_spawn_tool(ctx, agent_registry=AgentRegistry())
 
-            step = _step("do work")
-            # Override admit timeout to avoid 30s wait
+            result = await tool.run_async(_step("work", agent_type="no-such-agent"))
+            envelope = json.loads(result.content)["error"]
 
-            async def _fast_timeout():
-                try:
-                    await asyncio.wait_for(hv._semaphore.acquire(), timeout=0.05)
-                    return True
-                except asyncio.TimeoutError:
-                    return False
+            # The SHARED handled-failure envelope, so the loop reclassifies the
+            # step as failed through machinery that already exists rather than
+            # a second grammar invented for spawns.
+            assert envelope["code"] == "unknown_agent_type"
+            assert "no-such-agent" in envelope["message"]
+            # ``permanent`` is the load-bearing half: it is what tells the loop
+            # (and the model) that re-issuing this call is pointless.
+            assert envelope["permanence"] == "permanent"
 
-            hv.admit = _fast_timeout  # type: ignore[method-assign]
+            # Nothing was scheduled, registered, or charged a slot: retrying
+            # this call unchanged would fail identically, so deferring it would
+            # be a promise the scheduler could never keep.
+            assert hv.pending_dispatch == 0
+            assert hv.free_slots == 1
+            assert await hv.list_all() == []
 
-            result = await tool.run_async(step)
-            assert "Max concurrent" in result.content or "ERROR" in result.content
+        asyncio.run(_test())
 
-            # Release the manually-acquired slot
-            hv._semaphore.release()
+    def test_a_nested_fan_out_makes_progress_with_every_slot_held(self):
+        """WAITING IS FREE — the deadlock a blocking queue would have caused.
+
+        The root's children saturate the fleet and then block, each awaiting a
+        grandchild inline. If a nested spawn took a SECOND slot, every one of
+        those parents would wait for capacity that only they could free. A
+        blocked parent is not running, so its slot covers the child it is
+        waiting on, and the subtree makes progress at zero free slots.
+        """
+
+        async def _test():
+            hv = _make_hypervisor(max_concurrent=2)
+            ctx, tool = await _register_root(hv)
+
+            gate = asyncio.Event()
+
+            async def gated(*_a, **_k):
+                await gate.wait()
+                return _text_response("child done")
+
+            bound = MagicMock()
+            bound.ainvoke = AsyncMock(side_effect=gated)
+
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mb:
+                mb.return_value = MagicMock()
+                mb.return_value.bind_tools.return_value = bound
+
+                await tool.run_batch_async(_batch_step({"task": "a"}, {"task": "b"}))
+                assert hv.free_slots == 0
+
+                # A depth-1 agent now delegates a grandchild. Under the old
+                # blocking admission this is where the tree wedged.
+                child_ctx = ctx.child(model_name="test-model")
+                child_tool = _make_spawn_tool(child_ctx)
+                child_tool.parent_mode = "act"
+
+                deep = MagicMock()
+                deep.ainvoke = AsyncMock(return_value=_text_response("grandchild done"))
+                mb.return_value.bind_tools.return_value = deep
+
+                result = await asyncio.wait_for(
+                    child_tool.run_async(_step("grandchild work")), timeout=5.0
+                )
+                payload = json.loads(result.content)
+                assert payload["status"] == "completed"
+                # It ran INSIDE its parent's slot — no extra capacity taken.
+                assert hv.free_slots == 0
+                assert hv.pending_dispatch == 0
+
+                gate.set()
+                await tool.await_lifecycle_managers(timeout=5.0)
+
+            assert hv.free_slots == 2
 
         asyncio.run(_test())
 
@@ -589,10 +714,10 @@ class TestAdmissionControl:
 class TestModelValidationErrors:
     """A model outside ``allowed_models`` moves the child, it does not kill it.
 
-    This used to refuse the spawn outright. Refusing is the worse failure: an
-    AgentDef-pinned model the gateway will not serve then killed the child at
-    step 0 while the parent ran on healthily, and nothing upstream had ever
-    checked that model against what the deployment can actually serve. The
+    Refusing the spawn outright is the worse failure: an AgentDef-pinned model
+    the gateway will not serve then kills the child at step 0 while the parent
+    runs on healthily, and nothing upstream checks that model against what the
+    deployment can actually serve. The
     parent's own model is proven — it is what this agent is running on — so the
     child runs there instead, and the substitution is surfaced rather than made
     silently: a caller that pinned a model is owed the fact that it did not
@@ -605,7 +730,7 @@ class TestModelValidationErrors:
             tool = _make_spawn_tool(ctx)
 
             with patch(
-                "mewbo_core.spawn_agent.get_config_value",
+                "mewbo_core.agents.spawn_agent.get_config_value",
                 side_effect=lambda *a, **kw: (
                     ["allowed-model"] if a == ("agent", "allowed_models") else kw.get("default", "")
                 ),
@@ -673,6 +798,9 @@ class TestAgentDepthExceededHandling:
             parsed = json.loads(result.content)
             assert parsed["status"] == "cannot_solve"
             assert "Depth exceeded" in parsed["content"]
+            # The cause is TYPED, not merely spelled out in the prose — the
+            # caller must be able to tell this apart from a busy fleet.
+            assert parsed["code"] == "depth_exceeded"
 
         asyncio.run(_test())
 
@@ -715,7 +843,7 @@ class TestCancelledErrorHandling:
             bound = MagicMock()
             bound.ainvoke = AsyncMock(side_effect=_stalling)
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
 
@@ -765,7 +893,7 @@ class TestSubAgentExceptionHandling:
             bound = MagicMock()
             bound.ainvoke = AsyncMock(side_effect=_explode)
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
 
@@ -807,7 +935,7 @@ class TestSubAgentExceptionHandling:
             bound = MagicMock()
             bound.ainvoke = AsyncMock(side_effect=_explode)
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
 
@@ -869,7 +997,7 @@ class TestNonBlockingSubAgentExceptionHandling:
             bound = MagicMock()
             bound.ainvoke = AsyncMock(side_effect=_explode)
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
 
@@ -965,7 +1093,7 @@ class TestFinallyBlockGrandchildCancellation:
             bound.ainvoke = AsyncMock(return_value=_text_response("done"))
 
             with (
-                patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+                patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
                 patch.object(AgentContext, "child", _capturing_child),
             ):
                 mock_build.return_value = MagicMock()
@@ -1415,7 +1543,7 @@ class TestLifecycleCancelled:
 
             bound.ainvoke = AsyncMock(side_effect=_slow_response)
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
                 await tool.run_async(_step("slow task"))
@@ -2034,9 +2162,9 @@ class TestLifecycleManagerNotificationFormat:
 
 
 class TestLifecycleAdmissionRelease:
-    """Semaphore slot is released after lifecycle finishes."""
+    """The concurrency slot comes back once the lifecycle finishes."""
 
-    def test_semaphore_released_after_lifecycle(self):
+    def test_slot_released_after_lifecycle(self):
         async def _test():
             hv = AgentHypervisor(max_concurrent=1)
             root_q: queue.Queue[str] = queue.Queue()
@@ -2057,16 +2185,15 @@ class TestLifecycleAdmissionRelease:
             bound = MagicMock()
             bound.ainvoke = AsyncMock(return_value=_text_response("done"))
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
                 await tool.run_async(_step("first task"))
                 await tool.await_lifecycle_managers(timeout=5.0)
 
-            # After lifecycle finishes, semaphore should be released (can admit again)
-            admitted = await asyncio.wait_for(hv.admit(), timeout=1.0)
-            assert admitted is True
-            hv.release()
+            # After the lifecycle finishes the slot is back and nothing waits.
+            assert hv.free_slots == 1
+            assert hv.pending_dispatch == 0
 
         asyncio.run(_test())
 
@@ -2086,7 +2213,7 @@ class TestStringToolInputCoercion:
             bound = MagicMock()
             bound.ainvoke = AsyncMock(return_value=_text_response("ok"))
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
 
@@ -2141,7 +2268,7 @@ class TestBlockingSpawnResultFields:
             bound = MagicMock()
             bound.ainvoke = AsyncMock(return_value=_text_response(task_response))
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
 
@@ -2185,7 +2312,7 @@ class TestEmitEvent:
             bound = MagicMock()
             bound.ainvoke = AsyncMock(return_value=_text_response("done"))
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
 
@@ -2303,7 +2430,7 @@ class TestAgentTypeToolScopingInRunAsync:
             bound = MagicMock()
             bound.ainvoke = AsyncMock(return_value=_text_response("done"))
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
 
@@ -2367,34 +2494,39 @@ class TestAgentDepthExceededWithHandle:
 
 
 # ---------------------------------------------------------------------------
-# Hypervisor: admit() timeout path (line 175)
+# Hypervisor: a full fleet never stalls the caller
 # ---------------------------------------------------------------------------
 
 
-class TestHypervisorAdmitTimeout:
-    """admit() returns False when semaphore times out."""
+class TestHypervisorFullFleetDoesNotStall:
+    """A saturated fleet answers IMMEDIATELY — accepted, not timed out.
 
-    def test_admit_returns_false_on_timeout(self):
+    The 30s blocking admit this replaces is the reason the batch path went
+    non-blocking and started dropping its surplus in the first place. Neither
+    trade-off exists once acceptance and dispatch are separate answers.
+    """
+
+    def test_accept_on_a_full_fleet_returns_at_once(self):
         async def _test():
             hv = AgentHypervisor(max_concurrent=1)
-            # Drain the semaphore
-            await hv._semaphore.acquire()
+            started: list[str] = []
 
-            # Override timeout to be very short
-            import asyncio as _asyncio
+            def _unit(agent_id: str):
+                async def _launch() -> None:
+                    started.append(agent_id)
 
-            async def _fast_admit():
-                try:
-                    await _asyncio.wait_for(hv._semaphore.acquire(), timeout=0.05)
-                    return True
-                except _asyncio.TimeoutError:
-                    return False
+                return SpawnUnit(
+                    spawn=ScheduledSpawn(agent_id=agent_id, enqueued_at=0.0),
+                    launch=_launch,
+                )
 
-            hv.admit = _fast_admit  # type: ignore[method-assign]
-            result = await hv.admit()
-            assert result is False
-
-            hv._semaphore.release()  # cleanup
+            assert await hv.accept(_unit("first")) is True
+            # No timeout, no stall: well under any blocking-admit deadline.
+            assert (
+                await asyncio.wait_for(hv.accept(_unit("second")), timeout=0.5)
+            ) is False
+            assert started == ["first"]
+            assert hv.pending_dispatch == 1
 
         asyncio.run(_test())
 
@@ -2509,7 +2641,7 @@ class TestLifecycleManagerGrandchildCancellation:
             bound.ainvoke = AsyncMock(side_effect=_register_grandchild_then_respond)
 
             with (
-                patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+                patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
                 patch.object(AgentContext, "child", _tracking_child),
             ):
                 mock_build.return_value = MagicMock()
@@ -2563,7 +2695,7 @@ class TestLifecycleManagerNotificationElseBranch:
 
             # Manually drive _run_child_lifecycle; the model raises CancelledError
             # so the child loop the driver creates resolves to the cancel path.
-            from mewbo_core.spawn_agent import RetryPolicy
+            from mewbo_core.agents.spawn_agent import RetryPolicy
 
             tool = _make_spawn_tool(ctx)
 
@@ -2585,7 +2717,7 @@ class TestLifecycleManagerNotificationElseBranch:
             bound = MagicMock()
             bound.ainvoke = AsyncMock(side_effect=_immediate_cancel)
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
                 # Signature: (child_ctx, handle, child_specs, allowed_tools,
@@ -2676,7 +2808,7 @@ class TestBlockingSpawnFinallyGrandchild:
             bound.ainvoke = AsyncMock(return_value=_text_response("done"))
 
             with (
-                patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+                patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
                 patch.object(AgentContext, "child", _capturing_child),
             ):
                 mock_build.return_value = MagicMock()
@@ -2741,7 +2873,7 @@ class TestSubAgentEventAgentType:
             bound = MagicMock()
             bound.ainvoke = AsyncMock(return_value=_text_response("probe done"))
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
                 await tool.run_async(
@@ -2764,7 +2896,7 @@ class TestSubAgentEventAgentType:
             assert p["agent_type"] != p["model"]  # distinct from the model name
 
     def test_no_agent_type_omits_key(self):
-        """An ad-hoc spawn (no agent_type) omits the key — legacy consumers safe."""
+        """An ad-hoc spawn (no agent_type) omits the key entirely — never a null."""
         payloads = self._drive_blocking_spawn({"task": "ad-hoc work"})
         assert payloads  # start + stop emitted
         for p in payloads:
@@ -2821,7 +2953,7 @@ class TestSpawnAgentsBatch:
             bound = MagicMock()
             bound.ainvoke = AsyncMock(side_effect=gated)
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mb:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mb:
                 mb.return_value = MagicMock()
                 mb.return_value.bind_tools.return_value = bound
 
@@ -2840,10 +2972,10 @@ class TestSpawnAgentsBatch:
                 assert all(a["status"] == "submitted" for a in payload["agents"])
 
                 # Overlapping start windows: all three RUNNING simultaneously and
-                # holding 3 of the 5 semaphore slots at the same time.
+                # holding 3 of the 5 concurrency slots at the same time.
                 running = await hv.collect_running(ctx.agent_id)
                 assert len(running) == 3
-                assert hv._semaphore._value == 2  # 5 - 3 concurrently held
+                assert hv.free_slots == 2  # 5 - 3 concurrently held
 
                 # check_agents shows all children in the tree.
                 tree = await hv.render_agent_tree(exclude_agent_id=ctx.agent_id)
@@ -2854,12 +2986,18 @@ class TestSpawnAgentsBatch:
                 gate.set()
                 await tool.await_lifecycle_managers(timeout=5.0)
 
-            assert hv._semaphore._value == 5
+            assert hv.free_slots == 5
 
         asyncio.run(_test())
 
-    def test_batch_partial_admission_rejects_surplus(self):
-        """Slot exhaustion → surplus entries 'rejected' in slot; siblings proceed."""
+    def test_batch_over_capacity_defers_the_surplus_and_drains_it(self):
+        """A wide fan-out is THROTTLED by concurrency, never truncated by it.
+
+        The old contract dropped the surplus: 4 tasks against 2 slots returned
+        ``rejected: 2`` and two workstreams simply never happened, while the
+        caller read four agent slots and only two ids. Acceptance is now atomic
+        — all four become real agents — and only DISPATCH is staggered.
+        """
 
         async def _test():
             hv = _make_hypervisor(max_concurrent=2)
@@ -2874,7 +3012,7 @@ class TestSpawnAgentsBatch:
             bound = MagicMock()
             bound.ainvoke = AsyncMock(side_effect=gated)
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mb:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mb:
                 mb.return_value = MagicMock()
                 mb.return_value.bind_tools.return_value = bound
 
@@ -2885,23 +3023,34 @@ class TestSpawnAgentsBatch:
                 )
                 payload = json.loads(result.content)
 
-                # Only 2 slots → first two admitted, last two rejected in place.
-                assert payload["spawned"] == 2
-                assert payload["rejected"] == 2
+                # 4 accepted, 2 dispatched, 2 deferred, NOTHING rejected.
+                assert payload["spawned"] == 4
+                assert payload["dispatched"] == 2
+                assert payload["deferred"] == 2
+                assert payload["rejected"] == 0
+                # Every accepted entry is ``submitted`` — starting now versus
+                # waiting is a scheduling COUNT, never a per-agent status.
                 statuses = [a["status"] for a in payload["agents"]]
-                assert statuses == ["submitted", "submitted", "rejected", "rejected"]
+                assert statuses == ["submitted"] * 4
                 ids = payload["agent_ids"]
-                assert ids[0] and ids[1]
-                assert ids[2] is None and ids[3] is None
+                assert all(ids), "every entry must come back with a real agent_id"
+                assert len(set(ids)) == 4
 
-                # The two admitted siblings are unaffected — both running.
-                running = await hv.collect_running(ctx.agent_id)
-                assert len(running) == 2
+                # The two dispatched siblings are unaffected — both running —
+                # and the two waiting ones are visible as owed work.
+                assert len(await hv.collect_running(ctx.agent_id)) == 4
+                assert hv.pending_dispatch == 2
+                assert hv.free_slots == 0
 
+                # Drain: the settling pair pumps the queue, and all four run.
                 gate.set()
                 await tool.await_lifecycle_managers(timeout=5.0)
 
-            assert hv._semaphore._value == 2
+            assert hv.pending_dispatch == 0
+            assert hv.free_slots == 2
+            settled = {h.agent_id: h for h in await hv.list_all()}
+            assert [settled[aid].status for aid in ids] == ["completed"] * 4
+            assert all(settled[aid].result is not None for aid in ids)
 
         asyncio.run(_test())
 
@@ -2939,7 +3088,7 @@ class TestSpawnAgentsBatch:
             bound = MagicMock()
             bound.ainvoke = AsyncMock(return_value=_text_response("done"))
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mb:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mb:
                 mb.return_value = MagicMock()
                 mb.return_value.bind_tools.return_value = bound
                 result = await tool.run_batch_async(
@@ -2993,7 +3142,7 @@ class TestSpawnAgentsValidation:
         advertise `retry`; the SpawnAgentTask validator must accept it and
         `to_args` must thread it through for `RetryPolicy.from_value`.
         """
-        from mewbo_core.spawn_agent import RetryPolicy, SpawnAgentTask
+        from mewbo_core.agents.spawn_agent import RetryPolicy, SpawnAgentTask
 
         entry = SpawnAgentTask.model_validate(
             {"task": "a", "retry": {"max": 2, "on": ["failed"], "backoff": 0.5}}
@@ -3004,8 +3153,8 @@ class TestSpawnAgentsValidation:
         assert policy.enabled and policy.max == 2 and policy.on == ("failed",)
 
 
-class TestRootSpawnSemaphoreNoInflation:
-    """Regression: a root spawn HOLDS its slot and releases exactly once."""
+class TestRootSpawnSlotNoInflation:
+    """A root spawn HOLDS its slot and releases exactly once."""
 
     def test_root_child_holds_slot_then_releases_once(self):
         async def _test():
@@ -3033,16 +3182,260 @@ class TestRootSpawnSemaphoreNoInflation:
             bound = MagicMock()
             bound.ainvoke = AsyncMock(side_effect=gated)
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mb:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mb:
                 mb.return_value = MagicMock()
                 mb.return_value.bind_tools.return_value = bound
                 await tool.run_async(_step("hold a slot"))
                 # While the child runs it must HOLD one slot (was a no-op before).
-                assert hv._semaphore._value == 2
+                assert hv.free_slots == 2
                 gate.set()
                 await tool.await_lifecycle_managers(timeout=5.0)
 
             # Released exactly once — back to 3, never inflated above the max.
-            assert hv._semaphore._value == 3
+            assert hv.free_slots == 3
+
+        asyncio.run(_test())
+
+
+class TestRefusedSpawnIsAFailedStep:
+    """A refused spawn must record as a FAILED tool step, not "✓ ok".
+
+    The spawn branch of ``_execute_tool_call`` never set an error, so a refusal
+    fell through to ``success=True``: no per-step failure nudge, no doom-loop
+    tracking, no ``permanence``. It is the same defect the repo already fixed
+    for SessionTools that RETURN a handled error rather than raising — so it
+    now rides the same envelope and the same parse.
+    """
+
+    def test_the_refusal_envelope_survives_the_real_parser(self):
+        """The JSON envelope must be READ by the seam that reclassifies it.
+
+        This is the cross-check, not a formality. ``_SessionToolError.parse``
+        reads envelopes with ``ast.literal_eval`` and its own docstring warns
+        that a ``json.dumps`` payload gets silently DECLINED — and a decline
+        here does not raise, it restores the ``success=True`` defect. So the
+        round trip is pinned against the real parser rather than reasoned
+        about: the JSON form works because every field is a ``str``, and that
+        is a fact about the payload which a future field could break.
+        """
+        from mewbo_core.agents.spawn_agent import _SpawnOutcome
+        from mewbo_core.loop.tool_use_loop import _SessionToolError
+
+        outcome = _SpawnOutcome(
+            # A message carrying the punctuation a real refusal uses: an em
+            # dash (non-ASCII, escaped by json.dumps) and embedded single
+            # quotes around the offending key.
+            content="ERROR: Project 'gamma' cannot be resolved — try 'alpha'",
+            agent_id=None,
+            status="rejected",
+            code="unresolvable_project",
+        )
+        parsed = _SessionToolError.parse(outcome.report())
+
+        assert parsed is not None, "the loop would record this refusal as success"
+        assert parsed.code == "unresolvable_project"
+        assert "gamma" in parsed.message
+        assert parsed.permanence == "permanent"
+        assert parsed.blocks_completion is False
+
+    def test_a_refused_spawn_records_success_false_and_permanent(self):
+        from mewbo_core.loop.tool_use_loop import ToolUseLoop
+
+        async def _test():
+            hv = _make_hypervisor(max_concurrent=2)
+            ctx = _make_root_ctx(hypervisor=hv)
+            loop = ToolUseLoop(
+                agent_context=ctx,
+                tool_registry=_make_registry("shell_tool"),
+                permission_policy=_allow_all_policy(),
+                hook_manager=_make_hook_manager(),
+            )
+            loop._spawn_agent_tool = _make_spawn_tool(
+                ctx, agent_registry=AgentRegistry()
+            )
+
+            result = await loop._execute_tool_call(
+                {
+                    "id": "call-1",
+                    "name": "spawn_agent",
+                    "args": {"task": "work", "agent_type": "no-such-agent"},
+                },
+                [],
+            )
+
+            assert result.success is False, "a refusal is not a successful step"
+            assert result.permanence == "permanent"
+            # The model still reads the full typed detail — surfacing the
+            # failure must not hide what the tool chose to return.
+            assert "unknown_agent_type" in result.content
+            # Not a blocked-run code: a bad agent_type is the caller's to fix,
+            # not a condition that halts the session.
+            assert result.blocked_code is None
+
+        asyncio.run(_test())
+
+    def test_an_accepted_spawn_still_records_success(self):
+        """The seam fires ONLY on refusals — an ordinary spawn is untouched."""
+        from mewbo_core.loop.tool_use_loop import ToolUseLoop
+
+        async def _test():
+            hv = _make_hypervisor(max_concurrent=2)
+            ctx, tool = await _register_root(hv)
+            loop = ToolUseLoop(
+                agent_context=ctx,
+                tool_registry=_make_registry("shell_tool"),
+                permission_policy=_allow_all_policy(),
+                hook_manager=_make_hook_manager(),
+            )
+            loop._spawn_agent_tool = tool
+
+            bound = MagicMock()
+            bound.ainvoke = AsyncMock(return_value=_text_response("done"))
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mb:
+                mb.return_value = MagicMock()
+                mb.return_value.bind_tools.return_value = bound
+                result = await loop._execute_tool_call(
+                    {"id": "call-2", "name": "spawn_agent", "args": {"task": "work"}},
+                    [],
+                )
+                assert result.success is True
+                assert result.permanence is None
+                assert json.loads(result.content)["status"] == "submitted"
+                await tool.await_lifecycle_managers(timeout=5.0)
+
+        asyncio.run(_test())
+
+
+class TestSteerAgentReachesADeferredChild:
+    """Cancelling a child that is admitted but not yet started.
+
+    A root fans out past the concurrency limit, the model calls
+    ``steer_agent(action="cancel")`` on one of the waiting children, and is
+    told ``cannot cancel: no asyncio task`` — and then that child starts and
+    consumes a slot anyway once a sibling settles. Pre-scheduler the surplus
+    spawn was refused outright, so no uncancellable agent could exist at all;
+    deferring made this reachable and it has to be closed with it.
+    """
+
+    def test_cancelling_a_deferred_child_succeeds_and_it_never_runs(self):
+        async def _test():
+            hv = _make_hypervisor(max_concurrent=1)
+            ctx, tool = await _register_root(hv)
+
+            gate = asyncio.Event()
+            built: list[str] = []
+
+            async def gated(*_a, **_k):
+                built.append("call")
+                await gate.wait()
+                return _text_response("child done")
+
+            bound = MagicMock()
+            bound.ainvoke = AsyncMock(side_effect=gated)
+
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mb:
+                mb.return_value = MagicMock()
+                mb.return_value.bind_tools.return_value = bound
+
+                first = json.loads((await tool.run_async(_step("first"))).content)
+                second = json.loads((await tool.run_async(_step("second"))).content)
+                assert hv.pending_dispatch == 1
+
+                reply = await tool.handle_steer_agent(
+                    ActionStep(
+                        tool_id="steer_agent",
+                        operation="set",
+                        tool_input={"agent_id": second["agent_id"], "action": "cancel"},
+                    )
+                )
+                assert "cancelled" in reply.content
+                assert "cannot cancel" not in reply.content
+
+                gate.set()
+                await tool.await_lifecycle_managers(timeout=5.0)
+
+            # Exactly ONE child ever drove a model call. Counting the total is
+            # what makes this non-racy: a before/after snapshot would depend on
+            # whether the first child's task had been scheduled yet.
+            assert len(built) == 1, "the cancelled child must never have run"
+            cancelled = await hv.get(second["agent_id"])
+            assert cancelled is not None
+            assert cancelled.status == "cancelled"
+            assert (await hv.get(first["agent_id"])).status == "completed"
+            assert hv.free_slots == 1
+
+        asyncio.run(_test())
+
+    def test_a_deferred_child_emits_no_start_until_it_dispatches(self):
+        """No start event ⇒ no stop owed. The span invariant, for waiting units.
+
+        ``_emit_terminal_stop`` guarantees one stop per start, and a deferred
+        child that is cancelled never reaches a lifecycle manager to write
+        one. So the start must not be emitted at ACCEPTANCE — otherwise every
+        cancelled-while-waiting agent leaves a span open forever.
+        """
+
+        async def _test():
+            hv = _make_hypervisor(max_concurrent=1)
+            events: list[dict] = []
+            root_q: queue.Queue[str] = queue.Queue()
+            ctx = AgentContext.root(
+                model_name="test-model",
+                max_depth=5,
+                registry=hv,
+                message_queue=root_q,
+                event_logger=lambda e: events.append(e),
+            )
+            await hv.register(
+                AgentHandle(
+                    agent_id=ctx.agent_id,
+                    parent_id=None,
+                    depth=0,
+                    model_name=ctx.model_name,
+                    task_description="root",
+                    status="running",
+                    message_queue=root_q,
+                )
+            )
+            tool = _make_spawn_tool(ctx)
+
+            gate = asyncio.Event()
+
+            async def gated(*_a, **_k):
+                await gate.wait()
+                return _text_response("done")
+
+            bound = MagicMock()
+            bound.ainvoke = AsyncMock(side_effect=gated)
+
+            def starts() -> list[str]:
+                return [
+                    e["payload"]["agent_id"]
+                    for e in events
+                    if e.get("type") == "sub_agent"
+                    and e["payload"].get("action") == "start"
+                ]
+
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mb:
+                mb.return_value = MagicMock()
+                mb.return_value.bind_tools.return_value = bound
+
+                first = json.loads((await tool.run_async(_step("first"))).content)
+                second = json.loads((await tool.run_async(_step("second"))).content)
+
+                # Only the DISPATCHED child has begun; the waiting one has not.
+                assert starts() == [first["agent_id"]]
+
+                gate.set()
+                await tool.await_lifecycle_managers(timeout=5.0)
+
+            # Once promoted it emits its own start, and every start is closed.
+            assert sorted(starts()) == sorted([first["agent_id"], second["agent_id"]])
+            stops = [
+                e["payload"]["agent_id"]
+                for e in events
+                if e.get("type") == "sub_agent" and e["payload"].get("action") == "stop"
+            ]
+            assert sorted(stops) == sorted(starts())
 
         asyncio.run(_test())

@@ -21,28 +21,16 @@ from collections.abc import Callable, Iterator, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, ClassVar
 
 from flask import Flask, Request, Response, g, request, stream_with_context
 from flask_restx import Api, Resource, fields
-from mewbo_core.ask_user import (
-    ASK_USER_CAPABILITY,
-    AskUserQuestionTool,
-    QuestionAnswerItem,
-    QuestionDispatcher,
-)
-from mewbo_core.attachments import (
-    is_image,
-    is_supported,
-    model_supports_vision,
-    parse_to_markdown,
-    parsed_sidecar_path,
-)
 from mewbo_core.classes import TaskQueue
-from mewbo_core.client_tools import ClientDeclaredTool, ClientToolSpec, DeviceToolDispatcher
 from mewbo_core.common import get_logger
 from mewbo_core.config import (
     AppConfig,
+    ConfigWriteAccess,
+    ConfigWriteError,
     _deep_merge,
     _load_json,
     get_app_config_path,
@@ -53,53 +41,94 @@ from mewbo_core.config import (
     reset_config,
     start_preflight,
 )
-from mewbo_core.context import _iter_attachments
-from mewbo_core.exit_plan_mode import PLAN_DIR_ROOT, plan_file_for, session_temp_dir
-from mewbo_core.key_store import KeyScopes, KeyStoreBase, PublicKeyRecord, create_key_store
-from mewbo_core.llm_resilience import RetryStrategy
-from mewbo_core.notifications import NotificationStore
-from mewbo_core.permissions import auto_approve
-from mewbo_core.project_store import VirtualProject, create_project_store
-from mewbo_core.secret_redaction import redact_mapping, redact_text
-from mewbo_core.session_provenance import MOBILE_TAG_PREFIX, SessionOrigin, is_mobile_surface
-from mewbo_core.session_runtime import (
+from mewbo_core.contracts.secret_redaction import redact_mapping, redact_text
+from mewbo_core.contracts.types import EventRecord
+from mewbo_core.llm.llm_resilience import RetryStrategy
+from mewbo_core.loop.session_runtime import (
     SessionRuntime,
     SessionTerminatedError,
     parse_core_command,
 )
-from mewbo_core.session_store import SessionStoreBase, create_session_store
-from mewbo_core.session_tools import SessionTool
-from mewbo_core.share_store import ShareStore
-from mewbo_core.tool_registry import (
+from mewbo_core.permissions import auto_approve
+from mewbo_core.secrets.key_store import KeyScopes, KeyStoreBase, PublicKeyRecord, create_key_store
+from mewbo_core.session.attachments import (
+    is_image,
+    is_supported,
+    model_supports_vision,
+    parse_to_markdown,
+    parsed_sidecar_path,
+)
+from mewbo_core.session.context import _iter_attachments
+from mewbo_core.session.event_cursor import EventCursor
+from mewbo_core.session.notifications import NotificationStore
+from mewbo_core.session.session_provenance import (
+    MOBILE_TAG_PREFIX,
+    SessionOrigin,
+    is_mobile_surface,
+)
+
+# Aliased: ``SessionQuery`` is already the name of the ``/sessions/<id>/query``
+# Resource below, and that class name is what flask-restx publishes as the
+# operation id. The listing predicate takes the alias so neither has to move.
+from mewbo_core.session.session_query import SessionQuery as SessionListQuery
+from mewbo_core.session.session_store import SessionStoreBase, create_session_store
+from mewbo_core.session.share_store import ShareStore
+from mewbo_core.session.transcript_timeline import TranscriptTimeline
+from mewbo_core.tooling.ask_user import (
+    ASK_USER_CAPABILITY,
+    MAX_QUESTION_NOTES_CHARS,
+    AskUserQuestionTool,
+    QuestionAnswerItem,
+    QuestionDispatcher,
+)
+from mewbo_core.tooling.client_tools import ClientDeclaredTool, ClientToolSpec, DeviceToolDispatcher
+from mewbo_core.tooling.exit_plan_mode import PLAN_DIR_ROOT, plan_file_for, session_temp_dir
+from mewbo_core.tooling.session_tools import SessionTool
+from mewbo_core.tooling.tool_registry import (
     classify_tool_scope,
     get_or_build_registry,
     load_registry,
 )
-from mewbo_core.transcript_timeline import TranscriptTimeline
-from mewbo_core.types import EventRecord
-from mewbo_core.worktree import WorktreeBranchInUseError, WorktreeManager
+from mewbo_core.workspaces.project_catalog import (
+    AUTO_PROJECT,
+    MANAGED_PREFIX,
+    ProjectCatalog,
+    ProjectResolutionError,
+    is_auto_project,
+)
+from mewbo_core.workspaces.project_store import (
+    ProjectStoreBase,
+    VirtualProject,
+    create_project_store,
+)
+from mewbo_core.workspaces.repository_store import create_repository_store
+from mewbo_core.workspaces.worktree import WorktreeBranchInUseError, WorktreeManager
 from mewbo_tools.integration.file_catalog import FileCatalog
 from mewbo_tools.integration.reference_expansion import expand_references
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from werkzeug.exceptions import NotFound
 from werkzeug.utils import secure_filename
 
 from mewbo_api.config_view import ConfigSchemaView
-from mewbo_api.errors import register_api_error_handler
+from mewbo_api.errors import (
+    RequestInvalid,
+    StreamCapacityExhausted,
+    register_api_error_handler,
+)
 from mewbo_api.repo_identity import RepoIdentity
 from mewbo_api.request_context import request_surface
 from mewbo_api.responses import ApiResponseKit
 from mewbo_api.session_spec import (
-    SPEC_CONTEXT_KEY,
     SessionSpec,
     SessionSpecOverrides,
     SessionSpecStore,
 )
+from mewbo_api.stream_capacity import LeasedStream, StreamCapacity
 
 # The canonical 410-Gone body for a permanently terminated session lives on the
-# response kit (the ONE home both this module and triggers/routes.py import with
-# no cycle); this thin module alias keeps the six legacy guard call sites
-# untouched while the envelope stays single-sourced.
+# response kit — the ONE home both this module and triggers/routes.py import
+# with no cycle. This thin alias keeps the guard call sites below terse while
+# the envelope stays single-sourced.
 _terminated_response = ApiResponseKit.terminated_response
 
 # ``done_reason`` taxonomy — the orchestrator and /command paths share these
@@ -255,12 +284,10 @@ class NotificationService:
         return False
 
 
-# Get the API token from app config
-MASTER_API_TOKEN = os.environ.get("MASTER_API_TOKEN") or get_config_value(
+MASTER_API_TOKEN = os.environ.get("MEWBO_MASTER_API_TOKEN") or get_config_value(
     "api", "master_token", default="msk-strong-password"
 )
 
-# Initialize logger
 logging = get_logger(name="mewbo-api")
 logging.info("Starting Mewbo API server.")
 logging.debug("API master token configured: {}", "yes" if MASTER_API_TOKEN else "no")
@@ -271,7 +298,7 @@ if _config.runtime.preflight_enabled:
 
 # Load hooks from config so API sessions run with configured hooks
 from mewbo_core.hooks import HookManager as _HookManager  # noqa: E402
-from mewbo_core.session_event_bus import (  # noqa: E402
+from mewbo_core.session.session_event_bus import (  # noqa: E402
     SessionEventBus,
     Subscription,
     get_session_event_bus,
@@ -283,11 +310,102 @@ _hook_manager = _HookManager.load_from_config(_config.hooks)
 # hook manager connect (the SSE stream subscribes to the same bus directly).
 get_session_event_bus().register_observer(_hook_manager.run_on_event)
 
-# Create Flask application
 app = Flask(__name__)
 session_store = create_session_store()
 key_store: KeyStoreBase = create_key_store()
 project_store = create_project_store()
+repository_store = create_repository_store()
+
+
+class ManagedCheckoutLocator:
+    """Answers "which managed project is a checkout of this repository slug?".
+
+    The ONE fact :class:`ProjectCatalog` cannot compute for itself, which is why
+    it takes the join as an injected callable: matching a repository identity
+    against a project's git REMOTES needs ``RepoIdentity``, which lives in this
+    app, above core in the DAG. The matching RULE is the alias-set rule
+    ``GitRepositoriesController`` already reports ``usage.tasks`` from, so the
+    catalog and that projection cannot disagree about which checkout a slug
+    belongs to — including its known limitation, the last-two-segments alias
+    form that misses a subgroup-nested remote.
+
+    **Why the per-path memo is load-bearing.** ``RepoIdentity.aliases_for_path``
+    SHELLS OUT once per project, and the catalog asks for this join on every
+    resolution — which now includes the session-create and query paths, where
+    nothing spawned a subprocess before. A long-lived store accretes promoted
+    parents (a dev box held several hundred, nearly all dead temp paths), so an
+    unmemoized join would put that many process spawns on every request. Two
+    cheap filters do most of the work: a project whose path is not a git working
+    tree is skipped without spawning anything, and a path's alias set is read
+    once per process. The project LIST is re-read every call, so a checkout
+    created moments ago costs exactly one new ``git`` call and is resolvable
+    immediately — the memo bounds the cost, never the freshness.
+    """
+
+    def __init__(self, project_store: ProjectStoreBase) -> None:
+        """Bind the store whose projects are candidate checkouts."""
+        self.project_store = project_store
+        self._aliases_by_path: dict[str, list[str]] = {}
+
+    def locate(self, slug: str) -> str | None:
+        """Return the checkout directory holding *slug*, or ``None``.
+
+        Worktrees are skipped for the same reason the usage projection skips
+        them: a worktree is a child of a parent that is itself a candidate, so
+        including it would report one repository as several checkouts.
+        """
+        try:
+            projects = self.project_store.list_projects()
+        except Exception:  # noqa: BLE001 - an unreadable store means "no checkout known"
+            return None
+        for project in projects:
+            if project.is_worktree or not project.path:
+                continue
+            if slug in self._aliases_for(project.path):
+                return project.path
+        return None
+
+    def _aliases_for(self, path: str) -> list[str]:
+        """Every alias form the remote(s) at *path* are addressable by, memoized."""
+        cached = self._aliases_by_path.get(path)
+        if cached is not None:
+            return cached
+        # ``_is_git_repo`` is defined further down this module; it resolves at
+        # call time. Reusing it is what keeps a dead or non-git project path
+        # from costing a process spawn.
+        aliases = RepoIdentity.aliases_for_path(path) if _is_git_repo(path) else []
+        self._aliases_by_path[path] = aliases
+        return aliases
+
+
+_checkout_locator = ManagedCheckoutLocator(project_store)
+
+# The ONE catalog: every "project name → directory" decision in this app runs
+# through it. Held as a composition-root handle rather than rebuilt per call so
+# the memo above survives, and re-pointed by ``_catalog()`` because two of its
+# four sources legitimately move under a running process.
+_project_catalog = ProjectCatalog(
+    configured=_config.projects,
+    project_store=project_store,
+    repository_store=repository_store,
+    checkout_locator=_checkout_locator.locate,
+)
+
+
+def _catalog() -> ProjectCatalog:
+    """The one catalog, re-pointed at the sources this process currently holds.
+
+    ``get_config()`` is re-read on every resolution today (a ``PATCH /api/config``
+    can add or drop a project mid-process) and ``project_store`` is a module
+    global the suite legitimately rebinds to a temp-dir store per test. A catalog
+    that captured either at import would keep answering from the config or the
+    store that existed then — the same late-binding reason ``_session_specs``
+    takes lambdas rather than bound methods.
+    """
+    _project_catalog.configured = get_config().projects
+    _project_catalog.project_store = project_store
+    _checkout_locator.project_store = project_store
+    return _project_catalog
 
 
 def _auto_cleanup_worktree_on_session_end(session_id: str, error: str | None) -> None:
@@ -304,18 +422,16 @@ def _auto_cleanup_worktree_on_session_end(session_id: str, error: str | None) ->
 
     Failures are swallowed — this is best-effort housekeeping, never blocking.
     """
+    # The newest context event NAMING a project, not the newest context event:
+    # context events merge key-by-key, so a session's latest one need not mention
+    # a project at all. Type-bounded, so this is one indexed read, not a scan.
     try:
-        events = session_store.load_transcript(session_id)
+        event = session_store.latest_event_of_type(session_id, "context", payload_key="project")
     except Exception:
         return
-    project_name: str | None = None
-    for evt in events:
-        if evt.get("type") != "context":
-            continue
-        payload = evt.get("payload") or {}
-        candidate = payload.get("project")
-        if isinstance(candidate, str) and candidate:
-            project_name = candidate
+    payload = (event.get("payload") if event else None) or {}
+    candidate = payload.get("project") if isinstance(payload, dict) else None
+    project_name = candidate if isinstance(candidate, str) and candidate else None
     if not project_name or not project_name.startswith("managed:"):
         return
     vpid = project_name[len("managed:") :]
@@ -376,7 +492,7 @@ try:
 except Exception:
     logging.warning("Session-run startup sweep failed", exc_info=True)
 
-# Client-declared device tools (Phase 1): register the concrete
+# Client-declared device tools: register the concrete
 # dispatcher into the core seam, mirroring how the api registers
 # RunStoreSearchLauncher for the agentic-search SessionTool. Unconditional
 # (no feature flag) — a session simply never advertises `device_tools` when
@@ -387,8 +503,14 @@ DeviceToolDispatcher.register(ApiDeviceToolDispatcher(runtime=runtime))
 
 # Ask-user questions: same down-only registration, same no-flag rationale — a
 # session simply never advertises the `ask_user` capability when no interactive
-# client is attached, so the tool (and its unbounded wait) never exists for it.
-from mewbo_api.ask_user import ApiQuestionDispatcher, get_pending_questions  # noqa: E402
+# client is attached, so the tool (and the wait it blocks on, which is unbounded
+# unless the call names its own `timeout_seconds`) never exists for it.
+from mewbo_api.ask_user import (  # noqa: E402
+    ApiQuestionDispatcher,
+    QuestionAnswerRouter,
+    TurnDelivery,
+    get_pending_questions,
+)
 
 QuestionDispatcher.register(ApiQuestionDispatcher(runtime=runtime))
 
@@ -408,7 +530,7 @@ ns = api.namespace("api", description="Mewbo operations")
 
 # One DRY home for the error-response half of the OpenAPI contract on this
 # namespace. ``kit.errors(...)`` / ``kit.auth_error()`` attach example-bearing
-# error bodies (envelope or legacy ``{"message"}`` shape) per route — see
+# error bodies (envelope or ``{"message"}`` shape) per route — see
 # ``responses.py``. Wire it once here so import-time decorators can see it.
 kit = ApiResponseKit(ns, prefix="Api")
 
@@ -613,7 +735,7 @@ def _token_matches_master(token: str) -> bool:
 
 # -- Identity & access management -----------------------------------------
 # ONE AuthKit resolves every request to a Principal. With no ``api.auth`` block
-# (the default) it is DISABLED: ``resolve`` returns the legacy full-power
+# (the default) it is DISABLED: ``resolve`` returns the full-power
 # principal, the guards below behave exactly as they did before IAM existed, no
 # IAM store is created, and no ``iam_*.json`` is written. Constructed here (this
 # app builds at import) so an ENABLED deployment fails LOUD at boot on invalid
@@ -675,8 +797,7 @@ def _require_master_token() -> tuple[dict, int] | None:
     """Authorize a master-token-only route — thin wrapper over the one AuthKit.
 
     Issued keys are deliberately rejected here: a leaked key must not be able to
-    mint or revoke keys. Same wire contract as before. See
-    ``AuthKit.require_master_token``.
+    mint or revoke keys. See ``AuthKit.require_master_token``.
     """
     return _auth_kit.require_master_token()
 
@@ -688,7 +809,7 @@ def _require_master_token() -> tuple[dict, int] | None:
 # ``_require_api_key() or _require_permission("sessions.read")()`` authenticates
 # first, then authorizes. Order matters: an unauthenticated caller must get the
 # 401 the key guard has always returned, never a 403 about a role it was never
-# asked to present. With auth disabled every request resolves to the legacy admin
+# asked to present. With auth disabled every request resolves to the admin
 # principal, which bypasses every check — so the composed form is byte-identical
 # to the bare key guard in a default deployment.
 #
@@ -830,11 +951,42 @@ if _web_ide_cfg is not None and _web_ide_cfg.enabled:
         )
     else:
         try:
-            from mewbo_api.ide import IdeManager, IdeStore
+            from mewbo_api.ide import (
+                BrokerContainerBackend,
+                DockerContainerBackend,
+                IdeContainerBackend,
+                IdeManager,
+                IdeStore,
+            )
+            from mewbo_api.ide_broker import IdeBrokerClient
             from mewbo_api.ide_routes import ide_ns, init_ide
 
             _ide_store = IdeStore(_mongo_db)
-            _ide_manager = IdeManager(_web_ide_cfg, _ide_store)
+            # The broker is selected only when BOTH coordinates are present. Its
+            # shared secret is read from the environment and never from
+            # app.json, which GET /api/config serves. Log the choice at INFO:
+            # this is how an operator tells whether the API process still holds
+            # the docker socket.
+            _ide_broker_url = _web_ide_cfg.broker_url.strip()
+            _ide_broker_token = os.environ.get("MEWBO_IDE_BROKER_TOKEN", "").strip()
+            _ide_backend: IdeContainerBackend
+            if _ide_broker_url and _ide_broker_token:
+                _ide_backend = BrokerContainerBackend(
+                    IdeBrokerClient(_ide_broker_url, _ide_broker_token)
+                )
+                logging.info(
+                    "web_ide: container operations delegated to the IDE broker at {}; "
+                    "this process needs no docker socket",
+                    _ide_broker_url,
+                )
+            else:
+                _ide_backend = DockerContainerBackend(_web_ide_cfg)
+                logging.info(
+                    "web_ide: driving the docker daemon directly from the API process "
+                    "(no broker configured — set agent.web_ide.broker_url and "
+                    "MEWBO_IDE_BROKER_TOKEN to move that privilege out)"
+                )
+            _ide_manager = IdeManager(_web_ide_cfg, _ide_store, backend=_ide_backend)
             init_ide(_ide_manager, runtime)
             api.add_namespace(ide_ns, path="/api")
             logging.info("web_ide namespace registered at /api")
@@ -1054,8 +1206,8 @@ def _extract_strict_tool_scope(context_payload: dict[str, object]) -> bool:
     Mirrors ``_extract_allowed_tools`` — a re-engage site (``/message``,
     ``/recover``) that derives its tool grants from persisted context should
     re-apply the SAME scoping the originating ``start_async`` call used,
-    not silently default to unscoped. Absent ⇒ ``False``, the
-    historical re-engage behaviour for every non-scoped session.
+    not silently default to unscoped. Absent ⇒ ``False``, i.e. unscoped, which
+    is correct for every session that never asked for a tool ceiling.
     """
     return bool(context_payload.get("strict_tool_scope", False))
 
@@ -1138,7 +1290,7 @@ _triggers_enabled = False
 # module scope), read at trigger-fire time by ``_trigger_deliver``; None until
 # then so the trigger path no-ops on a deployment without the apps sub-product.
 _apps_pipeline_tracker = None
-# Mewbo Apps code-pipeline executor (Phase 2). Populated by ``init_apps``;
+# Mewbo Apps code-pipeline executor. Populated by ``init_apps``;
 # also pushed to the plugin's run_pipeline seam via ``register_pipeline_runner``.
 # The tracker holds it for the fire seam; this module handle lets the REST run
 # endpoint reach it too (``current_pipeline_runner()`` is the plugin's path).
@@ -1180,9 +1332,9 @@ def _derive_tool_grants(
     extra_session_tools: list[SessionTool] = [
         ClientDeclaredTool(session_id, spec) for spec in device_specs
     ]
-    # NB: schedule_trigger is NO LONGER injected here — it rides the ordinary
-    # SessionToolRegistry (wired in init_triggers) so spawned
-    # sub-agents can bind it too. ask_user_question stays root-only on this seam.
+    # schedule_trigger is NOT injected here — it rides the ordinary
+    # SessionToolRegistry (wired in init_triggers) so spawned sub-agents can
+    # bind it too. ask_user_question stays root-only on this seam.
     extra_session_tools.extend(_ask_user_tools(session_id, context_payload))
     return allowed_tools, extra_session_tools
 
@@ -1218,14 +1370,100 @@ def _derive_tool_grants_tolerant(
         ]
 
 
+def _deliver_user_turn(session_id: str, text: str) -> TurnDelivery:
+    """Put *text* into a session as a user turn: steer a live run, or start one.
+
+    The ONE delivery seam. ``POST .../message`` is its HTTP face, and the
+    late-answer router (``ask_user.py``) is its second caller — an answer that
+    arrives after its waiter departed has to reach the model exactly the way a
+    typed message would, and re-deriving "re-engage an idle session" a second
+    time is how the two would drift on the next persisted-context field.
+
+    Re-engagement inherits the session's PERSISTED context (model, mode, tool
+    allowlist, capabilities, cwd, budget) rather than the config defaults — a
+    picker-selected model must survive it. The caller owns the terminated
+    guard: refusing a dead session is an HTTP concern and both callers already
+    answer it with the shared 410 envelope before reaching here.
+    """
+    if runtime.enqueue_message(session_id, text):
+        return TurnDelivery(outcome="steered")
+    last_context = _load_last_context(session_id)
+    model_name = str(last_context.get("model", "")) or None
+    # Resolve cwd from session context (honours persisted external cwd) or
+    # fall back to the per-session temp dir for sessions without a project.
+    session_cwd = _resolve_session_cwd(session_id) or session_temp_dir(session_id)
+    # The SPEC, not `last_context`: a session that auto-selected keeps `auto` in
+    # its binding while its newest context event names the project it settled
+    # on, so reading the loose key here would silently drop auto mode on the
+    # first re-engage after a switch.
+    reengage_spec = _session_specs.load(session_id)
+    project_autoselect = is_auto_project(reengage_spec.project)
+    budget = _extract_session_step_budget(last_context)
+    max_iters = int(get_config_value("agent", "max_iters", default=30))
+    # Tolerant: re-engagement reads PERSISTED context it can't 400 on
+    # behalf of — a poisoned prior write self-heals (drops device tools,
+    # keeps going) instead of bricking the session (review, F6).
+    allowed_tools, extra_session_tools = _derive_tool_grants_tolerant(session_id, last_context)
+    # RBAC applies to whoever drives this re-engage: resolve the CURRENT
+    # caller's role, carrying the session's persisted tool scope as the
+    # requested grants.
+    scope = _run_scope(
+        allowed_tools=allowed_tools,
+        # The SPEC unioned with the advertisement, for the same reason the
+        # ``project_autoselect`` line above reads the spec: ``last_context`` is the
+        # newest context event, and a client that stamps a fixed rendering set on
+        # every request has already buried the session's own capability there.
+        client_capabilities=reengage_spec.run_capabilities(
+            _persisted_client_capabilities(last_context)
+        ),
+        strict_tool_scope=_extract_strict_tool_scope(last_context),
+    )
+    run_id = runtime.start_async(
+        session_id=session_id,
+        user_query=text,
+        model_name=model_name,
+        approval_callback=scope.approval_callback,
+        permission_policy=scope.permission_policy,
+        hook_manager=_hook_manager,
+        mode=_parse_mode(last_context.get("mode")),
+        allowed_tools=scope.allowed_tools,
+        # Re-apply persisted scope instead of silently
+        # widening back to the unscoped default on re-engage — e.g. a
+        # wiki-qa session's ``strict_tool_scope``/playbook survive a
+        # follow-up driven through this generic endpoint too, not just
+        # through ``WikiQaSession.follow_up``.
+        strict_tool_scope=scope.strict_tool_scope,
+        capability_mode=scope.capability_mode,
+        skill_instructions=_extract_skill_instructions(last_context),
+        cwd=session_cwd,
+        max_iters=max_iters,
+        session_step_budget=budget,
+        source_platform=_request_surface(),
+        extra_session_tools=extra_session_tools,
+        project_autoselect=project_autoselect,
+    )
+    if not run_id:
+        return TurnDelivery(outcome="refused")
+    return TurnDelivery(outcome="started", run_id=run_id)
+
+
 def _load_last_context(session_id: str) -> dict[str, object]:
-    """Most-recent persisted ``context`` event payload for a session ({} if none)."""
-    events = runtime.session_store.load_transcript(session_id)
-    for event in reversed(events):
-        if event.get("type") == "context":
-            payload = event.get("payload")
-            return dict(payload) if isinstance(payload, dict) else {}
-    return {}
+    """Most-recent persisted ``context`` event payload for a session ({} if none).
+
+    ``O(1)`` on the Mongo driver, ``O(one session)`` on the base store. Bounded by
+    the TYPE, never by a count: this sits beside the spec load on ``/query``,
+    ``/message``, ``/recover`` and every unattended fire, and the newest context
+    event sits arbitrarily far back after a long run — a window that missed it
+    would report a session with no model, no tool ceiling and no playbook, which
+    is a wrong ANSWER rather than a slow one.
+
+    Returns a COPY, because callers merge into it (``setdefault``) before
+    persisting the result as the next context event; handing back the store's own
+    mapping would let one caller's carry-forward mutate a cached document.
+    """
+    event = runtime.session_store.latest_event_of_type(session_id, "context")
+    payload = event.get("payload") if event else None
+    return dict(payload) if isinstance(payload, dict) else {}
 
 
 def _extract_fallback_models(context_payload: dict[str, object]) -> tuple[str, ...] | None:
@@ -1243,32 +1481,30 @@ def _extract_fallback_models(context_payload: dict[str, object]) -> tuple[str, .
     return None
 
 
-# The ONE reader/writer of a session's durable purpose binding. Both collaborators
-# are LATE-BOUND lambdas rather than bound methods captured at import: the test
-# suite swaps ``runtime`` wholesale for a temp-dir store, and a bound
-# ``runtime.session_store.load_transcript`` captured here would keep serving the
-# store that existed at import — a spec read that silently answers from the wrong
-# session. Same late-binding reason as the ``_resolve_repo_or_404`` lambda above.
+# The ONE reader/writer of a session's durable purpose binding. All four
+# collaborators are LATE-BOUND lambdas rather than bound methods captured at
+# import: the test suite swaps ``runtime`` wholesale for a temp-dir store, and a
+# bound ``runtime.session_store.load_transcript`` captured here would keep serving
+# the store that existed at import — a spec read that silently answers from the
+# wrong session. Same late-binding reason as the ``_resolve_repo_or_404`` lambda
+# above. ``load_tags`` is what lets the store classify a spec-less session by the
+# signal the classifier trusts most, on BOTH the creation and reconstruction legs.
+# ``latest_event_of_type`` is what keeps the binding read — the first thing every
+# ``/query``, ``/message``, ``/recover`` and unattended fire does — bounded to the
+# one context event it needs; without it the store degrades to the transcript
+# scan, which is correct and costs the whole session.
 _session_specs = SessionSpecStore(
     load_transcript=lambda session_id: runtime.session_store.load_transcript(session_id),
     append_context_event=lambda session_id, payload: runtime.append_context_event(
         session_id, payload
     ),
+    load_tags=lambda session_id: runtime.session_store.tags_for_session(session_id),
+    latest_event_of_type=lambda session_id, event_type, payload_key: (
+        runtime.session_store.latest_event_of_type(
+            session_id, event_type, payload_key=payload_key
+        )
+    ),
 )
-
-
-def _spec_origin(session_id: str, context_payload: dict[str, object]) -> SessionOrigin:
-    """Classify a NEW session's purpose from the signals present at creation.
-
-    Tags win over context (the classifier's own rule), so this reads the session's
-    tags rather than only the context payload — a wiki/search/apps surface tags at
-    creation and may write no capability at all.
-    """
-    try:
-        tags = list(runtime.session_store.tags_for_session(session_id))
-    except Exception:  # noqa: BLE001 - provenance must never fail a session create
-        tags = []
-    return SessionOrigin.classify(tags, context_payload)
 
 
 def _populate_worktree_context(project_name: str, context_payload: dict) -> None:
@@ -1294,47 +1530,78 @@ def _populate_worktree_context(project_name: str, context_payload: dict) -> None
         context_payload.setdefault("repo", parent.name)
 
 
+def _requested_project(request_data: dict[str, object]) -> str | None:
+    """The project key a request names, top-level or under ``context``.
+
+    The ONE reader of that wire position, so a caller cannot be reading
+    ``request["project"]`` while its sibling reads ``request["context"]["project"]``.
+    """
+    for candidate in (request_data.get("project"), _request_context(request_data).get("project")):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return None
+
+
+def _request_context(request_data: dict[str, object]) -> dict[str, object]:
+    """The request's ``context`` object, or an empty one."""
+    ctx = request_data.get("context")
+    return ctx if isinstance(ctx, dict) else {}
+
+
 def _resolve_project_cwd(request_data: dict[str, object]) -> str | None:
     """Resolve a project from the request to its filesystem path.
 
-    Handles both config projects (by name) and managed projects
-    (``managed:<project_id>``). Returns ``None`` if no project is specified.
-    Raises ``ValueError`` when a project identifier is given but invalid.
+    Delegates the whole name→directory decision to the ONE
+    :class:`ProjectCatalog`, so a configured name, a ``managed:<project_id>``,
+    a worktree and a registered repository slug all resolve here by the same
+    rule this app applies everywhere else.
+
+    Returns ``None`` when no project is named AND when the named project is the
+    ``auto`` sentinel: that is not a directory, it is a declaration that one has
+    not been chosen yet, so the caller falls through to the session temp dir
+    exactly as an absent project does. Raises ``ValueError`` (a
+    :class:`ProjectResolutionError`, which IS one) when a project identifier is
+    given but cannot be turned into a usable directory — every call site already
+    branches on ``ValueError`` and keeps doing so.
     """
-    project_name = request_data.get("project")
-    if not project_name or not isinstance(project_name, str):
-        ctx = request_data.get("context")
-        if isinstance(ctx, dict):
-            project_name = ctx.get("project")
-    if not project_name or not isinstance(project_name, str):
+    project_name = _requested_project(request_data)
+    if project_name is None or is_auto_project(project_name):
         return None
-    project_name = project_name.strip()
-    if not project_name:
+    catalog = _catalog()
+    try:
+        return catalog.resolve(project_name)
+    except ProjectResolutionError as exc:
+        if exc.code != "unavailable":
+            raise
+        # A MANAGED project's directory is Mewbo's own to create — the store row
+        # is the authority, not the filesystem — so "the directory is missing"
+        # is a directory we simply make. A configured or repository path belongs
+        # to the operator and stays a refusal.
+        entry = catalog.find(project_name)
+        if entry is None or entry.kind not in {"managed", "worktree"} or not entry.path:
+            raise
+        os.makedirs(entry.path, exist_ok=True)
+        return entry.path
+
+
+def _scoping_cwd(project_key: str | None) -> str | None:
+    """Best-effort directory for a read-only endpoint's ``?project=`` parameter.
+
+    The catalog-listing endpoints scope to a project and have always IGNORED an
+    unresolvable one rather than refusing — a browsable list is more useful
+    narrow-or-wide than 400'd. What they silently ignored, though, included every
+    ``managed:<project_id>``: they resolved CONFIGURED projects only, so scoping
+    either list to a worktree-backed session fell back to the unscoped list with
+    no error to read. Delegating fixes that; a genuinely unknown key still
+    resolves to no scope rather than an error.
+
+    Deliberately NOT :func:`_resolve_project_cwd`: that one creates a managed
+    project's missing directory, which a GET has no business doing.
+    """
+    if not project_key:
         return None
-
-    # Managed (virtual) project: "managed:<uuid>"
-    if project_name.startswith("managed:"):
-        vpid = project_name[len("managed:") :]
-        proj = project_store.get_project(vpid)
-        if proj is None:
-            raise ValueError(f"Managed project '{vpid}' not found.")
-        if not os.path.isdir(proj.path):
-            os.makedirs(proj.path, exist_ok=True)
-        return proj.path
-
-    # Config-defined project
-    projects = get_config().projects
-    project = projects.get(project_name)
-    if project is None:
-        raise ValueError(f"Project '{project_name}' not configured.")
-    if not project.path:
-        raise ValueError(f"Project '{project_name}' has no path configured.")
-    if not os.path.isdir(project.path):
-        raise ValueError(
-            f"Project '{project_name}' directory not found: {project.path}. "
-            f"In Docker, mount it via docker-compose.override.yml."
-        )
-    return project.path
+    entry = _catalog().find(project_key)
+    return entry.path if entry is not None and entry.runnable else None
 
 
 class ExternalCwdPolicy:
@@ -1470,8 +1737,8 @@ class RunReadinessGate:
         """``None`` when the process can serve a run, else a retryable 503 to return.
 
         The structured envelope carries ``retryable: true`` — the caller SHOULD come
-        back, which is precisely the distinction the old behaviour destroyed by
-        accepting the run and failing it a few seconds later.
+        back. Refusing up front preserves that distinction; accepting the run and
+        failing it a few seconds later destroys it.
         """
         if self._is_ready():
             return None
@@ -1518,9 +1785,8 @@ def _resolve_skill_instructions(
     2. ``"skill"`` field inside the ``context`` object.
     3. Falls back to None (orchestrator can still detect ``/skill-name`` queries).
     """
-    from mewbo_core.skills import SkillRegistry, activate_skill
+    from mewbo_core.tooling.skills import SkillRegistry, activate_skill
 
-    # Check top-level "skill" field.
     skill_name = request_data.get("skill")
 
     # Check context.skill (from web console SessionContext).
@@ -1546,7 +1812,18 @@ notification_service = NotificationService(notification_store, runtime.session_s
 # Channel adapters (Nextcloud Talk, etc.) — no-ops if none configured
 from mewbo_api.channels.routes import init_channels  # noqa: E402
 
-init_channels(app, runtime, _hook_manager, _config)
+init_channels(
+    app,
+    runtime,
+    _hook_manager,
+    _config,
+    # Late-bound for the same reason ``_session_specs``' collaborators are: the
+    # suite swaps ``runtime`` and ``project_store`` wholesale, so a catalog or a
+    # bound resolver captured at import would answer from stores this process no
+    # longer holds.
+    project_catalog=_catalog,
+    resolve_session_cwd=lambda session_id: _resolve_session_cwd(session_id),
+)
 
 # Wiki backend (opt-in via mewbo-api[wiki] extras).
 from mewbo_api.wiki import init_wiki  # noqa: E402
@@ -1555,6 +1832,15 @@ from mewbo_api.wiki import init_wiki  # noqa: E402
 # can emit the terminal ``complete`` event + reconcile the answer snapshot
 # (the QA counterpart to indexing's wiki_finalize tool).
 init_wiki(app, runtime, hook_manager=_hook_manager)
+
+# Product-wide repository registry. Registered HERE rather than from
+# ``init_wiki`` deliberately: that function returns early on an install without
+# the ``wiki`` extra, and agentic tasks run on exactly such a base install — a
+# registry mounted from there would be absent precisely where it is needed. Its
+# optional wiki/credential usage projection degrades to null instead.
+from mewbo_api.git_repositories_routes import init_git_repositories  # noqa: E402
+
+init_git_repositories(app, runtime, project_store=project_store)
 
 
 # -- Reverse-invocation triggers (WP3) -------------------------
@@ -1682,7 +1968,7 @@ def _trigger_deliver(ctx: TriggerFireContext) -> bool:
     ``ctx.trigger_id`` lets the Mewbo Apps ledger attribute the fire: when the
     firing trigger belongs to an app pipeline, the tracker OPENS a
     ``PipelineRun`` on a successful delivery and scopes an idle-start run to the
-    pipeline's ``tools_allowlist`` (least privilege, spec §2.10). A non-app fire
+    pipeline's ``tools_allowlist`` (least privilege). A non-app fire
     is a no-op. (The tracker still consumes ``trigger_id`` positionally, so the
     apps package needs no change for the structured-payload switch.)
     """
@@ -1692,7 +1978,7 @@ def _trigger_deliver(ctx: TriggerFireContext) -> bool:
         ctx.action,
         ctx.trigger_id,
     )
-    # Phase 2: a fired ``mode="code"`` pipeline runs its ENGINE synchronously
+    # A fired ``mode="code"`` pipeline runs its ENGINE synchronously
     # (deterministic, no LLM call) and is fully handled here — the maintainer
     # session is never woken. Checked FIRST so a code fire short-circuits before any
     # re-engage decision; a non-code / non-app fire returns False and falls through
@@ -1773,11 +2059,10 @@ def init_triggers(app_, runtime_: SessionRuntime, config) -> None:
     if tcfg.enabled:
         # Down-only push: hand the store+policy to core so every
         # Orchestrator registers the schedule_trigger SessionToolRegistry
-        # factory — replacing the old root-only extra_session_tools injection so
-        # a spawned sub-agent (the app-builder) whose allowlist names it can
-        # bind it too. Gated on triggers.enabled, byte-identical to the old
-        # _schedule_trigger_tools guard: arming a trigger no watcher will ever
-        # fire would only mislead the agent.
+        # factory, rather than a root-only extra_session_tools injection, so a
+        # spawned sub-agent (the app-builder) whose allowlist names it can bind
+        # it too. Gated on triggers.enabled: arming a trigger no watcher will
+        # ever fire would only mislead the agent.
         register_schedule_trigger_provider(store, policy)
         service.start()
         logging.info("Trigger watcher started (triggers.enabled=true)")
@@ -1835,6 +2120,7 @@ from mewbo_api.apps.pipeline_tracker import AppPipelineRunTracker  # noqa: E402
 from mewbo_api.apps.plugin import PLUGIN_ROOT as _APPS_PLUGIN_ROOT  # noqa: E402
 from mewbo_api.apps.plugin.runtime import (  # noqa: E402
     register_app_submitter,
+    register_pipeline_ledger,
     register_pipeline_runner,
 )
 from mewbo_api.apps.routes import (  # noqa: E402
@@ -2025,7 +2311,7 @@ def init_apps() -> None:
     namespace. The read-token signer is keyed by the API master token — the one
     server secret already governing this deployment.
     """
-    from mewbo_core.plugins import (  # noqa: PLC0415
+    from mewbo_core.tooling.plugins import (  # noqa: PLC0415
         discover_builtin_plugins,
         register_builtin_root,
     )
@@ -2062,8 +2348,14 @@ def init_apps() -> None:
         # Starts the builder run at create_draft + the repair run on a failed
         # pipeline; mirrors the _trigger_deliver idle-start idiom.
         run_starter=apps_run_starter,
+        # The ONE catalog, so a submitted ``workspace_ref`` key is checked against
+        # exactly what the maintainer session will later resolve it through. The
+        # singleton HANDLE is injected (not a snapshot of its sources): ``_catalog()``
+        # re-points that same object's config/store fields, so the lifecycle sees
+        # every later re-pointing.
+        project_catalog=_catalog(),
     )
-    # Code-pipeline executor (Phase 2): runs a ``mode="code"`` pipeline's
+    # Code-pipeline executor: runs a ``mode="code"`` pipeline's
     # entrypoint deterministically (no LLM call) at the fire seam + on demand. The
     # workspace resolver reuses the SAME session-cwd resolution a trigger re-engage
     # would (the maintainer session already carries the app's project/own-scope
@@ -2081,7 +2373,7 @@ def init_apps() -> None:
     # Push it to the plugin's run_pipeline seam (mirrors register_app_submitter);
     # unwired ⇒ run_pipeline degrades to a clean "not configured" error.
     register_pipeline_runner(_apps_pipeline_runner)
-    # Pipeline-run ledger tracker (spec §2.8): opens a PipelineRun when a fired
+    # Pipeline-run ledger tracker: opens a PipelineRun when a fired
     # pipeline trigger re-engages a maintainer (read at fire time by
     # ``_trigger_deliver`` via the module handle) and closes it at the run's end
     # via the session-end hook — the seam that actually OBSERVES run completion
@@ -2098,6 +2390,10 @@ def init_apps() -> None:
         # and repair kick-offs do.
         run_starter=apps_run_starter,
     )
+    # Push the tracker to the plugin's run_pipeline LEDGER seam, so a model-driven
+    # invoke records a PipelineRun like every other execution path (unwired ⇒ the
+    # tool still runs, reporting run_key: None).
+    register_pipeline_ledger(_apps_pipeline_tracker)
     # Close the lifecycle<->tracker cycle: the lifecycle drives the fire seam to SEED
     # a first run of every pipeline at go-live (so freshness is never born "Never
     # refreshed") and to seed a re-armed pipeline. The tracker is built after the
@@ -2105,9 +2401,8 @@ def init_apps() -> None:
     # assign-after-construction wiring — a reference cycle, never an import one.
     lifecycle.tracker = _apps_pipeline_tracker
     # A process death (deploy/restart) strands in-flight runs as `running`
-    # forever — close them honestly before any new fire can open a run
-    # (live-verified: a stack redeploy left a run open with
-    # zero trace and blocked the failure policy from ever firing).
+    # forever — close them honestly before any new fire can open a run. An
+    # unswept open run has zero trace and blocks the failure policy from firing.
     swept = _apps_pipeline_tracker.sweep_orphaned_runs(datetime.now(timezone.utc))
     if swept:
         logging.warning("Closed {} orphaned running pipeline run(s) at startup", swept)
@@ -2126,7 +2421,7 @@ def init_apps() -> None:
         trigger_store=_trigger_store,
         token_signer=_build_apps_token_signer(_config.api.apps_token_secret, MASTER_API_TOKEN),
         require_api_key=_require_api_key,
-        # Minting a WRITE-scoped app token is master-key-only (Phase 2) — a
+        # Minting a WRITE-scoped app token is master-key-only — a
         # SEPARATE guard from require_api_key, mirroring _require_master_token's
         # existing use for key-management routes: an issued key must never be
         # able to escalate a served app's pipeline surface to invocable.
@@ -2134,11 +2429,11 @@ def init_apps() -> None:
         require_permission=_require_permission,
         sdk_files=_load_app_sdk_files(),
         # The SAME code-pipeline engine the fire seam + run_pipeline tool use
-        # (Phase 2) — GET/POST .../pipelines/<name> executes for real
+        # — GET/POST .../pipelines/<name> executes for real
         # instead of 503ing "pipeline execution not configured".
         runner=_apps_pipeline_runner,
-        # The SAME ledger tracker the fire seam uses (Phase 2 revised
-        # ruling) — an on-demand invoke that writes data or genuinely fails is
+        # The SAME ledger tracker the fire seam uses — an on-demand
+        # invoke that writes data or genuinely fails is
         # ledgered kind="on_request"; a cache hit or a no-write success mints no
         # row. See AppsRoutesController.invoke_pipeline / record_code_run.
         tracker=_apps_pipeline_tracker,
@@ -2149,8 +2444,8 @@ def init_apps() -> None:
 def _load_app_sdk_files() -> dict[str, str]:
     """Read the agent SDK once at startup for server-side injection into rendered apps.
 
-    The stlite frontend imports ``mewbo_app`` (the sanctioned network path, spec
-    §2.5); the backend injects the SDK source into the rendered detail response's
+    The stlite frontend imports ``mewbo_app`` (the sanctioned network path); the
+    backend injects the SDK source into the rendered detail response's
     ``frontend.files`` rather than the console/Aura bundling it, so both clients
     stay SDK-free and the stored :class:`AppSpec` is never polluted. A missing SDK
     file logs loudly and degrades to no injection (served apps then fail their
@@ -2755,6 +3050,18 @@ branches_list_model = ns.model(
     },
 )
 
+session_diff_stat_model = ns.model(
+    "SessionDiffStat",
+    {
+        "additions": fields.Integer(
+            example=128, description="Lines the session's edits added, summed."
+        ),
+        "deletions": fields.Integer(
+            example=34, description="Lines the session's edits removed, summed."
+        ),
+    },
+)
+
 session_summary_model = ns.model(
     "SessionSummary",
     {
@@ -2785,12 +3092,52 @@ session_summary_model = ns.model(
         ),
         "created_at": fields.String(example="2026-06-15T18:24:05.412903+00:00"),
         "updated_at": fields.String(example="2026-06-15T18:31:42.108551+00:00"),
+        "pinned": fields.Boolean(
+            example=False,
+            description=(
+                "Present (`true`) only on a pinned session — an unpinned row omits "
+                "both this key and `pinned_at` rather than carrying `false`."
+            ),
+        ),
+        "pinned_at": fields.String(
+            example="2026-06-15T18:24:05.412903+00:00",
+            description="When the session was pinned. Absent on an unpinned session.",
+        ),
+        "projects": fields.List(
+            fields.String,
+            example=["Assistant"],
+            description=(
+                "Every project identity the session's context has ever bound to — "
+                "an auto-select session that switched mid-task carries each one it "
+                "moved through, not just its current binding. Absent when the "
+                "session has bound to no project."
+            ),
+        ),
+        "diff_stat": fields.Nested(
+            session_diff_stat_model,
+            allow_null=True,
+            skip_none=True,
+            description=(
+                "Line counts summed over the session's file edits. "
+                "Absent when the session changed no files."
+            ),
+        ),
     },
 )
 
 sessions_list_model = ns.model(
     "SessionsListResponse",
-    {"sessions": fields.List(fields.Nested(session_summary_model))},
+    {
+        "sessions": fields.List(fields.Nested(session_summary_model)),
+        "limit": fields.Integer(
+            example=50,
+            description="Echoed back only when the request supplied `limit`.",
+        ),
+        "offset": fields.Integer(
+            example=0,
+            description="Echoed back only when the request supplied `limit`.",
+        ),
+    },
 )
 
 session_create_response_model = ns.model(
@@ -3017,6 +3364,22 @@ session_spec_model = ns.model(
     },
 )
 
+session_project_rebind_model = ns.model(
+    "SessionProjectRebindRequest",
+    {
+        "project": fields.String(
+            required=True,
+            example="Assistant",
+            description=(
+                "Name of the project to bind the session to — a configured project, "
+                "or `managed:<project_id>` for a server-managed one. Its directory is "
+                "resolved server-side and stored with it, so the next turn runs there. "
+                "This is the only accepted field; any other, `cwd` included, is a 400."
+            ),
+        ),
+    },
+)
+
 session_events_ingest_request_model = ns.model(
     "SessionEventsIngestRequest",
     {
@@ -3130,12 +3493,33 @@ question_answer_model = ns.model(
             required=True,
             description="One item per question, in the question order.",
         ),
+        "notes": fields.String(
+            required=False,
+            description=(
+                "Optional free text the user typed alongside the selections "
+                f"(at most {MAX_QUESTION_NOTES_CHARS} characters). Answers no "
+                "single question; carries whatever the event's "
+                "`notes_placeholder` invited."
+            ),
+            example="The staging cluster is mid-migration until Friday.",
+        ),
     },
 )
 
 question_answered_model = ns.model(
     "QuestionAnswered",
-    {"resolved": fields.Boolean(example=True)},
+    {
+        "resolved": fields.Boolean(example=True),
+        "delivery": fields.String(
+            example="run",
+            enum=["run", "message"],
+            description=(
+                "Where the answer landed: `run` — the blocked "
+                "`ask_user_question` call resolved with it; `message` — the "
+                "wait had ended, so it arrived as a new user turn."
+            ),
+        ),
+    },
 )
 
 session_recover_response_model = ns.model(
@@ -3193,6 +3577,18 @@ session_archive_model = ns.model(
     {
         "session_id": fields.String(example="9e2d47c1a0b34f12"),
         "archived": fields.Boolean(example=True),
+    },
+)
+
+session_pin_model = ns.model(
+    "SessionPinResponse",
+    {
+        "session_id": fields.String(example="9e2d47c1a0b34f12"),
+        "pinned": fields.Boolean(example=True),
+        "pinned_at": fields.String(
+            example="2026-06-15T18:24:05.412903+00:00",
+            description="ISO pin time, or null once unpinned.",
+        ),
     },
 )
 
@@ -3470,6 +3866,49 @@ config_validation_error_model = ns.model(
     },
 )
 
+# A PATCH whose merged configuration is valid but cannot be written to disk
+# (read-only mount, wrong ownership, full disk) returns this 500 body instead
+# of an unhandled traceback. See ``ApiResponseKit.config_write_error_response``
+# / ``mewbo_core.config.ConfigWriteError`` — the server filesystem path is
+# deliberately never part of this body.
+config_write_error_model = ns.model(
+    "ConfigWriteError",
+    {
+        "message": fields.String(
+            example="The configuration file lives on a read-only mount.",
+            description="Human-readable, actionable reason the write failed.",
+        ),
+        "code": fields.String(
+            example="read_only",
+            description=(
+                "Machine-readable failure reason: `read_only`, `permission_denied`, "
+                "`no_space`, or `io_error`."
+            ),
+        ),
+    },
+)
+
+# Reported on GET /api/config so a settings UI can warn a user BEFORE they
+# edit and save, instead of only discovering the store is unwritable from a
+# failed PATCH. Mirrors ``mewbo_core.config.ConfigWriteAccess``.
+config_write_access_model = ns.model(
+    "ConfigWriteAccess",
+    {
+        "writable": fields.Boolean(
+            example=True,
+            description="Whether the server can currently persist configuration changes.",
+        ),
+        "code": fields.String(
+            example="read_only",
+            description="Machine-readable reason the store is unwritable, absent when writable.",
+        ),
+        "reason": fields.String(
+            example="The configuration file lives on a read-only mount.",
+            description="Human-readable reason the store is unwritable, absent when writable.",
+        ),
+    },
+)
+
 config_response_model = ns.model(
     "ConfigResponse",
     {
@@ -3480,6 +3919,10 @@ config_response_model = ns.model(
         "secrets": fields.Raw(
             example={"llm.api_key": True, "langfuse.public_key": False},
             description="Is-set map for secret fields (never the values themselves).",
+        ),
+        "storage": fields.Nested(
+            config_write_access_model,
+            description="Whether the configuration store is currently writable.",
         ),
     },
 )
@@ -3611,25 +4054,25 @@ class SelfMintAuthority:
     an explicit empty value, or an explicit non-empty value — and the key store
     already honours all three correctly (``_mint_scoped_record`` writes a field
     only when it ``is not None``, so ``[]`` persists as ``[]`` while an ABSENT
-    field reads back as legacy-unrestricted). The route was therefore the only
-    place the law could be broken, and it was broken in the most expensive way
-    possible: ``list(payload.get("roles") or ()) or None`` collapsed
-    omitted/``null``/``[]`` into ``None``, which the store faithfully recorded as
-    ABSENT, which :meth:`AuthKit._principal_from_record` faithfully read back as
-    ``(ADMIN_ROLE,)``. Three correct layers, one route-level coalesce, full
-    admin from a ``member`` key that posted ``{"label": "x"}``.
+    field reads back as unrestricted). The route is the only place the law can
+    be broken, and one coalesce breaks it: ``list(payload.get("roles") or ()) or
+    None`` folds omitted/``null``/``[]`` into ``None``, the store records ABSENT,
+    and :meth:`AuthKit._principal_from_record` reads that back as
+    ``(ADMIN_ROLE,)`` — full admin from a ``member`` key that posted
+    ``{"label": "x"}``.
 
     The rule this class exists to make unmissable: **omitted INHERITS the
     caller's own value; an explicit value is checked against it; nothing here
     can widen.** ``is None`` is load-bearing in every branch — a truthiness test
-    is the original defect, so there is deliberately not one anywhere below.
+    would read an explicitly-empty list as omitted and inherit the caller's
+    authority, so there is deliberately not one anywhere below.
 
     The structural half matters as much as the checks: :meth:`attenuate` always
     returns a CONCRETE ``roles`` list (the caller's own when omitted), so this
-    path can no longer produce a record with an absent ``roles`` field at all.
-    The store's legacy-key default stays correct for genuinely legacy records
-    and becomes unreachable from client input, which is a stronger guarantee
-    than a conditional that must keep being written correctly.
+    path never produces a record with an absent ``roles`` field at all. The
+    store's absent-field default stays correct for records that already lack one
+    and becomes unreachable from client input — a stronger guarantee than a
+    conditional that must keep being written correctly.
     """
 
     __slots__ = ("_expires_at", "_roles", "_scopes")
@@ -3651,8 +4094,7 @@ class SelfMintAuthority:
         Roles and scopes come off the resolved principal; the EXPIRY has to come
         from the caller's own key record, because a principal carries no expiry
         (it is a property of the credential, not of the identity behind it).
-        A caller whose record cannot be re-resolved is treated as unexpiring,
-        which is exactly what it was before this narrowing existed.
+        A caller whose record cannot be re-resolved is treated as unexpiring.
         """
         record = key_store.resolve_key(credential) if credential else None
         return cls(
@@ -3721,7 +4163,7 @@ def _key_mint_response(record: PublicKeyRecord, plaintext: str) -> dict:
     """Shape a minted/rotated key into the wire response.
 
     Optional identity fields appear only when the record carries them, so a
-    legacy mint's body stays exactly what it was before keys grew an owner.
+    record with no owner mints a body with no owner key.
     """
     body: dict = {
         "id": record["id"],
@@ -3844,7 +4286,7 @@ class ApiKeys(Resource):
             # raises at every AUTH attempt — a key that exists but can never be
             # used, failing on the wrong request. Same law, checked where the
             # mistake is made. `is None` and not truthiness: the subject is
-            # OPTIONAL (a legacy ownerless key), while `""` is a bad value.
+            # OPTIONAL (an ownerless key), while `""` is a bad value.
             owner_subject = payload.get("owner_subject")
             if owner_subject is not None:
                 try:
@@ -4069,37 +4511,47 @@ class Projects(Resource):
         `owner/repo` that address the same project elsewhere in the API.
         Managed worktrees appear as child entries with `is_worktree` set.
         """
-        # Config-defined projects
-        result: list[dict] = [
-            _enrich_project_identity(
-                {
-                    "name": name,
-                    "path": cfg.path,
-                    "description": cfg.description,
-                    "available": os.path.isdir(cfg.path),
-                    "source": "config",
-                }
-            )
-            for name, cfg in get_config().projects.items()
-            if cfg.path
-        ]
-        # Managed (virtual) projects (includes worktrees as child entries).
-        for vp in project_store.list_projects():
-            result.append(
-                _enrich_project_identity(
-                    {
-                        "name": vp.name,
-                        "project_id": vp.project_id,
-                        "path": vp.path,
-                        "description": vp.description,
-                        "available": os.path.isdir(vp.path),
-                        "source": "managed",
-                        "is_worktree": vp.is_worktree,
-                        "parent_project_id": vp.parent_project_id,
-                        "branch": vp.branch,
-                    }
+        # The union (config first, then managed/worktree) and the `available`
+        # rule are the catalog's; this method owns only the WIRE PROJECTION.
+        #
+        # Registered repositories are deliberately NOT listed here even though
+        # the catalog carries them: this payload is a closed contract three
+        # clients decode (`contracts.ts:ProjectSummary`, Aura's `ProjectDto`,
+        # the CLI), and a repository with no checkout has no `path` for any of
+        # them to anchor to. `/v1/git/repositories` is where that list lives.
+        result: list[dict] = []
+        for entry in _catalog().entries():
+            if entry.kind == "configured":
+                result.append(
+                    _enrich_project_identity(
+                        {
+                            "name": entry.name,
+                            "path": entry.path,
+                            "description": entry.description,
+                            "available": entry.available,
+                            "source": "config",
+                        }
+                    )
                 )
-            )
+            elif entry.kind in {"managed", "worktree"}:
+                parent_key = entry.parent_key
+                result.append(
+                    _enrich_project_identity(
+                        {
+                            "name": entry.name,
+                            "project_id": entry.key.removeprefix(MANAGED_PREFIX),
+                            "path": entry.path,
+                            "description": entry.description,
+                            "available": entry.available,
+                            "source": "managed",
+                            "is_worktree": entry.kind == "worktree",
+                            "parent_project_id": (
+                                parent_key.removeprefix(MANAGED_PREFIX) if parent_key else None
+                            ),
+                            "branch": entry.branch,
+                        }
+                    )
+                )
         return {"projects": result}, 200
 
 
@@ -4355,8 +4807,19 @@ def _resolve_repo_or_404(
     managed VirtualProject exists for the path so worktree creation can
     proceed. Returns a ``(target, None)`` on success or ``(None, response)``
     on error.
+
+    The managed and configured lookups delegate to the catalog; the git-identity
+    fallback and the promote arm below are this function's own, because neither
+    is a name→directory question.
     """
+    entry = _catalog().find(project_key)
+    # Route paths carry a BARE project_id, a session's ``project`` field carries
+    # ``managed:<id>``; the catalog knows the second spelling, the store the
+    # first, so accepting both costs one lookup and removes a grammar that
+    # resolved on one surface and 404'd on another.
     proj = project_store.get_project(project_key)
+    if proj is None and entry is not None and entry.kind in {"managed", "worktree"}:
+        proj = project_store.get_project(entry.key.removeprefix(MANAGED_PREFIX))
     if proj is not None:
         if proj.is_worktree:
             return None, ({"message": "Cannot manage worktrees of a worktree."}, 400)
@@ -4367,9 +4830,7 @@ def _resolve_repo_or_404(
             source="managed",
         ), None
 
-    cfg_projects = get_config().projects
-    cfg = cfg_projects.get(project_key)
-    if cfg is None or not cfg.path:
+    if entry is None or entry.kind != "configured" or not entry.path:
         # Fall back to git-identity matching before declaring a miss.
         target, err = _resolve_repo_by_identity(project_key)
         if target is not None or err is not None:
@@ -4380,12 +4841,12 @@ def _resolve_repo_or_404(
         return _RepoTarget(
             project_id=None,
             name=project_key,
-            path=cfg.path,
+            path=entry.path,
             source="config",
         ), None
 
     promoted = _promote_config_project(
-        name=project_key, path=cfg.path, description=cfg.description or ""
+        name=project_key, path=entry.path, description=entry.description
     )
     return _RepoTarget(
         project_id=promoted.project_id,
@@ -4741,12 +5202,53 @@ class Sessions(Resource):
                 "in": "query",
                 "type": "boolean",
             },
+            "project": {
+                "description": (
+                    "Repeat to widen: `?project=a&project=b` lists sessions that "
+                    "worked in EITHER. A session accumulates every project it "
+                    "binds to, so an auto-select session that switched mid-task "
+                    "matches each one."
+                ),
+                "in": "query",
+                "type": "string",
+            },
+            "pinned": {
+                "description": (
+                    "Set to true for pinned sessions only, false for unpinned "
+                    "only. Omit to list both — pinning is normally an ordering, "
+                    "not a filter."
+                ),
+                "in": "query",
+                "type": "boolean",
+            },
+            "limit": {
+                "description": (
+                    "Cap the number of most-recently-active sessions examined. "
+                    "Omit to examine every candidate. Applied AFTER "
+                    "`pinned`/`project`/`include_archived` have narrowed the "
+                    "candidate set, so a filtered page is a page of the filtered "
+                    "sessions. Still bounds candidates rather than guaranteeing a "
+                    "row count — an examined session with no visible turn counts "
+                    "against `limit` without producing a row."
+                ),
+                "in": "query",
+                "type": "integer",
+            },
+            "offset": {
+                "description": (
+                    "Candidates to skip before applying `limit`. Ignored without `limit`."
+                ),
+                "in": "query",
+                "type": "integer",
+            },
         },
         description=(
             "List one summary per session — status, title, timestamps, and an "
             "`origin` describing what created it (the `SessionSummary` model "
-            "carries the full set of values). Archived sessions are hidden "
-            "unless `include_archived=true`."
+            "carries the full set of values). Pinned sessions sort first, then "
+            "newest first. Archived sessions are hidden unless "
+            "`include_archived=true`. Unpaginated by default; pass `limit` to "
+            "page through the most recently active sessions."
         ),
     )
     @ns.response(200, "Session summaries.", sessions_list_model)
@@ -4757,12 +5259,45 @@ class Sessions(Resource):
 
         Returns one summary per session with status, title, timestamps, and an
         `origin` field describing what created it (the `SessionSummary` model
-        carries the full set of values). Archived sessions are hidden unless
-        `include_archived=true`.
+        carries the full set of values). Pinned sessions sort first, then newest
+        first. Archived sessions are hidden unless `include_archived=true`.
+        Unpaginated (returns the whole store) unless `limit` is given, matching
+        every consumer written before pagination existed; passing `limit`
+        narrows both the response AND, on the MongoDB driver, the store read
+        behind it.
+
+        `project` is REPEATABLE rather than comma-separated — a project identity
+        is an opaque string this route must not re-split, and Werkzeug already
+        gives the multi-value read for free. `pinned` is absent-vs-false
+        tri-state, so it reads the raw arg before `_parse_bool` (which cannot
+        tell "omitted" from "false").
+
+        The filters and the page compose in ONE order: every `SessionListQuery`
+        predicate is decided at the store, and only what it admitted is paged.
+        Paging first would make `?pinned=true&limit=50` return the pinned
+        sessions among the newest 50 candidates rather than the newest 50 pinned
+        sessions.
         """
-        include_archived = _parse_bool(request.args.get("include_archived"))
-        sessions = runtime.list_sessions(include_archived=include_archived)
-        return {"sessions": sessions}, 200
+        pinned_arg = request.args.get("pinned")
+        limit = request.args.get("limit", type=int)
+        offset = request.args.get("offset", type=int) or 0
+        if limit is not None:
+            limit = max(limit, 1)
+        offset = max(offset, 0)
+        sessions = runtime.list_sessions(
+            SessionListQuery(
+                include_archived=_parse_bool(request.args.get("include_archived")),
+                pinned=None if pinned_arg is None else _parse_bool(pinned_arg),
+                projects=request.args.getlist("project"),
+            ),
+            limit=limit,
+            offset=offset,
+        )
+        body: dict[str, object] = {"sessions": sessions}
+        if limit is not None:
+            body["limit"] = limit
+            body["offset"] = offset
+        return body, 200
 
     @api.doc(
         security="apikey",
@@ -4805,7 +5340,7 @@ class Sessions(Resource):
         notification_service.emit_session_created(session_id)
         session_tag = payload.get("session_tag")
         if session_tag:
-            runtime.session_store.tag_session(session_id, session_tag)
+            runtime.tag_session(session_id, session_tag)
         # Mobile clients (Aura) declare their surface via X-Mewbo-Surface;
         # tag the session additively so SessionOrigin.classify() reports the
         # MOBILE origin. Never clobbers an explicit session_tag above.
@@ -4830,20 +5365,29 @@ class Sessions(Resource):
             return ext_err
         if ext_cwd is not None:
             context_payload["cwd"] = ext_cwd
-        # Include project in context if provided
         if ext_cwd is None:
-            try:
-                project_cwd = _resolve_project_cwd(payload)
-            except ValueError:
-                project_cwd = None
-            if project_cwd:
-                project_name = payload.get("project") or ""
-                if not project_name:
-                    ctx = payload.get("context")
-                    if isinstance(ctx, dict):
-                        project_name = ctx.get("project", "")
+            project_name = _requested_project(payload)
+            if project_name is not None and is_auto_project(project_name):
+                # The sentinel IS the binding, so it persists with NO cwd. It is
+                # not a directory — it records that one has not been chosen yet,
+                # which is what keeps the session in auto mode for every later
+                # turn. Resolving it to the scratch directory here would make
+                # "never chose" and "chose the scratch dir" indistinguishable.
                 context_payload["project"] = project_name
-                _populate_worktree_context(project_name, context_payload)
+            else:
+                try:
+                    project_cwd = _resolve_project_cwd(payload)
+                except ValueError:
+                    project_cwd = None
+                if project_cwd and project_name:
+                    context_payload["project"] = project_name
+                    # Persist the DIRECTORY beside the name. Resolving it and
+                    # keeping only the name left every project-bound session with
+                    # a null cwd, so each re-engage path had to re-derive the path
+                    # from the name — and the one path with no such rung ran the
+                    # turn in an empty per-session temp dir instead of the project.
+                    context_payload["cwd"] = project_cwd
+                    _populate_worktree_context(project_name, context_payload)
         if "model" not in context_payload:
             context_payload["model"] = get_config_value("llm", "default_model", default="unknown")
         # Bind the session's PURPOSE at creation — the one moment the creating
@@ -4853,7 +5397,7 @@ class Sessions(Resource):
         # existing reader still consumes), so nothing downstream changes shape.
         spec = SessionSpec.from_context(
             context_payload,
-            origin=_spec_origin(session_id, context_payload),
+            origin=_session_specs.origin_for(session_id, context_payload),
             surface=surface or None,
         )
         runtime.append_context_event(session_id, spec.to_context_payload() | context_payload)
@@ -4964,10 +5508,9 @@ class SessionQuery(Resource):
 
         # Resolve project → cwd BEFORE the merge, so an explicitly-named project
         # arrives as a resolved path the spec can bind. A request that names NO
-        # project resolves to None here and INHERITS the session's cwd below —
-        # this is the seam where a follow-up used to silently fall back to an empty
-        # per-session temp dir, which is the reported "temporary project with no
-        # awareness of previous state".
+        # project resolves to None here and INHERITS the session's cwd below.
+        # Inheriting is load-bearing: without it a follow-up silently lands in an
+        # empty per-session temp dir with no awareness of the previous state.
         requested_cwd = ext_cwd
         if requested_cwd is None:
             try:
@@ -4998,6 +5541,18 @@ class SessionQuery(Resource):
                 "Session {} is purpose-bound; ignoring request override(s) {} on /query",
                 session_id,
                 ", ".join(refused),
+            )
+        if is_auto_project(spec.project) and not is_auto_project(run_spec.project):
+            # `auto` is the session's MODE, not a project, so a request naming a
+            # real one moves where the session RUNS without ending the mode. This
+            # is not a corner case: the console and Aura both resend the project
+            # the session has settled on so the turn lands in the right directory
+            # (the sentinel would send it back to a scratch cwd), and taking that
+            # as "stop auto-selecting" would unbind the switching tools after
+            # exactly one switch. The directory still comes from the request —
+            # only the binding is preserved.
+            run_spec = SessionSpec.model_validate(
+                {**run_spec.model_dump(), "project": AUTO_PROJECT}
             )
         run_capabilities = run_spec.run_capabilities(requested_capabilities)
 
@@ -5038,9 +5593,21 @@ class SessionQuery(Resource):
         if context_payload:
             runtime.append_context_event(session_id, context_payload)
 
-        # A session with no cwd of its own still falls back to its temp dir — but
-        # only when neither the request nor the binding named one.
-        project_cwd = run_spec.cwd or session_temp_dir(session_id)
+        # Three rungs, matching every sibling re-engage path (`/message`, the idle
+        # restart, the diff endpoints): the binding's own directory, then the one
+        # its persisted project NAME resolves to, then the temp dir. The middle
+        # rung is what a session bound before the directory was persisted needs —
+        # without it the SAME session ran in its project on `/message` and in an
+        # empty scratch directory on `/query`.
+        project_cwd = (
+            run_spec.cwd or _resolve_session_cwd(session_id) or session_temp_dir(session_id)
+        )
+        # Auto-select is a property of the BINDING, not of this turn: the spec
+        # keeps `auto` even after the model has settled somewhere (the settled
+        # project rides an ordinary context event, which is what the middle rung
+        # above reads), so every later turn of an auto session still declares it
+        # and the model can switch again.
+        project_autoselect = is_auto_project(run_spec.project)
 
         # Inline @<ref> context expansion — files/dirs/@diff/URLs resolved
         # against the session cwd, pre-LLM. File/dir refs are scoped to the
@@ -5075,10 +5642,82 @@ class SessionQuery(Resource):
             source_platform=source_platform,
             extra_session_tools=extra_session_tools,
             attachments=_extract_attachments(request_data),
+            project_autoselect=project_autoselect,
         )
         if not started:
             return {"message": "Session is already running."}, 409
         return {"session_id": session_id, "accepted": True}, 202
+
+
+class SessionStateFrame(BaseModel):
+    """The authoritative run-state projection of a session.
+
+    ONE home for the derived run state that two surfaces publish: the polled
+    ``/events`` body splices it in flat, and the ``/stream`` SSE leg emits it as
+    a ``session_state`` frame. Both read it from the same ``summarize_session``
+    call, so a consumer that migrates between them observes identical values —
+    a second copy of this projection would drift the moment either surface
+    gained a field.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Present only on a session that hit trouble; an untroubled summary carries
+    # none of them and the wire body stays byte-identical without them.
+    OPTIONAL_KEYS: ClassVar[tuple[str, ...]] = (
+        "blocked_code",
+        "failure_reason",
+        "models_tried",
+    )
+
+    # Typed to what ``summarize_session`` actually produces, NOT to what a
+    # settled session happens to carry. ``done_reason`` is None until a turn
+    # finishes and ``title`` is None until one is stored, so declaring either
+    # non-null turns an ordinary just-created session into a 500 at the very
+    # moment a client first reads it.
+    running: bool
+    status: str
+    done_reason: str | None
+    title: str | None
+    recoverable: bool
+    terminated: bool
+    terminated_at: str | None = None
+    extras: dict[str, Any] = Field(default_factory=dict)
+
+    @classmethod
+    def from_summary(cls, summary: dict[str, Any]) -> SessionStateFrame:
+        """Project a ``summarize_session`` result into the shared run state."""
+        running = bool(summary["running"])
+        return cls(
+            running=running,
+            status=summary["status"],
+            # ``done_reason`` carries the LAST completion in the transcript,
+            # which is the previous turn's once a new one is running — suppress
+            # it so a live turn never reports a stale prior reason.
+            done_reason="" if running else summary["done_reason"],
+            title=summary["title"],
+            recoverable=summary["recoverable"],
+            terminated=summary["terminated"],
+            terminated_at=summary["terminated_at"],
+            extras={k: summary[k] for k in cls.OPTIONAL_KEYS if k in summary},
+        )
+
+    def wire(self) -> dict[str, Any]:
+        """The flat mapping the ``/events`` body splices in."""
+        return {
+            "running": self.running,
+            "status": self.status,
+            "done_reason": self.done_reason,
+            "title": self.title,
+            "recoverable": self.recoverable,
+            **self.extras,
+            "terminated": self.terminated,
+            "terminated_at": self.terminated_at,
+        }
+
+    def sse_frame(self) -> str:
+        """The ``session_state`` frame the stream emits."""
+        return f"data: {json.dumps({'type': 'session_state', **self.wire()})}\n\n"
 
 
 @ns.route("/sessions/<string:session_id>/events")
@@ -5092,7 +5731,11 @@ class SessionEvents(Resource):
             "after": {
                 "description": (
                     "Return only events with a timestamp strictly after this "
-                    "value. Use the `ts` of the last event you received."
+                    "value. Use the `ts` of the last event you received, "
+                    "percent-encoded — these timestamps contain `+`, which is "
+                    "otherwise decoded as a space. A value that is not an "
+                    "ISO-8601 timestamp is rejected with 400 rather than "
+                    "silently returning the whole transcript."
                 ),
                 "in": "query",
                 "type": "string",
@@ -5110,12 +5753,19 @@ class SessionEvents(Resource):
             "Return the session's event timeline plus authoritative run state — "
             "`running`, `status`, `done_reason`, `title`, and `recoverable`. Pass "
             "`after` (the `ts` of your last event) to fetch only newer events "
-            "while polling; the status fields are always computed from the full "
-            "transcript. Prefer the stream endpoint for push delivery."
+            "while polling; the status fields always describe the WHOLE session, "
+            "never the returned window. Prefer the stream endpoint for push delivery."
         ),
     )
     @ns.response(200, "Events plus authoritative session status.", session_events_model)
-    @kit.errors(404, descriptions={404: "No session with that id exists."})
+    @kit.errors(
+        400,
+        404,
+        descriptions={
+            400: "The `after` cursor is not an ISO-8601 timestamp.",
+            404: "No session with that id exists.",
+        },
+    )
     @kit.auth_error()
     @guard.requires("sessions.read")
     def get(self, session_id: str) -> tuple[dict, int]:
@@ -5123,9 +5773,9 @@ class SessionEvents(Resource):
 
         Returns the session's event timeline plus authoritative run state:
         `running`, `status`, `done_reason`, `title`, and `recoverable`. Pass
-        `after` to fetch only new events while polling; the status fields are
-        always computed from the full transcript. Prefer the stream endpoint
-        when you want push delivery.
+        `after` to fetch only new events while polling; the status fields always
+        describe the WHOLE session, never the returned window. Prefer the stream
+        endpoint when you want push delivery.
         """
         # Unknown id must 404, not synthesize a phantom idle: without this
         # guard ``load_events`` returns [] and ``summarize_session`` fabricates a
@@ -5133,6 +5783,22 @@ class SessionEvents(Resource):
         if not _session_exists(session_id):
             return _session_not_found(session_id)
         after_ts = request.args.get("after")
+        # A filter this surface cannot apply is REFUSED, never widened. Failing
+        # open here returned the entire transcript with a 200 — 14.8 MB on the
+        # largest live session — so a client bug read as success on both ends
+        # and nobody went looking. The live trigger is this API's own ``ts``
+        # format: it contains ``+``, which arrives as a space when a client
+        # echoes one back unencoded, and the parse then fails.
+        # An EMPTY ``after`` is not a bad cursor, it is no cursor: it keeps
+        # meaning "everything", which is what a first poll sends.
+        if after_ts and EventCursor.parse(after_ts) is None:
+            return {
+                "message": (
+                    "Query parameter `after` must be an ISO-8601 timestamp — pass the "
+                    "`ts` of your last event, percent-encoded (its `+` is otherwise "
+                    "decoded as a space)."
+                )
+            }, 400
         events = runtime.load_events(session_id, after_ts)
         # Opt-in payload cap: the console renders full ``result`` by design,
         # so only a caller (the MCP) that asks via ?truncate=1 gets the smaller
@@ -5141,42 +5807,25 @@ class SessionEvents(Resource):
             events = _truncate_event_freetext(events)
         notification_service.emit_completion(session_id)
         # Authoritative terminal-state + title for polling consumers (the MCP
-        # facade reads these). ``summarize_session`` already computes
-        # status/done_reason from the full transcript and resolves the stored
-        # title; reuse it rather than recompute. ``after_ts`` only narrows the
-        # returned event window, never the status — so summarize the full log.
+        # facade reads these). ``summarize_session`` derives status/done_reason
+        # and resolves the stored title; reuse it rather than recompute.
+        # ``after_ts`` narrows the returned event window and MUST NOT narrow
+        # this — status describes the whole session, so it is deliberately
+        # summarized without the cursor. The unnarrowed scope is affordable
+        # because the store hands the fold that session's digest rather than its
+        # whole transcript: O(one record), not O(all history), per poll.
         summary = runtime.summarize_session(session_id)
-        # Reuse ``summary["running"]`` — the SAME ``is_running`` call
-        # ``summarize_session`` already made to derive ``status`` — instead of
-        # a second independent call here. Two calls can straddle a run
-        # starting/stopping and disagree; one call keeps the tuple atomic.
-        # ``done_reason`` also carries the LAST completion event in the
-        # transcript, which is the previous turn's once a new one is running —
-        # suppress it so a live turn never reports a stale prior reason.
-        running = summary["running"]
+        # Project through ``SessionStateFrame`` rather than spelling the fields
+        # here: the SSE stream publishes the SAME run state as a
+        # ``session_state`` frame, and a consumer moving between the two
+        # transports must not observe a different shape. The projection reuses
+        # the ONE ``summarize_session`` call above — a second independent
+        # ``is_running`` could straddle a run starting/stopping and disagree,
+        # whereas one call keeps the tuple atomic.
         return {
             "session_id": session_id,
             "events": events,
-            "running": running,
-            "status": summary["status"],
-            "done_reason": "" if running else summary["done_reason"],
-            "title": summary["title"],
-            # F2: lets a polling consumer (console/CLI) show a Continue/Restart
-            # affordance without re-deriving recoverability from the timeline.
-            "recoverable": summary["recoverable"],
-            # Append-when-present: an untroubled session's summary carries none
-            # of these, so its /events shape stays byte-identical. This is the
-            # ONLY thing gating the MCP overview tier's failure_reason/models_tried.
-            **{
-                k: summary[k]
-                for k in ("blocked_code", "failure_reason", "models_tried")
-                if k in summary
-            },
-            # Forward the permanent-termination signal so downstream
-            # projections (the MCP facade, console) can surface a killed session
-            # without re-reading the transcript for the terminal marker.
-            "terminated": summary["terminated"],
-            "terminated_at": summary["terminated_at"],
+            **SessionStateFrame.from_summary(summary).wire(),
         }, 200
 
     @api.doc(
@@ -5274,8 +5923,194 @@ class SessionTimeline(Resource):
         }, 200
 
 
-@ns.route("/sessions/<string:session_id>/spec")
-class SessionSpecView(Resource):
+class SessionProjectRebindBody(BaseModel):
+    """The wire body of an explicit project rebind: a project name and nothing else.
+
+    ``extra="forbid"`` is the load-bearing half rather than hygiene. This is the
+    only surface that writes a session's ``cwd`` outright, so a client able to
+    smuggle one here would anchor a session at any host path it named, straight
+    past ``api.allow_external_cwd``. Refusing every field but ``project`` means
+    the directory can only ever come from the server's own project resolution,
+    and a renamed or server-owned field earns a 400 naming it instead of a
+    silent no-op.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    project: str = Field(
+        ...,
+        description=(
+            "Name of the project to bind the session to — a configured project, "
+            "or `managed:<project_id>` for a server-managed one. Its directory is "
+            "resolved server-side and stored with it."
+        ),
+    )
+
+    @field_validator("project")
+    @classmethod
+    def _reject_blank(cls, value: str) -> str:
+        """A blank name is not a request to unbind — this surface only ever binds."""
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("must name a project")
+        return cleaned
+
+
+class SessionBindingRoutes:
+    """Reads a session's durable binding, and rebinds the project it runs against.
+
+    ONE owner for the projection both routes return, so the body a front end
+    swaps into its cache after a rebind cannot drift from the body it hydrated
+    from. Collaborators arrive as injected fields rather than being read off
+    module scope, so a test points this at fresh stores without patching
+    globals.
+    """
+
+    def __init__(
+        self,
+        *,
+        specs: SessionSpecStore,
+        load_last_context: Callable[[str], dict[str, object]],
+        append_context_event: Callable[[str, dict[str, object]], None],
+        session_exists: Callable[[str], bool],
+        terminated_guard: Callable[[str], tuple[dict, int] | None],
+        resolve_project_cwd: Callable[[dict[str, object]], str | None],
+    ) -> None:
+        """Bind the context reader, guards and project resolver this surface needs."""
+        self.specs = specs
+        self.load_last_context = load_last_context
+        self.append_context_event = append_context_event
+        self.session_exists = session_exists
+        self.terminated_guard = terminated_guard
+        self.resolve_project_cwd = resolve_project_cwd
+
+    def projection(self, session_id: str) -> tuple[dict, int]:
+        """The binding plus its fail-closed editable map — what BOTH routes return."""
+        if not self.session_exists(session_id):
+            return _session_not_found(session_id)
+        spec = self.specs.load(session_id)
+        return {
+            "session_id": session_id,
+            "spec": spec.projection(),
+            "editable": spec.editable_fields(),
+            "source": "spec" if self._has_typed_mirror(session_id) else "legacy_context",
+        }, 200
+
+    def rebind_project(self, session_id: str, body: object) -> tuple[dict, int]:
+        """Move a session onto *body*'s project, re-resolving the directory it runs in.
+
+        Deliberately NOT reachable as a request override: ``editable.project``
+        stays false so an ordinary turn cannot re-scope a bound session in
+        passing. This is the explicit action beside that guard, and it writes
+        the project NAME and the DIRECTORY it resolves to TOGETHER — writing
+        only the name is what left sessions running somewhere else entirely.
+        Nothing is persisted until the directory resolves, so a refused rebind
+        leaves the previous binding whole rather than half-applied.
+        """
+        if not self.session_exists(session_id):
+            return _session_not_found(session_id)
+        terminated = self.terminated_guard(session_id)
+        if terminated is not None:
+            return terminated
+        parsed = self._parse(body)
+        project_cwd = self._resolve(parsed.project)
+        spec = self.specs.load(session_id)
+        # Re-validate rather than ``model_copy(update=…)``, for the reason
+        # ``merge_request_overrides`` gives: ``model_copy`` skips every field
+        # validator, so the rebound values would land un-normalized.
+        rebound = SessionSpec.model_validate(
+            {**spec.model_dump(), "project": parsed.project, "cwd": project_cwd}
+        )
+        self._save(session_id, rebound)
+        return self.projection(session_id)
+
+    def _parse(self, body: object) -> SessionProjectRebindBody:
+        """Validate the request body, or raise the 400 the taxonomy renders."""
+        if not isinstance(body, dict):
+            raise RequestInvalid.field_error(
+                "body", "request body must be a JSON object", shape="envelope"
+            )
+        try:
+            return SessionProjectRebindBody.model_validate(body)
+        except ValidationError as exc:
+            raise RequestInvalid.from_validation_error(exc, shape="envelope") from exc
+
+    def _resolve(self, project: str) -> str:
+        """The project's directory, through the SAME resolver session creation uses.
+
+        Sharing the resolver is what stops the two doors disagreeing about what a
+        project name means — an unknown, pathless or missing-directory project
+        raises there and becomes a 400 here, rather than being re-checked against
+        a second copy of the rules.
+        """
+        try:
+            resolved = self.resolve_project_cwd({"project": project})
+        except ValueError as exc:
+            raise RequestInvalid.field_error("project", str(exc), shape="envelope") from exc
+        if not resolved:
+            raise RequestInvalid.field_error(
+                "project", f"Project '{project}' has no resolvable directory.", shape="envelope"
+            )
+        return resolved
+
+    def _save(self, session_id: str, spec: SessionSpec) -> None:
+        """Persist the rebound spec, carrying non-spec gating keys forward.
+
+        A context reader takes the NEWEST event's payload verbatim, so appending
+        a spec-only event would blank whatever gating keys the session already
+        carried (``structured_workspace`` and friends). Same carry-forward the
+        unattended-fire path does for the same reason.
+        """
+        payload = spec.to_context_payload()
+        for key, value in self.load_last_context(session_id).items():
+            if key not in SessionSpec.SPEC_OWNED_CONTEXT_KEYS:
+                payload.setdefault(key, value)
+        self.append_context_event(session_id, payload)
+
+    def _has_typed_mirror(self, session_id: str) -> bool:
+        """Whether a durable binding was recorded, vs one reconstructed from context.
+
+        Delegates to the spec store, which answers it with the SAME bounded read
+        its ``load`` opens with — a route scanning the transcript itself was a
+        second way of asking one question, free to disagree with the binding it
+        labels.
+        """
+        return self.specs.has_typed_mirror(session_id)
+
+
+# Composition root for the binding surface. Every collaborator is late-bound
+# (a module function or a lambda) for the reason ``_session_specs`` is: the test
+# suite swaps ``runtime`` wholesale, and a store captured here at import would
+# keep answering from the one that existed then.
+_session_binding = SessionBindingRoutes(
+    specs=_session_specs,
+    load_last_context=_load_last_context,
+    append_context_event=lambda session_id, payload: runtime.append_context_event(
+        session_id, payload
+    ),
+    session_exists=_session_exists,
+    terminated_guard=_terminated_guard,
+    resolve_project_cwd=_resolve_project_cwd,
+)
+
+
+class _BindingResource(Resource):
+    """Base Resource receiving the one binding controller via ``resource_class_kwargs``.
+
+    Flask-RESTX passes the ``Api`` as the first positional arg; ``controller``
+    rides alongside it as an injected keyword so neither Resource below reaches
+    into module scope for its collaborators.
+    """
+
+    def __init__(
+        self, api: Any = None, *args: Any, controller: SessionBindingRoutes, **kwargs: Any
+    ) -> None:
+        """Capture the injected controller alongside the RESTX ``Api`` positional."""
+        super().__init__(api, *args, **kwargs)
+        self.controller = controller
+
+
+class SessionSpecView(_BindingResource):
     """Return the session's durable purpose binding plus what may be changed."""
 
     @api.doc(
@@ -5305,22 +6140,64 @@ class SessionSpecView(Resource):
         recorded reports one reconstructed from its persisted context, flagged by
         `source` so a client can tell a durable binding from a reconstruction.
         """
-        if not _session_exists(session_id):
-            return _session_not_found(session_id)
-        events = runtime.session_store.load_transcript(session_id)
-        bound = any(
-            isinstance(event.get("payload"), dict)
-            and SPEC_CONTEXT_KEY in event["payload"]
-            for event in events
-            if event.get("type") == "context"
-        )
-        spec = _session_specs.load(session_id)
-        return {
-            "session_id": session_id,
-            "spec": spec.projection(),
-            "editable": spec.editable_fields(),
-            "source": "spec" if bound else "legacy_context",
-        }, 200
+        return self.controller.projection(session_id)
+
+
+class SessionProjectView(_BindingResource):
+    """Rebind the project, and therefore the directory, a session runs against."""
+
+    @api.doc(
+        security="apikey",
+        params={"session_id": "Session id returned by POST /api/sessions."},
+        description=(
+            "Bind the session to a different project. `editable.project` is false on "
+            "a session created for a purpose, so an ordinary query cannot re-scope "
+            "one in passing — that guard is what stops a stray request silently "
+            "moving a session, and this route is the deliberate action beside it "
+            "rather than a way around it. The project's directory is resolved "
+            "server-side and stored with the name, so the next turn runs there. "
+            "Only `project` is accepted: any other field, including `cwd`, is a 400. "
+            "Returns the same body as GET /api/sessions/{session_id}/spec."
+        ),
+    )
+    @ns.expect(session_project_rebind_model)
+    @ns.response(200, "Rebound; body is the updated binding.", session_spec_model)
+    @ns.response(
+        410, "Session is permanently terminated.", session_terminated_error_model
+    )
+    @kit.errors(
+        400,
+        404,
+        descriptions={
+            400: (
+                "The body named no project, named one that is not configured or has "
+                "no directory, or carried a field other than `project`."
+            ),
+            404: "No session with that id exists.",
+        },
+    )
+    @kit.auth_error()
+    @guard.requires("sessions.interact")
+    def put(self, session_id: str) -> tuple[dict, int]:
+        """Rebind the session's project
+
+        Moves the session onto another project and re-resolves the working
+        directory it runs in, persisting both together. Returns the updated
+        binding in the same shape as GET /api/sessions/{session_id}/spec.
+        """
+        return self.controller.rebind_project(session_id, request.get_json(silent=True))
+
+
+ns.add_resource(
+    SessionSpecView,
+    "/sessions/<string:session_id>/spec",
+    resource_class_kwargs={"controller": _session_binding},
+)
+ns.add_resource(
+    SessionProjectView,
+    "/sessions/<string:session_id>/project",
+    resource_class_kwargs={"controller": _session_binding},
+)
 
 
 @ns.route("/sessions/<string:session_id>/stream")
@@ -5340,6 +6217,20 @@ class SessionStream(Resource):
     # Close an idle stream after this long with no events (preserves the old
     # 5-minute auto-close).
     IDLE_CLOSE_S = 300.0
+    # Streams and every other endpoint are served from ONE pool of request
+    # threads, and a stream holds its thread until it closes — so unbounded
+    # streams starve the whole API rather than just themselves. The bound lives
+    # on the class that spends it (see stream_capacity.py for the failure it
+    # prevents); a test rebinds this field rather than the config cache.
+    capacity: ClassVar[StreamCapacity] = StreamCapacity(
+        lambda: get_config().api.max_concurrent_streams
+    )
+
+    @staticmethod
+    def _state_frame(session_id: str, session_runtime: SessionRuntime) -> str:
+        """Render the shared run-state projection as a ``session_state`` frame."""
+        summary = session_runtime.summarize_session(session_id)
+        return SessionStateFrame.from_summary(summary).sse_frame()
 
     @staticmethod
     def _stream_events(
@@ -5349,6 +6240,7 @@ class SessionStream(Resource):
         *,
         heartbeat_s: float = HEARTBEAT_S,
         idle_close_s: float = IDLE_CLOSE_S,
+        after: str | None = None,
         _sub: Subscription | None = None,
     ) -> Iterator[str]:
         """Yield SSE frames for a session: backlog once, then live + heartbeats.
@@ -5356,14 +6248,51 @@ class SessionStream(Resource):
         Subscribes BEFORE loading the backlog so the queue is a superset of all
         post-subscribe events; the overlap with the backlog (events appended in
         the subscribe↔load race window) is dropped by exact content key.
+        ``after`` trims the REPLAY leg only — the live subscription is
+        untouched, so a reconnecting client that already holds the earlier
+        transcript pays for the delta instead of the whole log.
         ``_sub`` is a test seam for injecting a pre-seeded subscription.
+
+        Cost: ``O(one record)`` on the wire once ``after`` is supplied, but
+        still ``O(one record)`` in the STORE on every connect — the cursor is
+        applied after ``load_transcript`` returns, so it narrows the response
+        without narrowing the read. That is deliberate but partial: the
+        inclusive ``>=`` bound this needs has no store-level equivalent yet
+        (``load_events`` is strictly-after, which would drop same-timestamp
+        siblings), so pushing the filter down waits on a range read that
+        honours the inclusive bound. The wire cost is the one a viewer feels;
+        the read cost is bounded by a single session, never by all history.
+
+        Concurrency: each open stream holds one request slot for as long as it
+        lives, and at most ``api.max_concurrent_streams`` may be open at once —
+        the route refuses the next caller with a 503 rather than letting it
+        queue behind the thread pool. That bound and this generator solve two
+        halves of one problem: the bound caps how many slots exist, while the
+        generator gives its slot back the moment a run stops rather than at the
+        next heartbeat. Without the fast release the bound would be spent by
+        idle viewers; with it, a held slot means a run genuinely in flight.
         """
         sub = _sub if _sub is not None else bus.subscribe(session_id)
         try:
             backlog = session_runtime.session_store.load_transcript(session_id)
+            if after:
+                # ``>=``, not ``>``: several events can share one timestamp, so
+                # a strictly-greater cursor silently drops the siblings of the
+                # event the client last saw. Re-sending that one timestamp
+                # group costs a few frames and the client's content-key dedupe
+                # absorbs it — the reverse mistake loses transcript rows on
+                # every reconnect, and nothing downstream would report it.
+                backlog = [e for e in backlog if str(e.get("ts", "")) >= after]
             backlog_keys = {json.dumps(e, sort_keys=True) for e in backlog}
             for event in backlog:
                 yield f"data: {json.dumps(event)}\n\n"
+            # Publish the run state immediately after the replay, BEFORE the
+            # first blocking get(). Without it a client cannot tell a live run
+            # from an idle session until the server closes the stream one
+            # heartbeat later, so every idle session would open showing a
+            # spinner. This frame is what makes the stream a COMPLETE
+            # transport rather than one that still needs a polled companion.
+            yield SessionStream._state_frame(session_id, session_runtime)
 
             def emit(event: EventRecord) -> str | None:
                 """Dedup an event against the backlog; return its SSE frame or None."""
@@ -5379,10 +6308,21 @@ class SessionStream(Resource):
 
             idle_elapsed = 0.0
             while True:
+                # Read liveness BEFORE choosing how long to block. An idle
+                # session has nothing to wait for, and blocking a full
+                # heartbeat to discover that pins one of the API's few request
+                # slots for 15s per open viewer — the cost that made pushing
+                # this stream to every console tab unaffordable. Polling the
+                # queue without blocking closes a finished session's stream in
+                # milliseconds; the client re-subscribes cheaply because the
+                # `after` cursor makes its replay empty. A slot is then held
+                # only while a run is genuinely in flight, which is exactly
+                # when push is worth paying for.
+                running = session_runtime.is_running(session_id)
                 try:
-                    event = sub.queue.get(timeout=heartbeat_s)
+                    event = sub.queue.get(timeout=heartbeat_s if running else 0.0)
                 except queue.Empty:
-                    if not session_runtime.is_running(session_id):
+                    if not running:
                         # Close race: the run thread publishes its terminal
                         # event (e.g. completion) right before is_running flips
                         # False. Drain the queue before closing so that final
@@ -5395,6 +6335,11 @@ class SessionStream(Resource):
                             frame = emit(pending)
                             if frame is not None:
                                 yield frame
+                        # Re-publish the run state before closing: the terminal
+                        # values (status, done_reason, recoverable) are only
+                        # settled now, and this is the client's last chance to
+                        # read them off the stream.
+                        yield SessionStream._state_frame(session_id, session_runtime)
                         yield 'data: {"type": "stream_end"}\n\n'
                         break
                     idle_elapsed += heartbeat_s
@@ -5422,25 +6367,44 @@ class SessionStream(Resource):
                 "in": "query",
                 "type": "string",
             },
+            "after": {
+                "description": (
+                    "Replay only events at or after this timestamp. Pass the `ts` "
+                    "of the last event you received when reconnecting, so a "
+                    "resumed stream costs the delta instead of the whole "
+                    "transcript. The bound is INCLUSIVE — the timestamp you pass "
+                    "is re-sent, because several events can share one — so "
+                    "de-duplicate by event content."
+                ),
+                "in": "query",
+                "type": "string",
+            },
         },
         description=(
             "Open a Server-Sent Events stream. The stored backlog is replayed "
-            "first, then new events are pushed as they happen (`data: <json>` "
-            "frames). Heartbeat comments keep the connection alive and a terminal "
+            "first (trimmed by `after` when given), then new events are pushed "
+            "as they happen (`data: <json>` frames). A `session_state` frame "
+            "carrying `running`, `status`, `done_reason`, `title`, `recoverable` "
+            "and `terminated` is emitted after the replay and again before the "
+            "stream closes, so a client needs no second endpoint for run state. "
+            "Heartbeat comments keep the connection alive and a terminal "
             "`stream_end` frame is sent when the run finishes. EventSource cannot "
             "set headers, so the key may be passed as the `api_key` query param."
         ),
     )
     @api.response(200, "Server-Sent Events stream (`text/event-stream`).")
+    @api.response(503, "Too many streams already open. Retry after `Retry-After`.")
     @kit.auth_error()
     def get(self, session_id: str) -> Response:
         """Stream session events
 
         Opens a Server-Sent Events stream. The stored backlog is replayed
-        first, then new events are pushed as they happen. Heartbeat comments
-        keep the connection alive, and a terminal `stream_end` frame is sent
-        when the run finishes. Because EventSource cannot set headers, the API
-        key may be passed as the `api_key` query parameter instead.
+        first (trimmed by `after` when given), then new events are pushed as
+        they happen. A `session_state` frame carries the authoritative run
+        state after the replay and again before the stream closes. Heartbeat
+        comments keep the connection alive, and a terminal `stream_end` frame
+        is sent when the run finishes. Because EventSource cannot set headers,
+        the API key may be passed as the `api_key` query parameter instead.
         """
         # NOT migrated to ``@guard.requires`` deliberately. This route hand-builds
         # its refusal as a ``Response`` with ``json.dumps``, which emits no trailing
@@ -5456,9 +6420,31 @@ class SessionStream(Resource):
                 mimetype="application/json",
             )
 
+        # Admission comes AFTER auth: an anonymous caller must not be able to
+        # spend a slot, nor learn how many are left. Refusing here rather than
+        # inside the generator is what keeps the refusal an ordinary JSON
+        # response — the body has not begun, so nothing half-open reaches the
+        # client. Every path out of the stream returns the slot via LeasedStream.
+        if not self.capacity.try_acquire():
+            refusal = StreamCapacityExhausted.for_limit(self.capacity.limit())
+            body, status = refusal.response()
+            return Response(
+                json.dumps(body),
+                status=status,
+                mimetype="application/json",
+                headers={"Retry-After": str(refusal.RETRY_AFTER_SECONDS)},
+            )
+
         bus = get_session_event_bus()
         return Response(
-            stream_with_context(self._stream_events(session_id, runtime, bus)),
+            LeasedStream(
+                stream_with_context(
+                    self._stream_events(
+                        session_id, runtime, bus, after=request.args.get("after")
+                    )
+                ),
+                self.capacity,
+            ),
             mimetype="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -5516,57 +6502,15 @@ class SessionMessage(Resource):
         terminated = _terminated_guard(session_id)
         if terminated is not None:
             return terminated
-        if runtime.enqueue_message(session_id, text):
+        # No active run → re-engage through the shared delivery seam, which
+        # inherits the session's persisted context (model/mode/tool allowlist)
+        # like /query and /recover do.
+        delivered = _deliver_user_turn(session_id, text)
+        if delivered.outcome == "steered":
             return {"session_id": session_id, "enqueued": True}, 202
-        # No active run → re-engage: start a fresh run with this message,
-        # inheriting the session's persisted context (model/mode/tool
-        # allowlist) like /query and /recover do — never clobber it with the
-        # config default (a picker-selected model must survive re-engagement).
-        last_context = _load_last_context(session_id)
-        model_name = str(last_context.get("model", "")) or None
-        # Resolve cwd from session context (honours persisted external cwd) or
-        # fall back to the per-session temp dir for sessions without a project.
-        session_cwd = _resolve_session_cwd(session_id) or session_temp_dir(session_id)
-        budget = _extract_session_step_budget(last_context)
-        max_iters = int(get_config_value("agent", "max_iters", default=30))
-        # Tolerant: re-engagement reads PERSISTED context it can't 400 on
-        # behalf of — a poisoned prior write self-heals (drops device tools,
-        # keeps going) instead of bricking the session (review, F6).
-        allowed_tools, extra_session_tools = _derive_tool_grants_tolerant(session_id, last_context)
-        # RBAC applies to whoever drives this re-engage: resolve the CURRENT
-        # caller's role, carrying the session's persisted tool scope as the
-        # requested grants.
-        scope = _run_scope(
-            allowed_tools=allowed_tools,
-            client_capabilities=_persisted_client_capabilities(last_context),
-            strict_tool_scope=_extract_strict_tool_scope(last_context),
-        )
-        run_id = runtime.start_async(
-            session_id=session_id,
-            user_query=text,
-            model_name=model_name,
-            approval_callback=scope.approval_callback,
-            permission_policy=scope.permission_policy,
-            hook_manager=_hook_manager,
-            mode=_parse_mode(last_context.get("mode")),
-            allowed_tools=scope.allowed_tools,
-            # Re-apply persisted scope instead of silently
-            # widening back to the unscoped default on re-engage — e.g. a
-            # wiki-qa session's ``strict_tool_scope``/playbook survive a
-            # follow-up driven through this generic endpoint too, not just
-            # through ``WikiQaSession.follow_up``.
-            strict_tool_scope=scope.strict_tool_scope,
-            capability_mode=scope.capability_mode,
-            skill_instructions=_extract_skill_instructions(last_context),
-            cwd=session_cwd,
-            max_iters=max_iters,
-            session_step_budget=budget,
-            source_platform=_request_surface(),
-            extra_session_tools=extra_session_tools,
-        )
-        if not run_id:
+        if delivered.outcome == "refused":
             return {"message": "Session is already running."}, 409
-        return {"session_id": session_id, "enqueued": True, "run_id": run_id}, 200
+        return {"session_id": session_id, "enqueued": True, "run_id": delivered.run_id}, 200
 
 
 @ns.route("/sessions/<string:session_id>/interrupt")
@@ -5730,20 +6674,32 @@ class SessionQuestionAnswer(Resource):
             "call_id": "The `call_id` from the `user_question` event being answered.",
         },
         description=(
-            "Answer a pending `user_question` event (emitted while the agent "
-            "blocks on its `ask_user_question` tool call — see the `ask_user` "
-            "entry in `X-Mewbo-Capabilities`). The caller presents the "
-            "single-use `call_token` carried on that event, proving "
-            "session-stream read access and preventing replay (same threat "
-            "model as device tools — not proof of WHICH surface answered; "
-            "the `X-Mewbo-Surface` header is recorded as `answered_via` on "
-            "the resulting `user_question_answered` event). One item per "
-            "question, `selected_indexes` XOR `text`; free text is always "
-            "accepted. First answer wins: a later POST returns 409 while the "
-            "run is still reading it, then 404."
+            "Answer a `user_question` event (emitted while the agent blocks on "
+            "its `ask_user_question` tool call — see the `ask_user` entry in "
+            "`X-Mewbo-Capabilities`). The caller presents the single-use "
+            "`call_token` carried on that event, proving session-stream read "
+            "access and preventing replay (same threat model as device tools — "
+            "not proof of WHICH surface answered; the `X-Mewbo-Surface` header "
+            "is recorded as `answered_via` on the resulting "
+            "`user_question_answered` event). One item per question, "
+            "`selected_indexes` XOR `text`; free text is always accepted, and "
+            "an optional `notes` string carries whatever the question's "
+            "`notes_placeholder` invited.\n\n"
+            "**A question stays answerable until it is answered.** While the "
+            "run is still blocked the answer resolves that tool call directly "
+            "(`delivery: \"run\"`). Once the wait has ended — the call's "
+            "`timeout_seconds` elapsed, a steer superseded it, the run "
+            "finished, or the process restarted — the answer is recovered "
+            "against the durable event and delivered as a new user turn "
+            "instead (`delivery: \"message\"`), steering an active run or "
+            "re-engaging an idle one. Only a real prior answer (409) or a "
+            "terminated session (410) refuses one."
         ),
     )
-    @ns.response(200, "Answer delivered; the blocked tool call resolves.", question_answered_model)
+    @ns.response(200, "Answer accepted; `delivery` names where it landed.", question_answered_model)
+    @ns.response(
+        410, "Session is permanently terminated.", session_terminated_error_model
+    )
     @kit.errors(
         400,
         403,
@@ -5752,10 +6708,10 @@ class SessionQuestionAnswer(Resource):
         422,
         shape="message",
         descriptions={
-            400: "The request body is malformed.",
-            403: "`call_token` does not match the pending question.",
-            404: "No pending question with that `call_id` (unknown, superseded, or already read).",
-            409: "An answer was already delivered for this question.",
+            400: "The request body is malformed, or `notes` exceeds the cap.",
+            403: "`call_token` does not match the question.",
+            404: "No question with that `call_id` in this session.",
+            409: "An answer was already delivered, or the session could not accept this one.",
             422: "Answers do not fit the questions (count, bounds, or arity).",
         },
     )
@@ -5763,46 +6719,61 @@ class SessionQuestionAnswer(Resource):
     @ns.expect(question_answer_model)
     @guard.requires("sessions.interact")
     def post(self, session_id: str, call_id: str) -> tuple[dict, int]:
-        """Answer a pending user question
+        """Answer a user question
 
-        Delivers the human's answers for a pending `user_question` event;
-        the blocked `ask_user_question` tool call resolves with them. One
-        answer item per question (`selected_indexes` XOR `text`).
+        Delivers the human's answers for a `user_question` event. While the
+        run is blocked the `ask_user_question` call resolves with them
+        (`delivery: "run"`); once the wait has ended they arrive as a new user
+        turn instead (`delivery: "message"`). One answer item per question
+        (`selected_indexes` XOR `text`), plus optional `notes`.
         """
-        # Answering advances a live run (it resolves the tool call the agent
-        # is blocked on) — a permanently terminated session rejects with 410
-        # like every other run-advancing route.
+        # Answering advances the session (it resolves the tool call the agent
+        # is blocked on, or lands as a fresh turn) — a permanently terminated
+        # session rejects with 410 like every other run-advancing route.
         terminated = _terminated_guard(session_id)
         if terminated is not None:
             return terminated
         body = request.get_json(silent=True) or {}
         call_token = body.get("call_token")
         raw_answers = body.get("answers")
+        notes = body.get("notes")
         if (
             not isinstance(call_token, str)
             or not call_token
             or not isinstance(raw_answers, list)
             or not raw_answers
-            or set(body) - {"call_token", "answers"}
+            or (notes is not None and not isinstance(notes, str))
+            or set(body) - {"call_token", "answers", "notes"}
         ):
             return {"message": "Invalid question answer body."}, 400
+        if notes is not None and len(notes) > MAX_QUESTION_NOTES_CHARS:
+            return {
+                "message": f"'notes' must be at most {MAX_QUESTION_NOTES_CHARS} characters."
+            }, 400
         try:
             items = [QuestionAnswerItem.model_validate(entry) for entry in raw_answers]
         except ValidationError as exc:
             return {"message": f"Invalid answer item: {exc}"}, 400
         answered_via = request.headers.get("X-Mewbo-Surface", "api")
-        outcome, detail = get_pending_questions().resolve(
-            session_id, call_id, call_token, items, answered_via=answered_via
+        # Constructed per request (the wiki-settings idiom) so it reads the
+        # CURRENT runtime rather than whichever one existed at import.
+        router = QuestionAnswerRouter(
+            runtime=runtime,
+            pending=get_pending_questions(),
+            deliver=_deliver_user_turn,
         )
-        if outcome == "ok":
-            return {"resolved": True}, 200
-        if outcome == "not_found":
-            return {"message": detail}, 404
-        if outcome == "bad_token":
-            return {"message": detail}, 403
-        if outcome == "invalid":
-            return {"message": detail}, 422
-        return {"message": detail}, 409
+        routed = router.route(
+            session_id, call_id, call_token, items, answered_via=answered_via, notes=notes
+        )
+        if routed.outcome == "ok":
+            return {"resolved": True, "delivery": routed.delivery}, 200
+        if routed.outcome == "not_found":
+            return {"message": routed.detail}, 404
+        if routed.outcome == "bad_token":
+            return {"message": routed.detail}, 403
+        if routed.outcome == "invalid":
+            return {"message": routed.detail}, 422
+        return {"message": routed.detail}, 409
 
 
 def _try_wiki_indexing_resume(session_id: str, action: str) -> dict | None:
@@ -5834,7 +6805,7 @@ def _try_wiki_indexing_resume(session_id: str, action: str) -> dict | None:
         if not job_id:
             return None
         job = store.get_job(job_id)
-        if job is None or not WikiResume.is_resumable(job):
+        if job is None or not job.is_resumable:
             return None
         # ``continue`` = checkpoint resume (skip done phases); ``retry`` =
         # restart this index from scratch (no-skip rebuild, same job_id) — the
@@ -5979,7 +6950,15 @@ class SessionRecovery(Resource):
             # instead of collapsing to "no override" like every other entry path.
             spec = SessionSpec.model_validate({**spec.model_dump(), "model": model_override})
             _session_specs.save(
-                session_id, spec, capabilities=_persisted_client_capabilities(last_context)
+                session_id,
+                spec,
+                # The loose key records what this turn will actually bind, so it has
+                # to be the same union the run scope below resolves — writing the
+                # bare advertisement here would re-bury the session's own capability
+                # in the very event the next re-engage reads back.
+                capabilities=spec.run_capabilities(
+                    _persisted_client_capabilities(last_context)
+                ),
             )
         # Re-inject capability-gating context (client_capabilities /
         # structured_workspace) so a recovered wiki/QA/structured session keeps
@@ -5991,24 +6970,29 @@ class SessionRecovery(Resource):
         max_iters = int(get_config_value("agent", "max_iters", default=30))
         scope = _run_scope(
             allowed_tools=allowed_tools,
-            client_capabilities=_persisted_client_capabilities(last_context),
+            # Recovery is a re-engage like any other: a recovered wiki session must
+            # come back with ``wiki`` bound, not with only the recovering client's
+            # rendering set.
+            client_capabilities=spec.run_capabilities(
+                _persisted_client_capabilities(last_context)
+            ),
             strict_tool_scope=_extract_strict_tool_scope(last_context),
         )
         run_id = runtime.start_async(
             session_id=session_id,
             user_query=user_query,
             model_name=model_name,
-            # Recovery used to pass no ladder at all, so a recovered run inherited
-            # the empty config policy — as defenceless as the run that just died.
             # The persisted ladder is part of the binding, and a run being
-            # recovered is exactly when its auto-heal chain matters most.
+            # recovered is exactly when its auto-heal chain matters most —
+            # omitting it here leaves the retry as defenceless as the run that
+            # just died.
             fallback_models=spec.fallback_models,
             approval_callback=scope.approval_callback,
             permission_policy=scope.permission_policy,
             hook_manager=_hook_manager,
             mode=mode,
             allowed_tools=scope.allowed_tools,
-            # Re-apply persisted scope — see SessionMessage.post.
+            # Re-apply persisted scope — see _deliver_user_turn.
             strict_tool_scope=scope.strict_tool_scope,
             capability_mode=scope.capability_mode,
             skill_instructions=_extract_skill_instructions(last_context),
@@ -6080,17 +7064,12 @@ class SessionFork(Resource):
         compact: bool = _parse_bool(body.get("compact"))
         tag: str | None = body.get("tag")
 
-        store = runtime.session_store
         try:
-            if from_ts:
-                new_session_id = store.fork_session_at(session_id, from_ts)
-            else:
-                new_session_id = store.fork_session(session_id)
+            new_session_id = runtime.resolve_session(
+                fork_from=session_id, fork_at_ts=from_ts, session_tag=tag
+            )
         except Exception as exc:
             return {"message": f"Fork failed: {exc}"}, 400
-
-        if tag:
-            store.tag_session(new_session_id, tag)
         # Record provenance + optional model override as a context event.
         ctx: dict[str, object] = {"forked_from": session_id}
         if from_ts:
@@ -6103,7 +7082,7 @@ class SessionFork(Resource):
             import asyncio
 
             try:
-                asyncio.run(store.compact_session(new_session_id, mode="partial"))
+                asyncio.run(runtime.session_store.compact_session(new_session_id, mode="partial"))
             except Exception:
                 pass  # best-effort; fork succeeded even if compaction fails
 
@@ -6334,7 +7313,7 @@ class SessionAgents(Resource):
         # badge show. The cumulative billed sum (which re-counts the growing
         # prefix on every call and is ~2× the real peak) is exposed separately
         # under ``total_input_tokens_billed`` for cost accounting.
-        from mewbo_core.token_budget import build_usage_numbers
+        from mewbo_core.session.token_budget import build_usage_numbers
 
         usage = build_usage_numbers(events, None)
         total_input_tokens = (
@@ -6374,7 +7353,7 @@ class SessionUsage(Resource):
         Returns token usage split between the root agent and sub-agents,
         including peak and billed input figures and compaction statistics.
         """
-        from mewbo_core.token_budget import build_usage_numbers
+        from mewbo_core.session.token_budget import build_usage_numbers
 
         events = runtime.load_events(session_id)
         root_model: str | None = None
@@ -6437,6 +7416,55 @@ class SessionArchive(Resource):
             return {"message": "Session not found."}, 404
         runtime.session_store.unarchive_session(session_id)
         return {"session_id": session_id, "archived": False}, 200
+
+
+@ns.route("/sessions/<string:session_id>/pin")
+class SessionPin(Resource):
+    """Pin or unpin a session, mirroring the archive resource's shape."""
+
+    @api.doc(
+        security="apikey",
+        params={"session_id": "Session id returned by POST /api/sessions."},
+        description=(
+            "Pin the session so it sorts first in `GET /api/sessions`, ahead of "
+            "every unpinned session regardless of recency. Pinning is an "
+            "ORDERING, not a filter: a pinned session stays subject to every "
+            "other active filter. Reversible with DELETE on the same path."
+        ),
+    )
+    @ns.response(200, "Session pinned.", session_pin_model)
+    @kit.errors(404, shape="message", descriptions={404: "No session with that id exists."})
+    @kit.auth_error()
+    @guard.requires("sessions.interact")
+    def post(self, session_id: str) -> tuple[dict, int]:
+        """Pin a session
+
+        Sorts the session first in the list, ahead of every unpinned session.
+        Reversible with DELETE on the same path.
+        """
+        if not _session_exists(session_id):
+            return _session_not_found(session_id)
+        pinned_at = runtime.set_session_pinned(session_id, True)
+        return {"session_id": session_id, "pinned": True, "pinned_at": pinned_at}, 200
+
+    @api.doc(
+        security="apikey",
+        params={"session_id": "Session id returned by POST /api/sessions."},
+        description="Unpin the session, restoring its ordinary recency ordering.",
+    )
+    @ns.response(200, "Session unpinned.", session_pin_model)
+    @kit.errors(404, shape="message", descriptions={404: "No session with that id exists."})
+    @kit.auth_error()
+    @guard.requires("sessions.interact")
+    def delete(self, session_id: str) -> tuple[dict, int]:
+        """Unpin a session
+
+        Restores the session's ordinary recency ordering.
+        """
+        if not _session_exists(session_id):
+            return _session_not_found(session_id)
+        runtime.set_session_pinned(session_id, False)
+        return {"session_id": session_id, "pinned": False, "pinned_at": None}, 200
 
 
 @ns.route("/sessions/<string:session_id>/terminate")
@@ -6537,7 +7565,7 @@ class SessionTitle(Resource):
             return {"message": "Session not found."}, 404
         import asyncio
 
-        from mewbo_core.title_generator import generate_session_title
+        from mewbo_core.session.title_generator import generate_session_title
 
         events = runtime.session_store.load_transcript(session_id)
         title = asyncio.run(generate_session_title(events))
@@ -6751,6 +7779,14 @@ def _resolve_session_cwd(session_id: str) -> str | None:
        directly when the path still exists as a directory.
     2. A ``project`` name resolved via :func:`_resolve_project_cwd` — the
        existing behaviour.
+
+    The ``auto`` sentinel is SKIPPED rather than treated as an answer, and that
+    is what makes an auto-mode session work across turns. Its persisted binding
+    keeps ``project: "auto"`` forever (that IS the binding — the model may switch
+    again), while the project it has actually settled on rides an ordinary
+    context event underneath. Reading the sentinel as "no project" would return
+    ``None`` here and drop the session back into a scratch directory on the very
+    next turn.
     """
     events = runtime.session_store.load_transcript(session_id)
     # Walk backwards to find the most recent context event with a cwd or project.
@@ -6764,12 +7800,26 @@ def _resolve_session_cwd(session_id: str) -> str | None:
         raw_cwd = payload.get("cwd")
         if raw_cwd and isinstance(raw_cwd, str) and os.path.isdir(raw_cwd):
             return raw_cwd
-        # Project-derived path (existing behaviour).
+        # Project-derived path.
         project_name = payload.get("project")
         if project_name and isinstance(project_name, str):
+            if is_auto_project(project_name):
+                continue
             try:
                 return _resolve_project_cwd({"project": project_name})
-            except ValueError:
+            except ValueError as exc:
+                # The QUIET half of a mis-bound session: the run never fails, it
+                # just operates in an empty scratch directory forever. Log the
+                # refusal (the catalog's message names what IS resolvable) and
+                # keep returning None — several call sites depend on the
+                # documented fall-through to the session temp dir.
+                logging.warning(
+                    "Session {} names project {!r}, which does not resolve: {} "
+                    "Falling back to the session temp directory.",
+                    session_id,
+                    project_name,
+                    exc,
+                )
                 return None
     return None
 
@@ -6910,7 +7960,6 @@ class SessionGitDiff(Resource):
         if not cwd:
             return {"git_repo": False, "reason": "no_project"}, 200
 
-        # Check git presence
         check = subprocess.run(
             ["git", "-C", cwd, "rev-parse", "--is-inside-work-tree"],
             capture_output=True,
@@ -7015,7 +8064,7 @@ class CommandRegistry(Resource):
         name, arguments, and render kind, so clients can build command
         palettes without hardcoding the list.
         """
-        from mewbo_core.commands import list_commands
+        from mewbo_core.session.commands import list_commands
 
         return {"commands": list_commands()}, 200
 
@@ -7061,7 +8110,7 @@ class SessionCommand(Resource):
         # A permanently terminated session rejects EVERY server-side command,
         # mirroring the mutating query/message/fork routes. This closes a
         # fork-resurrection hole: the ``fork`` command dispatches into
-        # ``mewbo_core.commands`` which copies the transcript store-directly,
+        # ``mewbo_core.session.commands`` which copies the transcript store-directly,
         # bypassing the ``resolve_session`` kill-switch seam — and ``compact``
         # would mutate a frozen transcript. Guard here so neither reaches core.
         terminated = _terminated_guard(session_id)
@@ -7070,14 +8119,14 @@ class SessionCommand(Resource):
 
         import asyncio
 
-        from mewbo_core.commands import (
+        from mewbo_core.session.commands import (
             COMMANDS,
             CommandContext,
             CommandError,
             CommandRender,
             execute_command,
         )
-        from mewbo_core.token_budget import build_usage_numbers
+        from mewbo_core.session.token_budget import build_usage_numbers
 
         body = request.get_json(silent=True) or {}
         name = body.get("name")
@@ -7355,19 +8404,19 @@ class Tools(Resource):
         inside that project. Use the `tool_id` values in a session's
         `mcp_tools` allowlist to scope what a run may call.
         """
-        project_name = request.args.get("project")
-        project_cwd = None
-        if project_name:
-            projects = get_config().projects
-            proj = projects.get(project_name)
-            if proj and proj.path:
-                project_cwd = proj.path
+        project_cwd = _scoping_cwd(request.args.get("project"))
         # Include plugin MCP servers so they appear in the integrations list
-        from mewbo_core.plugins import load_all_plugin_components
+        from mewbo_core.tooling.plugins import load_all_plugin_components
 
         fan_out = load_all_plugin_components()
+        # ``project_cwd`` resolves through the project catalog, which includes
+        # repository checkouts — so the path is repo content this deployment did
+        # not author, even though the catalog vetted the NAME. A server entry is
+        # a command spawned during config resolution, so the directory tier
+        # contributes nothing; the operator's own config is unaffected.
         registry = load_registry(
             cwd=project_cwd,
+            trust_cwd=False,
             extra_mcp_servers=fan_out.mcp_servers or None,
         )
         specs = registry.list_specs(include_disabled=True)
@@ -7475,20 +8524,14 @@ class Skills(Resource):
         plugins, with their descriptions, tool allowlists, and invocation
         flags. Activate a skill for a run via the `skill` field of a query.
         """
-        from mewbo_core.skills import SkillRegistry
+        from mewbo_core.tooling.skills import SkillRegistry
 
-        project_name = request.args.get("project")
-        project_cwd = None
-        if project_name:
-            projects = get_config().projects
-            proj = projects.get(project_name)
-            if proj and proj.path:
-                project_cwd = proj.path
+        project_cwd = _scoping_cwd(request.args.get("project"))
         registry = SkillRegistry()
         registry.load(project_cwd)
 
         # Include plugin skills/commands so they appear in the skills list
-        from mewbo_core.plugins import load_all_plugin_components
+        from mewbo_core.tooling.plugins import load_all_plugin_components
 
         fan_out = load_all_plugin_components()
         for pc in fan_out.components:
@@ -7517,7 +8560,7 @@ class Skills(Resource):
 
 @ns.route("/query")
 class MewboQuery(Resource):
-    """Legacy sync endpoint (CLI compatibility)."""
+    """Synchronous query endpoint (CLI compatibility)."""
 
     @api.doc(
         security="apikey",
@@ -7591,7 +8634,14 @@ class MewboQuery(Resource):
 
         scope = _run_scope(
             allowed_tools=allowed_tools,
-            client_capabilities=_persisted_client_capabilities(context_payload),
+            # Same union as every other run-starting path. This endpoint resolves an
+            # EXISTING session by id/tag as readily as it creates one, so a caller
+            # driving a wiki session through it must not silently drop ``wiki``; on a
+            # genuinely new session the spec has nothing session-owned to add and the
+            # resolved set is byte-identical to the advertisement.
+            client_capabilities=_session_specs.load(session_id).run_capabilities(
+                _persisted_client_capabilities(context_payload)
+            ),
         )
         _stamp_principal_subject(context_payload)
 
@@ -7625,6 +8675,7 @@ class MewboQuery(Resource):
             source_platform=_request_surface(),
             extra_session_tools=extra_session_tools,
             attachments=_extract_attachments(request_data),
+            project_autoselect=is_auto_project(_requested_project(request_data)),
         )
         notification_service.emit_completion(session_id)
         task_result = deepcopy(task_queue.task_result)
@@ -7678,11 +8729,17 @@ class ConfigResource(Resource):
         description=(
             "Return the current configuration with protected and secret values "
             "stripped, plus a `secrets` map reporting which secret fields are set "
-            "(true/false) without revealing their values. Update with PATCH on "
-            "the same path."
+            "(true/false) without revealing their values, and a `storage` object "
+            "reporting whether the server can currently persist configuration "
+            "changes — checked up front so a client can warn a user before they "
+            "edit and save. Update with PATCH on the same path."
         ),
     )
-    @ns.response(200, "Configuration values and secret status map.", config_response_model)
+    @ns.response(
+        200,
+        "Configuration values, secret status map, and storage writability.",
+        config_response_model,
+    )
     @kit.auth_error()
     @guard.requires("config.read")
     def get(self) -> tuple[dict, int]:
@@ -7690,12 +8747,19 @@ class ConfigResource(Resource):
 
         Returns the current configuration with protected and secret values
         stripped, plus a `secrets` map reporting which secret fields are set
-        (true or false) without revealing their values.
+        (true or false) without revealing their values, and a `storage` object
+        reporting whether the server can currently persist configuration
+        changes.
         """
         view = ConfigSchemaView.from_model()
         data = get_config().model_dump()
         secrets = view.secret_status(data)
-        return {"config": view.strip_values(data), "secrets": secrets}, 200
+        storage = AppConfig.probe_write_access(get_app_config_path())
+        return {
+            "config": view.strip_values(data),
+            "secrets": secrets,
+            "storage": storage.model_dump(),
+        }, 200
 
     @api.doc(
         security="apikey",
@@ -7703,8 +8767,10 @@ class ConfigResource(Resource):
             "Deep-merge the request body into the stored configuration, validate "
             "the result, and persist it. Attempts to modify protected fields are "
             "rejected with 403. A merge that fails validation returns 422 with the "
-            "validation errors and changes nothing. Mirrors the shape served by "
-            "GET /api/config/schema."
+            "validation errors and changes nothing. If the merged configuration is "
+            "valid but cannot be written to disk (e.g. a read-only mount), returns "
+            "500 with a machine-readable `code` and an actionable `message`; "
+            "nothing changes. Mirrors the shape served by GET /api/config/schema."
         ),
     )
     @ns.response(
@@ -7717,6 +8783,11 @@ class ConfigResource(Resource):
         "Merged configuration failed validation; nothing was saved.",
         config_validation_error_model,
     )
+    @ns.response(
+        500,
+        "The configuration is valid but could not be persisted; nothing was saved.",
+        config_write_error_model,
+    )
     @kit.auth_error()
     @ns.expect(config_patch_model)
     @guard.requires("config.write")
@@ -7726,7 +8797,9 @@ class ConfigResource(Resource):
         Deep-merges the request body into the stored configuration, validates
         the result, and persists it. Attempts to modify protected fields are
         rejected with 403. A merge that fails validation returns 422 with the
-        validation errors and changes nothing.
+        validation errors and changes nothing. If the write itself fails (e.g.
+        the configuration store is on a read-only mount), returns 500 with a
+        machine-readable `code` and an actionable `message`; nothing changes.
         """
         patch = request.get_json(silent=True) or {}
         if not patch:
@@ -7744,12 +8817,26 @@ class ConfigResource(Resource):
             validated = AppConfig.model_validate(merged)
         except ValidationError as exc:
             return {"message": "Validation failed", "errors": exc.errors()}, 422
-        validated.write(config_path)
+        # Persist the operator's own document with the patch applied, NOT a
+        # re-render of `validated`. The model is the validator here, not the
+        # thing serialized: rendering it would pin every unset field to a
+        # default and bake this process's environment (the `runtime.*`
+        # directories, the storage URI) into a file the CLI and other
+        # containers also read. See AppConfig.write_document.
+        try:
+            AppConfig.write_document(config_path, merged)
+        except ConfigWriteError as exc:
+            logging.error("Failed to persist configuration to {}: {}", exc.path, exc.reason)
+            return ApiResponseKit.config_write_error_response(exc)
         reset_config()
 
         data = validated.model_dump()
         secrets = view.secret_status(data)
-        return {"config": view.strip_values(data), "secrets": secrets}, 200
+        return {
+            "config": view.strip_values(data),
+            "secrets": secrets,
+            "storage": ConfigWriteAccess(writable=True).model_dump(),
+        }, 200
 
 
 @ns.route("/plugins")
@@ -7775,7 +8862,7 @@ class PluginList(Resource):
         and hooks.
         """
         from mewbo_core.config import get_config
-        from mewbo_core.plugins import discover_installed_plugins
+        from mewbo_core.tooling.plugins import discover_installed_plugins
 
         cfg = get_config().plugins
         plugins = discover_installed_plugins(registry_paths=cfg.resolve_registry_paths())
@@ -7820,7 +8907,7 @@ class PluginMarketplace(Resource):
         marketplaces. Install one with POST on this same path.
         """
         from mewbo_core.config import get_config
-        from mewbo_core.plugins import discover_marketplace_plugins
+        from mewbo_core.tooling.plugins import discover_marketplace_plugins
 
         cfg = get_config().plugins
         return {
@@ -7856,7 +8943,7 @@ class PluginMarketplace(Resource):
             return {"error": "name and marketplace required"}, 400
 
         from mewbo_core.config import get_config
-        from mewbo_core.plugins import install_plugin
+        from mewbo_core.tooling.plugins import install_plugin
 
         cfg = get_config().plugins
         try:
@@ -7897,7 +8984,7 @@ class PluginDetail(Resource):
         directory.
         """
         from mewbo_core.config import get_config
-        from mewbo_core.plugins import uninstall_plugin
+        from mewbo_core.tooling.plugins import uninstall_plugin
 
         cfg = get_config().plugins
         if uninstall_plugin(plugin_name, install_base=cfg.resolve_install_dir()):

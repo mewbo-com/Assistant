@@ -19,7 +19,7 @@ internal object SendDecision {
      * Enqueued. [hasActiveStream] = is a live SSE collection genuinely running right now (checked
      * via `streamJob?.isActive`, not the phase value alone).
      *
-     * The bug this replaces (fix-round-3 Important #3): `send()` used to set `RunPhase.Sending`
+     * The bug this replaces: `send()` used to set `RunPhase.Sending`
      * unconditionally on every call. A steer into an ALREADY-streaming run stomped that live
      * `Streaming` phase - and since `Enqueued`'s own handling only resubscribes "if `streamJob`
      * isn't already active", nothing downstream ever restored it either. The thinking spark

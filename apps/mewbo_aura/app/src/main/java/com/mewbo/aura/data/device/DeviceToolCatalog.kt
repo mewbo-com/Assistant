@@ -119,7 +119,7 @@ class DeviceToolCatalog @Inject constructor(
                     put("properties", buildJsonObject { put("reason", stringSchema()) })
                 },
             ),
-            // --- Phase 4 ---
+            // --- SMS + media ---
             DeviceToolDefinition(
                 toolId = "device_read_latest_sms",
                 description = "Read the most recent SMS message(s) from the inbox, optionally filtered by sender. " +

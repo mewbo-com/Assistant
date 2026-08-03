@@ -127,9 +127,9 @@ const FACADE_THEME: Record<WidgetTheme, Record<string, string>> = {
 
 /**
  * Streamlit derives the multipage sidebar's MAIN-PAGE label from the entrypoint
- * script's FILENAME. So an injected wrapper named `_mewbo_main.py` — which is
- * what the entrypoint used to be — rendered to the user as "Mewbo Main", a
- * platform implementation detail leaking into the app's own navigation.
+ * script's FILENAME. So an injected wrapper fixed at `_mewbo_main.py` would
+ * render to the user as "Mewbo Main", a platform implementation detail
+ * leaking into the app's own navigation.
  *
  * The fix keeps every existing law and only moves names around: the wrapper
  * takes over the AUTHORED entrypoint's path (so the label is whatever the app
@@ -153,15 +153,105 @@ function relocatedEntrypoint(entrypoint: string): string {
 }
 
 /**
+ * The `rem` basis an embedded app renders against, in px. Streamlit's ENTIRE
+ * design system — heading sizes, control heights, paddings, gaps, icon boxes —
+ * is authored in `rem`, and `rem` resolves against the PAGE's `<html>` element.
+ * `theme.baseFontSize` does NOT reach `<html>`; it only sets `font-size` on the
+ * `.stApp`/`stlite-root` wrapper, so it moves `em`-relative text and nothing
+ * else. That is why an embedded app renders at full-desktop-Streamlit scale no
+ * matter what `baseFontSize` says: 16px root → `st.title()` at 2.75rem = 44px,
+ * 40px-tall selectboxes and tabs, 32px metric values, all inside console chrome
+ * built on a 13-14px type scale. Shrinking the basis is the ONE knob that moves
+ * the whole system coherently; overriding elements one at a time (an earlier
+ * attempt here) fixes the handful you name and leaves everything else oversized.
+ *
+ * 12.5px = 78% of the 16px browser default. Chosen as the largest reduction that
+ * still leaves Streamlit's own touch targets usable: it lands controls at 31px
+ * against the console's 32px `Button` sizes, which is the actual goal — parity
+ * with the surrounding product, not minimum size.
+ */
+const APP_REM_BASIS_PX = 12.5;
+
+/** Body/label/control text, in px. Mirrors the console's `text-sm` step. */
+const APP_TEXT_PX = 13;
+
+/**
+ * Compact-density override, injected as a plain `st.markdown(unsafe_allow_html=True)`
+ * `<style>` tag AFTER facade applies its theme.
+ *
+ * NOT a scale hack — no `zoom`, no `transform: scale`, both permanently banned
+ * (see "Natural scale" in `apps/mewbo_console/CLAUDE.md`: fractional zoom lays
+ * glyphs on fractional pixels and janks the text). Changing the `rem` basis is
+ * a genuine layout recalculation: every value is re-derived at an integer-ish
+ * px size and rendered crisply, which is exactly what `zoom` cannot do.
+ *
+ * Two layers, and both are load-bearing:
+ *   1. `html { font-size }` shrinks the basis, so Streamlit's whole rem-derived
+ *      system (controls, spacing, headings, metrics) comes down together.
+ *   2. Absolute px sizes restore READING text — body prose, widget labels, tab
+ *      labels, input values — which layer 1 would otherwise drag to ~11px.
+ *      Chrome scales; text that a human reads does not.
+ *
+ * Measured live at 1920px against a real app: content height 9371px → 7431px
+ * (-21%), h1 44→20px, metric 32→25px, selectbox/tabs 40→31px, body held at 13px.
+ */
+const COMPACT_DENSITY_CSS = `<style>
+    html { font-size: ${APP_REM_BASIS_PX}px !important; }
+
+    /* Reading text keeps an absolute size — see layer 2 above. .stApp is the
+       inherit root for anything not named explicitly below. */
+    .stApp { font-size: ${APP_TEXT_PX}px !important; }
+    [data-testid="stMarkdownContainer"] p,
+    [data-testid="stMarkdownContainer"] li,
+    [data-testid="stWidgetLabel"] p,
+    [data-testid="stMetricLabel"],
+    [data-testid="stMetricLabel"] p,
+    input, textarea,
+    .stSelectbox div[data-baseweb="select"],
+    .stMultiSelect div[data-baseweb="select"] { font-size: ${APP_TEXT_PX}px !important; }
+
+    /* Tab labels: Streamlit styles these through a nested <p>, so the button
+       itself is not the element that carries the size. */
+    [data-testid="stTabs"] button,
+    [data-testid="stTabs"] button p { font-size: ${APP_TEXT_PX}px !important; }
+
+    /* Headings still need naming even after the basis shrink. Streamlit's
+       defaults run 2.75rem..1rem, a full-page editorial ramp that stays
+       oversized for a panel even at a 12.5px basis (2.75rem = 34px). This ramp
+       is proportioned against the console's own type scale, where 20px is a
+       pane title — an embedded app's title should not outrank the page's. */
+    h1 { font-size: 20px !important; }
+    h2 { font-size: 17px !important; }
+    h3 { font-size: 15px !important; }
+    h4, h5, h6 { font-size: ${APP_TEXT_PX}px !important; }
+
+    /* A metric card's interior padding, restored to facade's OWN value.
+       facade sets it on div[data-testid="stMetric"] and then defeats itself:
+       its spacing reset on div[data-testid="stElementContainer"] > div carries
+       one more type selector, and a metric IS that direct child, so the reset
+       outranks the metric rule despite being declared earlier and the card
+       computes to zero padding with label and value flush to the border. The
+       reset is inside a pinned upstream wheel and cannot be narrowed at its
+       source, so this re-states the intended value at the one selector where
+       they collide — matching only where the reset matches. On a facade pin
+       bump, re-check: fixed upstream, this becomes a harmless no-op. */
+    div[data-testid="stElementContainer"] > div[data-testid="stMetric"] {
+        padding: 1rem 1.25rem !important;
+    }
+</style>`;
+
+/**
  * The injected entrypoint wrapper. Applies the platform theme via
- * `streamlit-facade`, then hands control to the app's REAL entrypoint through
- * `runpy` (so authored files stay byte-pristine and tracebacks honest). The
- * `apply(...)` call MUST live in the entrypoint script — Streamlit re-executes
- * the entrypoint on every rerun but caches imported modules, so an import-once
- * home would run `apply` exactly once and, worse, facade's potential
- * `st.rerun()` during that import would permanently skip the CSS injection.
- * ONLY `ImportError` is caught (theme is cosmetic, never block the app); a
- * `RerunException` from `apply` must propagate.
+ * `streamlit-facade`, then the compact-density override above, then hands
+ * control to the app's REAL entrypoint through `runpy` (so authored files stay
+ * byte-pristine and tracebacks honest). The `apply(...)` call MUST live in the
+ * entrypoint script — Streamlit re-executes the entrypoint on every rerun but
+ * caches imported modules, so an import-once home would run `apply` exactly
+ * once and, worse, facade's potential `st.rerun()` during that import would
+ * permanently skip the CSS injection. ONLY `ImportError` is caught (theme is
+ * cosmetic, never block the app); a `RerunException` from `apply` must
+ * propagate. The density `st.markdown` call runs unconditionally — it has no
+ * import to guard and no rerun of its own, so there is nothing to skip.
  */
 function facadeMainPy(theme: WidgetTheme, entrypoint: string): string {
   const t = FACADE_THEME[theme];
@@ -189,6 +279,8 @@ if _mewbo_facade_theme is not None:
         font_mono='"Source Code Pro", monospace',
         radius=${JSON.stringify(t.radius)},
     )
+import streamlit as _mewbo_st
+_mewbo_st.markdown(${JSON.stringify(COMPACT_DENSITY_CSS)}, unsafe_allow_html=True)
 import runpy
 runpy.run_path(${JSON.stringify(entrypoint)}, run_name="__main__")
 `;

@@ -11,9 +11,16 @@ from mewbo_graph.wiki.memory_types import (
 )
 from mewbo_graph.wiki.refresh import GraphDeltaIndexer, RefreshOrchestrator
 from mewbo_graph.wiki.store import JsonWikiStore
-from mewbo_graph.wiki.types import Frontmatter, GraphEdge, SourceRef, WikiPage, make_graph_node
+from mewbo_graph.wiki.types import (
+    Frontmatter,
+    GraphEdge,
+    ScopePreview,
+    SourceRef,
+    WikiPage,
+    make_graph_node,
+)
 
-from .conftest import FakeParser
+from .conftest import FakeEmbedder, FakeParser
 
 SLUG = "org/repo"
 
@@ -127,17 +134,132 @@ def test_refresh_runs_all_stages_and_aggregates(store, tmp_path) -> None:
     assert "auth" in report.pages_to_regenerate
     # scope preview is populated
     sp = report.scope_preview()
-    assert sp["filesModified"] == 1
-    assert sp["affectedEntities"] >= 1
+    assert sp.files_modified == 1
+    assert sp.affected_entities >= 1
     # manifest advanced for auth.py
     assert store.get_file_manifest(SLUG, "auth.py").content_hash != "hA"
 
 
+def test_from_store_threads_its_embedder_into_the_graph_delta(store, tmp_path) -> None:
+    """``from_store``'s embedder reaches the graph stage, not just memory/docs.
+
+    It was already handed to the memory reconciler and the doc planner while
+    the stage that actually RE-PARSES code got none — so a refresh built this
+    way rewrote the graph and left every changed symbol unvectorised. Driving
+    the real composer end to end is what pins that wiring.
+    """
+    _seed(store)
+    root = _write(tmp_path, "auth.py", "def verify(): ...  # changed")
+    reparse = GraphParseResult(
+        nodes=[
+            _node("fileA2", "File", "auth.py", "auth.py"),
+            _node("nVerify2", "Function", "verify", "auth.py"),
+        ],
+        edges=[GraphEdge(slug=SLUG, source="fileA2", target="nVerify2", type="CONTAINS")],
+        skipped=[],
+    )
+    orch = RefreshOrchestrator.from_store(
+        store,
+        parser=FakeParser({"auth.py": reparse}),
+        embedder=FakeEmbedder(),
+        clock=lambda: "2026-06-05T12:00:00Z",
+    )
+
+    orch.refresh(SLUG, root, [p for p in root.rglob("*") if p.is_file()], commit="c2")
+
+    vectorised = {e.node_id for e in store.vector_search(SLUG, [1.0, 0.0], k=100)}
+    assert {"fileA2", "nVerify2"} <= vectorised
+
+
+def _reparse_one() -> GraphParseResult:
+    """One file's worth of re-parsed nodes, shared by the default-path tests."""
+    return GraphParseResult(
+        nodes=[
+            _node("fileA2", "File", "auth.py", "auth.py"),
+            _node("nVerify2", "Function", "verify", "auth.py"),
+        ],
+        edges=[GraphEdge(slug=SLUG, source="fileA2", target="nVerify2", type="CONTAINS")],
+        skipped=[],
+    )
+
+
+def test_from_store_resolves_an_embedder_when_the_caller_passes_none(
+    store, tmp_path, monkeypatch
+) -> None:
+    """The DEFAULT construction embeds — passing no embedder is not "skip embedding".
+
+    Every stage but the graph delta degrades harmlessly without an embedder, so
+    threading the caller's ``None`` straight down reads as correct and passes
+    every test that injects a fake. It is not correct here: the graph stage has
+    already DELETED the previous vectors by the time it would embed, so no
+    embedder means "strip the vectors off everything this refresh touched"
+    rather than "leave them alone". Since this classmethod is the only way a
+    production caller builds the composer, an unresolved default would ship the
+    whole feature inert while the suite stayed green.
+    """
+    fake = FakeEmbedder()
+    monkeypatch.setattr("mewbo_graph.wiki.embedder.make_embedder_or_none", lambda: fake)
+    _seed(store)
+    root = _write(tmp_path, "auth.py", "def verify(): ...  # changed")
+
+    orch = RefreshOrchestrator.from_store(
+        store,
+        parser=FakeParser({"auth.py": _reparse_one()}),
+        clock=lambda: "2026-06-05T12:00:00Z",
+    )
+    orch.refresh(SLUG, root, [p for p in root.rglob("*") if p.is_file()], commit="c2")
+
+    vectorised = {e.node_id for e in store.vector_search(SLUG, [1.0, 0.0], k=100)}
+    assert {"fileA2", "nVerify2"} <= vectorised
+
+
+def test_from_store_honours_the_operator_switch_and_resolves_nothing_when_off(
+    store, tmp_path, monkeypatch
+) -> None:
+    """``wiki.embedding.enabled=false`` means no embedder, not a broken one.
+
+    The switch is read by the full index too; a refresh that resolved an
+    embedder anyway would be the one caller ignoring an operator's setting.
+    """
+    resolved: list[bool] = []
+
+    def _resolve() -> FakeEmbedder:
+        resolved.append(True)
+        return FakeEmbedder()
+
+    monkeypatch.setattr("mewbo_graph.wiki.embedder.Embedder.enabled", staticmethod(lambda: False))
+    monkeypatch.setattr("mewbo_graph.wiki.embedder.make_embedder_or_none", _resolve)
+    _seed(store)
+    root = _write(tmp_path, "auth.py", "def verify(): ...  # changed")
+
+    orch = RefreshOrchestrator.from_store(
+        store,
+        parser=FakeParser({"auth.py": _reparse_one()}),
+        clock=lambda: "2026-06-05T12:00:00Z",
+    )
+    orch.refresh(SLUG, root, [p for p in root.rglob("*") if p.is_file()], commit="c2")
+
+    assert resolved == [], "the switch is off — nothing should have been constructed"
+    assert store.vector_search(SLUG, [1.0, 0.0], k=100) == []
+
+
 def test_scope_preview_keys(store, tmp_path) -> None:
+    """The preview is a MODEL, and its wire aliases are what the console reads.
+
+    Asserting on the serialised aliases rather than the Python attributes is the
+    point: the same payload rides the SSE event and the job snapshot, so a
+    renamed alias is a silently blank panel, not a validation error anyone sees.
+    """
     _seed(store)
     root = _write(tmp_path, "auth.py", "changed")
     orch = _orchestrator(store, {"auth.py": GraphParseResult(nodes=[], edges=[], skipped=[])})
     files = [p for p in root.rglob("*") if p.is_file()]
     sp = orch.refresh(SLUG, root, files, commit="c2").scope_preview()
-    for key in ("filesModified", "affectedEntities", "pagesRegenerate", "newPages", "llmCalls"):
-        assert key in sp
+    assert isinstance(sp, ScopePreview)
+    wire = sp.model_dump(by_alias=True)
+    assert set(wire) == {
+        "filesAdded", "filesModified", "filesDeleted", "earlyCutoffFiles",
+        "affectedEntities", "memoryKept", "memoryInvalidated", "memoryRevalidated",
+        "pagesKeep", "pagesEdit", "pagesRegenerate", "newPages", "llmCalls",
+    }
+    assert wire["filesModified"] == 1

@@ -1,10 +1,9 @@
-// REGRESSION (2026-04-16): Originally the entire suite hung (the underlying
+// REGRESSION: Originally the entire suite hung (the underlying
 // infinite re-render in InputBar/useMcpTools is now fixed — see the
 // `EMPTY` ref in `hooks/useMcpTools.ts` and the `setMcps` bail-out in
 // `components/InputBar.tsx`). The 4 tests skipped below assert behavior
 // of the Configure-session badge total counter and detail-mode InputBar
-// resolution that the Phase 1–3 migration (TanStack Query + shadcn +
-// wouter) changed. They need rewriting against the new ConfigMenu render
+// resolution that the TanStack Query + shadcn + wouter stack changed. They need rewriting against the new ConfigMenu render
 // and the new wouter route resolution; preserved here as `.skip` so the
 // case structure survives for future repair. The first test
 // ("loads sessions from the API") still passes and serves as the smoke
@@ -16,6 +15,7 @@ import type { ReactElement } from "react";
 import { beforeEach, expect, test, vi } from "vitest";
 import { App } from "../App";
 import * as client from "../api/client";
+import * as sessionStreamApi from "../api/sessionStream";
 
 function render(ui: ReactElement) {
   // Each test gets a fresh QueryClient with retries off so failed mocks
@@ -29,7 +29,6 @@ vi.mock("../api/client", () => ({
   listSessions: vi.fn(),
   createSession: vi.fn(),
   postQuery: vi.fn(),
-  fetchEvents: vi.fn(),
   listTools: vi.fn(),
   listSkills: vi.fn(),
   listModels: vi.fn(),
@@ -65,10 +64,62 @@ vi.mock("../api/client", () => ({
   createApiKey: vi.fn(),
   revokeApiKey: vi.fn(),
 }));
+// `streamSession` is the only export replaced — `isSessionStateFrame` /
+// `isStreamEndFrame` stay real so `useSessionEvents`'s own frame-folding logic
+// (which imports them directly) keeps working against the scripted frames
+// below.
+vi.mock("../api/sessionStream", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../api/sessionStream")>();
+  return {
+    ...actual,
+    streamSession: vi.fn(),
+  };
+});
+
+/**
+ * Scripts the SSE transport for one `streamSession` call: replays `frames`
+ * in order, then either ends (mirroring the server's `stream_end`) or hangs
+ * forever (mirroring a still-open, still-running connection) depending on
+ * `pending`.
+ */
+function frameStream(
+  frames: sessionStreamApi.SessionStreamFrame[],
+  pending = false,
+): AsyncGenerator<sessionStreamApi.SessionStreamFrame> {
+  async function* generator() {
+    for (const frame of frames) {
+      yield frame;
+    }
+    if (pending) {
+      // A still-running stream never returns: the server holds the connection
+      // open for the life of the run, so the generator must not complete or
+      // the hook would treat it as a healthy close and re-subscribe.
+      await new Promise<never>(() => undefined);
+    }
+  }
+  return generator();
+}
+
+function sessionStateFrame(
+  overrides: Partial<Omit<sessionStreamApi.SessionStateFrame, "type">> = {},
+): sessionStreamApi.SessionStateFrame {
+  return {
+    type: "session_state",
+    running: false,
+    status: "",
+    done_reason: "",
+    title: "",
+    recoverable: false,
+    terminated: false,
+    terminated_at: null,
+    ...overrides,
+  };
+}
+
 const listSessions = vi.mocked(client.listSessions);
 const createSession = vi.mocked(client.createSession);
 const postQuery = vi.mocked(client.postQuery);
-const fetchEvents = vi.mocked(client.fetchEvents);
+const streamSession = vi.mocked(sessionStreamApi.streamSession);
 const listTools = vi.mocked(client.listTools);
 const listSkills = vi.mocked(client.listSkills);
 const listModels = vi.mocked(client.listModels);
@@ -90,10 +141,9 @@ beforeEach(() => {
   listSkills.mockResolvedValue([]);
   listModels.mockResolvedValue({ models: [], default: "" });
   listProjects.mockResolvedValue([]);
-  fetchEvents.mockResolvedValue({
-    events: [],
-    running: false
-  });
+  streamSession.mockImplementation(() =>
+    frameStream([sessionStateFrame({ status: "completed", done_reason: "completed" }), { type: "stream_end" }]),
+  );
   archiveSession.mockResolvedValue();
   unarchiveSession.mockResolvedValue();
   updateSessionTitle.mockResolvedValue({ session_id: "sess-1", title: "t" });
@@ -187,10 +237,9 @@ test.skip("renders MCP list and sends stop command", async () => {
     kind: "mcp",
     enabled: true
   }]);
-  fetchEvents.mockResolvedValue({
-    events: [],
-    running: true
-  });
+  streamSession.mockImplementation(() =>
+    frameStream([sessionStateFrame({ running: true, status: "running" })], true),
+  );
   const user = userEvent.setup();
   render(<App />);
   await user.click(await screen.findByText("Running session"));
@@ -220,7 +269,9 @@ test.skip("rehydrates plan mode from session context on mount", async () => {
     running: false,
     context: { mcp_tools: [], mode: "plan" }
   }]);
-  fetchEvents.mockResolvedValue({ events: [], running: false });
+  streamSession.mockImplementation(() =>
+    frameStream([sessionStateFrame({ status: "completed", done_reason: "completed" }), { type: "stream_end" }]),
+  );
   const user = userEvent.setup();
   render(<App />);
   await user.click(await screen.findByText("Planning session"));

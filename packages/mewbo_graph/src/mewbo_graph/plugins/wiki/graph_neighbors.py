@@ -83,8 +83,8 @@ class WikiGraphNeighborsArgs(BaseModel):
 class WikiGraphNeighbors:
     """Per-session, slug-scoped graph traversal.
 
-    State: the slug and a single read of every edge in the project
-    (graphs are small enough — a few thousand edges — that one pass
+    State: the slug and a single read of every edge in the project's LIVE
+    commit (graphs are small enough — a few thousand edges — that one pass
     over the full list beats a per-query store call).
     Behaviour: ``traverse(args)`` runs a bounded BFS and returns a
     Cytoscape-ish ``{nodes, edges, hops_reached}`` wire payload.
@@ -96,20 +96,26 @@ class WikiGraphNeighbors:
     def __init__(self, slug: str, store: Any) -> None:
         """Initialise with the project slug and a wiki store handle.
 
-        Loads the full node + edge tables once and indexes them for
-        O(1) adjacency and node-by-id lookup. The graphs we deal with
-        (~thousands of nodes, ~thousands of edges) fit easily; this
+        Loads the node + edge tables for the project's LIVE commit once and
+        indexes them for O(1) adjacency and node-by-id lookup. The graphs we
+        deal with (~thousands of nodes, ~thousands of edges) fit easily; this
         avoids per-traversal store round trips.
+
+        Both reads share ONE resolved scope rather than calling
+        ``live_scope`` twice — a walk assembled from a node table and an edge
+        table belonging to different generations would traverse edges whose
+        endpoints are not in the node table.
         """
         self.slug = slug
         self.store = store
+        scope = store.live_scope(slug)
         self._edges_by_src: dict[str, list[Any]] = {}
         self._edges_by_tgt: dict[str, list[Any]] = {}
-        for e in store.list_edges(slug):
+        for e in store.list_edges(slug, scope=scope):
             self._edges_by_src.setdefault(e.source, []).append(e)
             self._edges_by_tgt.setdefault(e.target, []).append(e)
         self._nodes_by_id: dict[str, Any] = {
-            n.node_id: n for n in store.query_graph(slug)
+            n.node_id: n for n in store.query_graph(slug, scope=scope)
         }
 
     # ── Construction ────────────────────────────────────────────────

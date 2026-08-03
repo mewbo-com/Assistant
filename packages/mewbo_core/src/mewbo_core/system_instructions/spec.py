@@ -27,7 +27,7 @@ from jinja2.sandbox import SandboxedEnvironment
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mewbo_core.common import get_logger, utc_now_iso
-from mewbo_core.session_provenance import SessionOrigin
+from mewbo_core.session.session_provenance import SessionOrigin
 from mewbo_core.system_instructions.values import (
     CandidateValues,
     InstructionValueCatalog,
@@ -200,9 +200,8 @@ class InstructionContext(BaseModel):
         The model documents itself: the rows are walked out of
         ``model_json_schema()`` — the very schema the renderer exposes — so the
         table an operator reads can never drift from what a template can actually
-        reference. Lives in core, not in the HTTP controller that used to host
-        it, because it describes CORE's own schema; the app now calls this and
-        renders the result.
+        reference. Lives in core rather than in the HTTP controller, because it
+        describes CORE's own schema; the app calls this and renders the result.
 
         Candidates resolve in a strict order, and the order is the contract:
 

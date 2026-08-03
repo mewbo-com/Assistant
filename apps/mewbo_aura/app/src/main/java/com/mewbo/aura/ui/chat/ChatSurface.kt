@@ -90,8 +90,8 @@ fun ChatSurface(
         callbacks.onDictationFinalConsumed()
     }
 
-    // One-shot: a pull-up handoff draft (assist overlay pill swiped up into the app, user directive
-    // 2026-07-04) lands in the editable field exactly like a dictation Final, EXCEPT it never tags
+    // One-shot: a pull-up handoff draft (assist overlay pill swiped up into the app) lands in the
+    // editable field exactly like a dictation Final, EXCEPT it never tags
     // the pending send Voice - the text was typed, and a masqueraded Voice tag would trigger
     // speak-along on the reply. Acked back so it can't replay on a later recomposition.
     LaunchedEffect(state.pendingHandoffDraft) {
@@ -100,9 +100,9 @@ fun ChatSurface(
         callbacks.onHandoffDraftConsumed()
     }
 
-    // P0 reference capture: a transient "tap Stop or Send when you're done speaking" hint shown on
-    // ENTERING dictation, auto-dismissing on its own short timer - listening itself continues
-    // unaffected by the hint's own visibility.
+    // A transient "tap Stop or Send when you're done speaking" hint shown on ENTERING dictation,
+    // auto-dismissing on its own short timer - listening itself continues unaffected by the hint's
+    // own visibility.
     var showDictationHint by remember { mutableStateOf(false) }
     LaunchedEffect(dictation is DictationState.Listening) {
         if (dictation is DictationState.Listening) {
@@ -115,8 +115,8 @@ fun ChatSurface(
     }
 
     // Aura liveness lives in ChatScreen's BOTTOM edge glow only, processing/invocation-gated - never
-    // render a resting/top wash here (user directive 2026-07-04, reverted regression 65c4023). This
-    // derivation stays ONLY to feed ChatTranscript's `overWash` styling; it drives no wash layer.
+    // render a resting/top wash here. This derivation stays ONLY to feed ChatTranscript's
+    // `overWash` styling; it drives no wash layer.
     val auroraState = when (state.runPhase) {
         RunPhase.Sending -> AuroraState.Thinking
         RunPhase.Streaming -> AuroraState.Streaming
@@ -175,10 +175,10 @@ fun ChatSurface(
             )
         }
 
-        // Pre-session only (no sessionId / no items yet) - once a real turn is in flight the
-        // options sheet's own frozen-scope rows (ComposerOptionsSheet) are the source of truth for
-        // "what this chat is scoped to," not a second indicator floating above the composer.
-        if (state.sessionId == null && state.items.isEmpty()) {
+        // Pre-session only - once a real turn exists, ChatScreen's top bar carries the project
+        // readout instead (ChatUiState.showsComposerScopeIndicator is the ONE predicate both sides
+        // read) and the options sheet's own rows are the source of truth for the full scope.
+        if (state.showsComposerScopeIndicator) {
             // No vertical padding here: the row's own heightIn(min = 48dp a11y target) plus the
             // composer's 12dp top inset already separate it; stacking more would read as a chunky band.
             ComposerScopeIndicator(
@@ -216,8 +216,8 @@ fun ChatSurface(
             },
             onStop = callbacks.onStop,
             // ChatScreen wires real dictation - the permission-gated
-            // startDictation() call itself lives there; a host that hasn't wired it yet (fix-round-3
-            // Important #4's honest-fallback convention) falls through to a notice, not a dead tap.
+            // startDictation() call itself lives there; a host that hasn't wired it yet (this row's
+            // honest-fallback convention) falls through to a notice, not a dead tap.
             onMicTap = { callbacks.onMicTap?.invoke() ?: callbacks.onNotice("Dictation: coming to this surface") },
             onDictationStop = { callbacks.onDictationStop?.invoke() },
             // A full voice turn needs AssistTurnMachine's own lifecycle (voice/, overlay-scoped) -
@@ -268,7 +268,7 @@ private fun GreetingScreen(displayName: String, isOffline: Boolean, modifier: Mo
             )
             if (isOffline) {
                 Spacer(modifier = Modifier.height(AuraSpacing.Composer.internalPadding))
-                // Spec §6.12-style quiet block - replaces the old OfflineBanner (deleted).
+                // §6.12-style quiet block - no banner, no error styling.
                 Text(
                     text = "No backend configured — open Settings",
                     style = AuraType.caption,
@@ -283,8 +283,8 @@ private fun GreetingScreen(displayName: String, isOffline: Boolean, modifier: Mo
 private const val GreetingTopWeight = 0.42f
 
 /**
- * Pre-session project/tool scope, tappable through to the composer options sheet
- * (icons/colors/facets user directive 2026-07-14). A leading project glyph
+ * Pre-session project/tool scope, tappable through to the composer options sheet. A leading
+ * project glyph
  * ([ChatIcons.ProjectScope], tinted [AuraColors.scopeProject]) before the project name, then a
  * tools glyph ([ChatIcons.ToolScope], tinted [AuraColors.scopeTool]) before a provenance-faceted
  * summary ("2 project · 5 system" — [ComposerScope.toolsFacetSummary]). The tools half appears only

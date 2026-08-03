@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """Golden tests for the ``common``/``spawn``/``title`` prompt migration.
 
-Phase 1 is a VERBATIM extraction with ZERO behaviour change: every literal
-moved into the central prompt registry must render byte-for-byte identical to
-the pre-refactor source. Each ``EXPECTED`` below is the ORIGINAL literal copied
-verbatim; the test asserts the registry renders exactly that.
+Every literal the central prompt registry owns must render byte-for-byte
+identical to the frozen ``EXPECTED`` copies below; the test asserts the
+registry renders exactly that.
 
 Two extra parity checks pin the SHIMS (``get_system_prompt`` /
-``render_jinja_prompt``) to their pre-refactor output, captured here by
+``render_jinja_prompt``) to the same output, captured here by
 re-running the legacy logic (a direct file read / a bare Jinja2 ``Environment``
 without ``keep_trailing_newline``) so the golden is independent of the registry
 it guards.
@@ -18,10 +17,10 @@ from __future__ import annotations
 from importlib import resources
 
 from jinja2 import Environment, PackageLoader
+from mewbo_core.agents.spawn_agent import substitute_agent_body
 from mewbo_core.common import get_system_prompt, render_jinja_prompt
-from mewbo_core.prompt_registry import get_prompt_registry
-from mewbo_core.spawn_agent import substitute_agent_body
-from mewbo_core.title_generator import TITLE_SYSTEM_PROMPT
+from mewbo_core.llm.prompt_registry import get_prompt_registry
+from mewbo_core.session.title_generator import TITLE_SYSTEM_PROMPT
 
 # ---------------------------------------------------------------------------
 # title.system — TITLE_SYSTEM_PROMPT (title_generator.py)
@@ -177,8 +176,7 @@ def test_spawn_task_body_verbatim() -> None:
 
 
 def test_get_system_prompt_shim_matches_legacy() -> None:
-    """``get_system_prompt('system')`` byte-equals the legacy file-read + strip."""
-    # Legacy logic: read mewbo_core/prompts/system.txt and .strip().
+    """``get_system_prompt('system')`` byte-equals the packaged file, stripped."""
     resource = (
         resources.files("mewbo_core").joinpath("prompts").joinpath("system.txt")
     )
@@ -239,7 +237,7 @@ def test_render_jinja_prompt_get_state_matches_legacy() -> None:
 
 
 # ---------------------------------------------------------------------------
-# substitute_agent_body still composes with spawn.task_body (no regression)
+# substitute_agent_body composes with spawn.task_body
 # ---------------------------------------------------------------------------
 
 

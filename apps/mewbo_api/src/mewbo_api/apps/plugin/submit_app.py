@@ -15,27 +15,25 @@ entrypoint, a lint finding, or a lifecycle rejection each comes back as a
 TERMINATES on a clean submit (``terminal_reason() == "completed"``) or once the
 failure budget is spent.
 
-TRAP (the submit_widget post-mortem, `packages/mewbo_core/CLAUDE.md`):
-``SessionTool`` is a STRUCTURAL Protocol — a standalone class inherits NO default
-method bodies, so ``should_terminate_run`` / ``terminal_reason`` are defined
-explicitly below. This tool DOES terminate (on success), unlike ``submit_widget``
-which is terminal-free.
+TRAP: ``SessionTool`` is a STRUCTURAL Protocol — a standalone class inherits NO
+default method bodies, so ``should_terminate_run`` / ``terminal_reason`` are
+defined explicitly below. This tool DOES terminate, on success.
 """
 
 from __future__ import annotations
 
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from croniter import croniter  # type: ignore[import-untyped]  # no stubs published
 from mewbo_core.common import MockSpeaker, get_logger, pydantic_to_openai_tool
-from mewbo_core.session_tools import DEFAULT_SESSION_TOOL_MODES
+from mewbo_core.tooling.session_tools import DEFAULT_SESSION_TOOL_MODES
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from mewbo_api.apps.models import (
     PIPELINE_ALLOWED_EXEC,
+    PIPELINE_TIMEOUT_CEILING_SECONDS,
     AppFrontend,
     AppPolicies,
     AppSpec,
@@ -45,13 +43,14 @@ from mewbo_api.apps.models import (
 from mewbo_api.apps.pipeline_runner import lint_pipeline
 from mewbo_api.apps.plugin.linter import ALLOWED_MODULES, format_findings, lint_app
 from mewbo_api.apps.plugin.runtime import AppSubmitter, current_app_submitter
+from mewbo_api.apps.staging import AppStagingArea
 from mewbo_api.apps.store import get_app_store
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mewbo_core.classes import ActionStep
-    from mewbo_core.types import Event
+    from mewbo_core.contracts.types import Event
 
 logging = get_logger(name="apps.plugin.submit_app")
 
@@ -72,22 +71,14 @@ _MAX_TOTAL_BYTES = 2 * 1024 * 1024
 _INJECTED_CONTEXT_FILE = "_app_context.json"
 _SKIP_DIRS = frozenset({"__pycache__", ".git"})
 
-_DEFAULT_APPS_ROOT = "/tmp/mewbo/apps"
-
-
-def _apps_root() -> str:
-    """Base directory for builder app workspaces (env-driven, no config coupling).
-
-    ``MEWBO_APPS_ROOT`` with a ``/tmp/mewbo/apps`` fallback — the AgentDef prompt
-    uses the same ``${MEWBO_APPS_ROOT:-/tmp/mewbo/apps}`` pattern so writer and
-    reader agree without config plumbing. Empty string is treated as unset (avoid
-    ``Path("")`` resolving to CWD), mirroring ``submit_widget``'s ``_widget_root``.
-    """
-    return os.environ.get("MEWBO_APPS_ROOT") or _DEFAULT_APPS_ROOT
+# The staging-root convention lives on ``AppStagingArea`` — the class that also
+# materializes a stored bundle back into it — so the writer here and every reader
+# (``get_app``'s stage, the Web IDE mount resolver) resolve the same directory.
+_apps_root = AppStagingArea.root
 
 
 # ------------------------------------------------------------------
-# Tool args — Pydantic IS the schema + the validator (spec §3 AppSpec draft)
+# Tool args — Pydantic IS the schema + the validator (AppSpec draft)
 # ------------------------------------------------------------------
 
 
@@ -95,8 +86,8 @@ class PipelineSchedule(BaseModel):
     """A platform-armed wake for a pipeline — declare it, the platform arms it.
 
     You never call ``schedule_trigger`` for an app pipeline; that arming
-    happens on the maintainer session once the app goes live (Phase 1 —
-    the builder that hand-armed its own trigger and shipped a null
+    happens on the maintainer session once the app goes live (the
+    builder that hand-armed its own trigger and shipped a null
     `trigger_ref` when its session died mid-build is exactly the failure this
     replaces). `kind="time.cron"` needs `cron` (a 5-field cron expression,
     evaluated in UTC); `kind="time.at"` needs `at` (a tz-aware ISO-8601
@@ -149,7 +140,7 @@ class SubmitPipelineArgs(BaseModel):
     future manual re-invocation). At least one of the two is required —
     submit_app refuses a pipeline with neither, since it would never run.
 
-    `mode="code"` (Phase 2) is the DEFAULT choice for a deterministic
+    `mode="code"` is the DEFAULT choice for a deterministic
     transform (file parsing, CSV ingestion, filtering) — the platform EXECUTES
     your `entrypoint` file directly via `run_pipeline`/the schedule, no LLM call
     involved. Reserve `mode="agentic"` (the default, for backwards compatibility)
@@ -229,15 +220,27 @@ class SubmitPipelineArgs(BaseModel):
             "cache instead of re-executing. 0 (default) = never cache."
         ),
     )
+    # Deliberately TIGHTER than ``PipelineSpec.timeout_seconds`` (``le=600``), and
+    # the asymmetry is the design. This model is a TOOL ARGUMENT — it is never
+    # parsed from storage — so refusing an over-ceiling value at definition is the
+    # ordinary trust-boundary rule. ``PipelineSpec`` is parsed from an APPEND-ONLY
+    # store, where the same bound would stop an already-stored manifest from
+    # validating and 500 every detail read of it. Two spellings of one number,
+    # opposite constraints, both correct: do NOT "harmonise" them in either
+    # direction. A spec reaching submit by any other route (a hand-built manifest,
+    # a rollback replay) is refused by ``AppSpec.ensure_pipeline_timeouts_fit``.
     timeout_seconds: int = Field(
         default=10,
         ge=1,
-        le=600,
+        le=PIPELINE_TIMEOUT_CEILING_SECONDS,
         description=(
             "`mode=code` only: wall-clock seconds ONE run of `entrypoint` may take "
             "before the watchdog stops it. A deterministic transform finishes well "
-            "under the 10 default; raise it (e.g. 120-300) for a pipeline that calls "
-            "`ctx.llm`, so the model round-trip(s) have headroom."
+            f"under the 10 default; raise it (max {PIPELINE_TIMEOUT_CEILING_SECONDS}) "
+            "for a pipeline that calls `ctx.llm`, so the model round-trip(s) have "
+            "headroom. The ceiling exists because a code pipeline holds the web "
+            "worker for its whole run — a longer one would take the API down, not "
+            "just itself."
         ),
     )
     user_writable: bool = Field(
@@ -348,7 +351,12 @@ class SubmitAppArgs(BaseModel):
     app_id: str = Field(
         description=(
             "Your app's id — the SAME slug you named its directory "
-            "(`${MEWBO_APPS_ROOT}/${SESSION_ID}/<app_id>/`). No path separators."
+            "(`${MEWBO_APPS_ROOT}/${SESSION_ID}/<app_id>/`). No path separators. "
+            "When you are updating an app this session was opened against (the one "
+            "`get_app` returns), pass THAT app_id — resubmitting it ships a new "
+            "version. NEVER invent a different app_id to get past a refusal: that "
+            "creates a SECOND app instead of updating the one you were asked to "
+            "change. If a submit is refused, report the refusal."
         ),
     )
     title: str = Field(description="Human-facing app name shown in the gallery + chrome.")
@@ -436,7 +444,7 @@ SUBMIT_APP_SCHEMA: dict[str, object] = pydantic_to_openai_tool(
 class SubmitAppTool:
     """Handles ``submit_app`` — validate a draft, read its frontend, submit it live.
 
-    Satisfies the :class:`~mewbo_core.session_tools.SessionTool` Protocol via the
+    Satisfies the :class:`~mewbo_core.tooling.session_tools.SessionTool` Protocol via the
     class-shaped ``tool_id``/``schema``/``modes`` attributes plus ``handle`` /
     ``should_terminate_run`` / ``terminal_reason``. The ``submitter`` collaborator
     is resolved from the down-only :func:`current_app_submitter` seam when not
@@ -710,7 +718,7 @@ class SubmitAppTool:
         schedule kind mismatch or an added field never has two owners to drift
         apart) rather than passed as ``SubmitPipelineArgs`` instances: this
         plugin's args shape is deliberately decoupled from the model's
-        ``PipelineSpec`` (Phase 1) — `trigger_ref` is PLATFORM-owned and
+        ``PipelineSpec`` — `trigger_ref` is PLATFORM-owned and
         never appears here at all; the lifecycle mints it from `schedule` at
         submit time.
         """

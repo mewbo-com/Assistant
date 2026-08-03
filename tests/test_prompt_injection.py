@@ -1,12 +1,12 @@
 """Tests for prompt/tool injection logic."""
 
-from mewbo_core import planning as planning_module
 from mewbo_core.common import get_system_prompt, ha_render_system_prompt
 from mewbo_core.config import set_config_override, set_mcp_config_path
-from mewbo_core.context import ContextSnapshot
-from mewbo_core.planning import PromptBuilder
-from mewbo_core.token_budget import get_token_budget
-from mewbo_core.tool_registry import ToolRegistry, ToolSpec, load_registry
+from mewbo_core.loop import planning as planning_module
+from mewbo_core.loop.planning import PromptBuilder
+from mewbo_core.session.context import ContextSnapshot
+from mewbo_core.session.token_budget import get_token_budget
+from mewbo_core.tooling.tool_registry import ToolRegistry, ToolSpec, load_registry
 
 
 def _build_prompt(registry, *, recent_events=None, selected_events=None, summary=None):

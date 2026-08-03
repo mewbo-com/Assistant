@@ -6,10 +6,14 @@ services:
     ports:
       - "5124:5124"
     volumes:
-      - ../../configs:/app/configs:ro
+      # Writable: PATCH /api/config persists app.json back here, so a read-only
+      # mount makes every settings save fail. Mount the directory, not app.json
+      # itself — a config write renames a temp file over the target, and that
+      # fails with EBUSY when the target is its own bind-mount point.
+      - ../../configs:/app/configs
       - api-data:/app/data
     environment:
-      - MASTER_API_TOKEN=${MASTER_API_TOKEN:-msk-strong-password}
+      - MEWBO_MASTER_API_TOKEN=${MEWBO_MASTER_API_TOKEN:-msk-strong-password}
 
   console:
     build:

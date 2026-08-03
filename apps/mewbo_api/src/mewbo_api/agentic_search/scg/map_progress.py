@@ -1,4 +1,4 @@
-"""Phase-progress writer for map-source (SCG indexing) jobs — spec §16.2.
+"""Phase-progress writer for map-source (SCG indexing) jobs.
 
 A map job's progress lives in the *agentic_search* store (alongside search
 runs), so it rides the same run-event-log + ``RunSseGenerator`` plumbing. This

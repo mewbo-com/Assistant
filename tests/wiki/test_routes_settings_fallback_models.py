@@ -42,7 +42,7 @@ def runtime_stub(store):
 
 @pytest.fixture()
 def client(tmp_path: Path, monkeypatch, store, runtime_stub):
-    monkeypatch.setenv("MASTER_API_TOKEN", API_KEY)
+    monkeypatch.setenv("MEWBO_MASTER_API_TOKEN", API_KEY)
     monkeypatch.setattr("mewbo_api.backend.MASTER_API_TOKEN", API_KEY, raising=False)
 
     import mewbo_api.wiki.routes as routes_mod
@@ -79,7 +79,7 @@ def test_fallback_models_is_editable_for_a_git_project(client, store):
     assert resp.status_code == 200
     body = resp.get_json()
     assert body["editable"]["fallbackModels"] is True
-    # No override yet on a freshly onboarded project.
+    # No override yet on a freshly indexed project.
     assert body["fallbackModels"] is None
 
 

@@ -42,9 +42,9 @@ _INVALID_DEVICE_TOOL = {
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
-    from mewbo_core.session_event_bus import reset_session_event_bus_for_tests
-    from mewbo_core.session_runtime import SessionRuntime
-    from mewbo_core.session_store import SessionStore
+    from mewbo_core.loop.session_runtime import SessionRuntime
+    from mewbo_core.session.session_event_bus import reset_session_event_bus_for_tests
+    from mewbo_core.session.session_store import SessionStore
 
     reset_session_event_bus_for_tests()
 
@@ -81,7 +81,7 @@ def _wait_for_call_event(rt, session_id: str, timeout: float = 2.0) -> dict:
 
 
 def test_dispatcher_registered_at_api_startup():
-    from mewbo_core.client_tools import DeviceToolDispatcher
+    from mewbo_core.tooling.client_tools import DeviceToolDispatcher
 
     assert DeviceToolDispatcher.available() is True
 
@@ -93,7 +93,7 @@ def test_dispatcher_registered_at_api_startup():
 
 def test_query_binds_device_tools_into_extra_session_tools(client, monkeypatch):
     c, rt, backend = client
-    from mewbo_core.client_tools import ClientDeclaredTool
+    from mewbo_core.tooling.client_tools import ClientDeclaredTool
 
     captured: dict = {}
 
@@ -219,7 +219,7 @@ def test_query_without_device_tools_passes_empty_extra_session_tools(client, mon
 
 def test_message_reengage_rebuilds_device_tools_from_persisted_context(client, monkeypatch):
     c, rt, backend = client
-    from mewbo_core.client_tools import ClientDeclaredTool
+    from mewbo_core.tooling.client_tools import ClientDeclaredTool
 
     captured: dict = {}
 
@@ -288,7 +288,7 @@ def test_message_reengage_self_heals_a_poisoned_persisted_context(client, monkey
 
 def test_recover_rebuilds_device_tools_from_persisted_context(client, monkeypatch):
     c, rt, backend = client
-    from mewbo_core.client_tools import ClientDeclaredTool
+    from mewbo_core.tooling.client_tools import ClientDeclaredTool
 
     captured: dict = {}
 
@@ -359,7 +359,7 @@ def test_recover_self_heals_a_poisoned_persisted_context(client, monkeypatch):
 def test_sync_query_binds_device_tools(client, monkeypatch):
     c, rt, backend = client
     from mewbo_core.classes import TaskQueue
-    from mewbo_core.client_tools import ClientDeclaredTool
+    from mewbo_core.tooling.client_tools import ClientDeclaredTool
 
     captured: dict = {}
 
@@ -416,7 +416,7 @@ def test_sync_query_invalid_device_tool_spec_returns_400_without_persisting(clie
 def test_full_dispatch_round_trip_via_result_route(client):
     c, rt, backend = client
     from mewbo_api.device_tools import ApiDeviceToolDispatcher
-    from mewbo_core.session_event_bus import get_session_event_bus
+    from mewbo_core.session.session_event_bus import get_session_event_bus
 
     session_id = rt.resolve_session()
     get_session_event_bus().subscribe(session_id)  # a client is "attached" (F10)
@@ -497,7 +497,7 @@ def test_dispatch_timeout_surfaces_device_timeout_error(client, monkeypatch):
     c, rt, backend = client
     import mewbo_api.device_tools as device_tools_mod
     from mewbo_api.device_tools import ApiDeviceToolDispatcher
-    from mewbo_core.session_event_bus import get_session_event_bus
+    from mewbo_core.session.session_event_bus import get_session_event_bus
 
     monkeypatch.setattr(device_tools_mod, "DEVICE_TOOL_TIMEOUT_S", 0.2)
     session_id = rt.resolve_session()

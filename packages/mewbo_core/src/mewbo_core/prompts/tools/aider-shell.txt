@@ -7,6 +7,17 @@ Guidelines:
 - Keep commands minimal and explicit.
 - Set cwd when operating in a subdirectory.
 - Do not run destructive commands without explicit user intent.
+- Anything that outlives the timeout (a dev server, a watcher, a long build or
+  test run) takes `run_in_background: true`. It returns a `shell_id` instead of
+  waiting; read its output with `shell_session_tool`. A foreground command that
+  times out is killed and its work is lost.
+- Add `tty: true` only when you intend to answer the program's prompts through
+  `shell_session_tool` `write`. Without it there is no terminal, which is what
+  keeps pagers and credential prompts from hanging.
+- Output is returned whole up to a generous cap, and both ends are kept when it
+  is exceeded. Pipe through `grep`/`tail` to narrow what you are LOOKING for,
+  not out of fear that the result is cut short.
 
 Example:
 Call `aider_shell_tool` with args: {"command": "ls", "cwd": "."}
+Background: {"command": "npm run dev", "run_in_background": true}

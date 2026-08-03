@@ -1,4 +1,4 @@
-"""Domain contracts for Mewbo Apps — the single source of truth (spec §3).
+"""Domain contracts for Mewbo Apps — the single source of truth.
 
 Every other module in this sub-product (``store.py``, ``routes.py``,
 ``lifecycle.py``, the agent-side plugin) imports FROM here; nothing here
@@ -114,6 +114,18 @@ _SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$")
 # this set bounds is ACCIDENT, and what it records is INTENT — declare only
 # what a deterministic sync genuinely needs.
 PIPELINE_ALLOWED_EXEC: frozenset[str] = frozenset({"git", "tea", "gh"})
+
+# The ceiling a pipeline's EXECUTION is actually held to — enforced at the
+# submit boundary (:meth:`AppSpec.ensure_pipeline_timeouts_fit`) and again at
+# execution time (``RunPipelineTool.execution_timeout`` and
+# ``AppPipelineRunner.execute``'s watchdog clamp), NEVER at parse time. A
+# ``mode="code"`` pipeline invoked over REST runs SYNCHRONOUSLY on the single
+# gunicorn worker (``docker/Dockerfile.api``'s ``--timeout 300``), and
+# ``RunPipelineTool.execution_timeout`` adds a margin on top of this value for
+# the work outside the watchdog — so this ceiling has to leave that margin
+# room inside the worker's own timeout. See ``PipelineSpec.timeout_seconds``
+# for why the FIELD does not enforce this number itself.
+PIPELINE_TIMEOUT_CEILING_SECONDS: int = 240
 
 # The git subcommands a pipeline may run, and the options it may not. Without
 # this pair, declaring `git` is equivalent to granting a shell — `git -c
@@ -250,7 +262,7 @@ class _AppsModel(BaseModel):
 class WorkspaceRef(_AppsModel):
     """Which session-project/workspace primitive the app's agents anchor to.
 
-    Points at the SAME workspace primitive sessions already use (spec §2.3)
+    Points at the SAME workspace primitive sessions already use
     — this is a reference, never a new workspace-like entity. The frontend
     never inherits workspace capability; this powers the agent side only.
     """
@@ -287,7 +299,7 @@ class CollectionSpec(_AppsModel):
 class _PipelineSchedule(_AppsModel):
     """Base for the declared-schedule discriminated union (strategy-on-model).
 
-    A pipeline DECLARES how it is woken; the platform arms it (Phase 1).
+    A pipeline DECLARES how it is woken; the platform arms it.
     Each concrete kind owns its own field validator AND its
     :meth:`to_trigger_spec` strategy — there is deliberately no service-side
     ``if kind ==`` in the lifecycle, mirroring ``TriggerSpec`` itself (which is
@@ -378,15 +390,14 @@ class PipelineSpec(_AppsModel):
     trigger for it on the maintainer at submit) or ``on_demand`` (no armed wake;
     runs only from a repair or a manual re-invocation).
 
-    ``trigger_ref`` is PLATFORM-OWNED OUTPUT (Phase 1): the builder never
+    ``trigger_ref`` is PLATFORM-OWNED OUTPUT: the builder never
     sets it. :meth:`AppLifecycle.submit` STAMPS it with the id of the trigger it
-    arms from ``schedule``. The one carve-out is the LEGACY flow where a
-    builder hand-armed its own trigger and passed the id here — the lifecycle
-    still re-homes it (deprecated), which is why a builder-supplied ``trigger_ref``
-    also satisfies the floor below.
+    arms from ``schedule``. The one carve-out is a builder that hand-arms its own
+    trigger and passes the id here — the lifecycle re-homes it, which is why a
+    builder-supplied ``trigger_ref`` also satisfies the floor below.
 
     The floor invariant makes the silent-unscheduled state (no schedule, not
-    on-demand, no legacy ref — a pipeline that would never run) UNREPRESENTABLE at
+    on-demand, no ref — a pipeline that would never run) UNREPRESENTABLE at
     the submit trust boundary.
     """
 
@@ -397,7 +408,7 @@ class PipelineSpec(_AppsModel):
     trigger_ref: str | None = None
     tools_allowlist: list[str] = Field(default_factory=list)
     cursor: dict[str, Any] = Field(default_factory=dict)
-    # -- Phase 2: materialized (code) pipelines --------------------------
+    # -- Materialized (code) pipelines ------------------------------------
     # ``agentic`` (default, backwards-compatible) is woken by re-engaging the
     # maintainer LLM session; ``code`` runs a deterministic ``entrypoint`` file
     # through ``AppPipelineRunner`` — NO LLM call — at fire time and on demand.
@@ -415,7 +426,35 @@ class PipelineSpec(_AppsModel):
     # bound the runner's watchdog joins the pipeline's worker thread on (declared,
     # never inferred). A deterministic transform finishes well under the ``10``
     # default; a pipeline that calls ``ctx.llm`` should raise it (e.g. ``120``-
-    # ``300``) so the model round-trip(s) have headroom. Capped at 600s.
+    # ``180``) so the model round-trip(s) have headroom.
+    #
+    # ``le=600`` here is deliberately WIDER than the real ceiling
+    # (:data:`PIPELINE_TIMEOUT_CEILING_SECONDS`, 240) — this is a PARSE-time
+    # bound and the app store is APPEND-ONLY, so tightening it here would make an
+    # already-stored manifest (or ANY of its ``app_versions`` snapshots) fail to
+    # VALIDATE: a detail read, a rollback preview, or a listing that parses every
+    # row would 500 for any app already holding a value between 241 and 600. That
+    # is exactly the ``ensure_wakeable``/``ensure_unique_pipeline_names`` trap
+    # this package has hit before — stored history must keep parsing under the
+    # contract it was written with.
+    #
+    # The real ceiling is enforced at the two boundaries that CAN'T strand
+    # existing data: submit-time (:meth:`AppSpec.ensure_pipeline_timeouts_fit`,
+    # refusing new/updated pipelines above the ceiling) and execution-time
+    # (``RunPipelineTool.execution_timeout`` and ``AppPipelineRunner.execute``'s
+    # watchdog both clamp a stored value down to the ceiling and log a WARNING
+    # naming the app/pipeline when they do) — so an already-stored 300 still
+    # PARSES, still gets a submit-time refusal on its NEXT edit, and still runs
+    # for at most the ceiling, never long enough to outlive the single gunicorn
+    # worker (``docker/Dockerfile.api``'s ``--timeout 300``).
+    #
+    # ``submit_app.py``'s ``SubmitPipelineArgs.timeout_seconds`` carries the
+    # OPPOSITE bound (``le=PIPELINE_TIMEOUT_CEILING_SECONDS``, i.e. 240) on
+    # purpose: it is a TOOL ARGUMENT, never parsed from storage, so refusing an
+    # over-ceiling value at definition is the ordinary trust-boundary rule
+    # rather than the append-only trap this field is dodging. Two spellings of
+    # one number, opposite constraints, both correct — do NOT "harmonise" this
+    # field's bound down to match that one.
     timeout_seconds: int = Field(default=10, ge=1, le=600)
     # The declare-don't-infer v1 of the freshness contract: seconds a
     # successful result may be served from the runner's process-local cache instead
@@ -430,7 +469,7 @@ class PipelineSpec(_AppsModel):
     # recomputing on ANY source change — so an invoke reflects current source state
     # yet computes only on change. ``"source"`` IGNORES ``cache_ttl_seconds``
     # (precedence: liveness is stat-driven, not time-driven); the runner enforces
-    # both. Backwards-compatible: a legacy pipeline dict parses as ``"ttl"``.
+    # both. A pipeline dict with no ``cache_mode`` parses as ``"ttl"``.
     cache_mode: Literal["ttl", "source"] = "ttl"
     # -- Wave 5: the bounded LLM step (``ctx.llm``) ----------------------
     # Per-RUN cap on the cumulative ``max_tokens`` a run's ``ctx.llm()`` calls may
@@ -641,10 +680,11 @@ class PipelineSpec(_AppsModel):
         HISTORY-SAFE — why a parse-time ``model_validator`` is legal here where
         ``ensure_wakeable`` had to stay OFF the model: ``user_writable`` is NEW this
         wave with default ``False``, so NO stored ``AppVersion`` snapshot can hold
-        ``user_writable=True``. Every historical pipeline dict parses
+        ``user_writable=True``. Every stored pipeline dict parses
         ``user_writable=False``, which this admits unconditionally — the invariant
         never existed to be violated by old data, so validating it at parse cannot
-        500 a detail read of any pre-wave app (the ``ensure_wakeable`` trap).
+        500 a detail read of an app whose snapshot omits it (the
+        ``ensure_wakeable`` trap).
         """
         if self.user_writable and self.mode != "code":
             raise ValueError(
@@ -662,7 +702,7 @@ class PipelineSpec(_AppsModel):
         granting nothing is the kind of quiet lie an audit has to re-derive.
         History-safe for the SAME reason as ``user_writable`` above: both fields
         are new with an EMPTY default, so no stored snapshot can hold a
-        non-empty one and no historical parse can trip this.
+        non-empty one and no stored snapshot can trip this.
         """
         if self.mode != "code" and (self.allow_exec or self.allow_egress):
             raise ValueError(
@@ -675,17 +715,17 @@ class PipelineSpec(_AppsModel):
         """Refuse the silent-unscheduled state — at the SUBMIT boundary, not parse.
 
         A pipeline must declare a ``schedule``, be ``on_demand``, or carry a
-        LEGACY builder-armed ``trigger_ref`` (itself a scheduling declaration);
+        builder-armed ``trigger_ref`` (itself a scheduling declaration);
         one with NONE of the three would never run. ``AppLifecycle.submit``
         calls this for every INCOMING pipeline, and the builder's
         ``SubmitPipelineArgs`` enforces the same floor at the tool boundary —
         so a new silently-unscheduled app stays unshippable.
 
         Deliberately NOT a ``model_validator``: the app store is append-only —
-        every legacy ``AppVersion`` snapshot holds pipelines with none of the
-        three fields, and HISTORY MUST PARSE FOREVER. A parse-time floor 500'd
-        every detail read of any app with a pre-Phase-1 snapshot (live-verified
-        on app-a2a5f299e0ad the hour it deployed). Validation of new data
+        a stored ``AppVersion`` snapshot can hold pipelines with none of the
+        three fields, and STORED SNAPSHOTS MUST PARSE FOREVER — a parse-time
+        floor would 500 every detail read of an app whose snapshot carries none of
+        them. Validation of new data
         belongs at the trust boundary it crosses; stored history re-crosses the
         parse seam under the contract it was WRITTEN with.
         """
@@ -841,7 +881,7 @@ class AppSpec(_AppsModel):
         exists only to let a served frontend POST a form pipeline's params, so an
         app with none can never obtain one). On the model because it is intrinsic to
         the manifest — ``user_writable`` always parses (default ``False``), so this
-        works against every historical snapshot too.
+        works against every stored snapshot too.
         """
         return any(p.user_writable for p in self.pipelines)
 
@@ -856,9 +896,9 @@ class AppSpec(_AppsModel):
 
         Deliberately NOT a parse-time ``model_validator`` — the same discipline
         :meth:`PipelineSpec.ensure_wakeable` follows: the app store is append-only,
-        so a legacy snapshot that already carries a duplicate must keep PARSING for a
-        detail read (a parse-time floor 500'd every detail read of a pre-existing
-        app — the live-verified ``ensure_wakeable`` trap). Validation of NEW data
+        so a stored snapshot that already carries a duplicate must keep PARSING for a
+        detail read (a parse-time floor 500s every detail read of a pre-existing
+        app — the ``ensure_wakeable`` trap). Validation of NEW data
         belongs at the trust boundary it crosses; stored history re-crosses the parse
         seam under the contract it was written with. ``AppLifecycle.submit`` calls
         this for every incoming draft, so it surfaces through submit's existing
@@ -874,6 +914,38 @@ class AppSpec(_AppsModel):
             raise ValueError(
                 f"duplicate pipeline name(s): {', '.join(sorted(dupes))} — each "
                 "pipeline needs a unique name"
+            )
+
+    def ensure_pipeline_timeouts_fit(self) -> None:
+        """Refuse a pipeline declaring more than the real ceiling — at the SUBMIT boundary.
+
+        ``PipelineSpec.timeout_seconds`` parses up to 600 (see its own comment)
+        precisely so an already-stored manifest keeps parsing; this method is
+        where that field's PARSE-time bound and the platform's real
+        :data:`PIPELINE_TIMEOUT_CEILING_SECONDS` (240) are reconciled — the same
+        ``ensure_unique_pipeline_names``/``ensure_wakeable`` shape: NOT a
+        ``model_validator``, because a stored ``AppVersion`` snapshot written
+        before this ceiling existed (or before it was lowered) must keep parsing
+        for a detail read or a rollback, and validation of NEW data belongs at
+        the trust boundary it crosses, never at the parse seam stored history
+        re-crosses under the contract it was written with.
+
+        A pipeline already over the ceiling in the store is NOT stranded: it
+        still parses, still runs (clamped, with a logged warning — see
+        ``RunPipelineTool.execution_timeout`` and ``AppPipelineRunner.execute``),
+        and only its NEXT submit (an edit, a resubmit, a rollback-then-resubmit)
+        is refused here — at which point the builder gets an actionable reask
+        naming the offending pipeline instead of a silent narrowing.
+        """
+        over = [p for p in self.pipelines if p.timeout_seconds > PIPELINE_TIMEOUT_CEILING_SECONDS]
+        if over:
+            names = ", ".join(
+                f"{p.name!r} ({p.timeout_seconds}s)" for p in sorted(over, key=lambda p: p.name)
+            )
+            raise ValueError(
+                f"pipeline timeout_seconds exceeds the {PIPELINE_TIMEOUT_CEILING_SECONDS}s "
+                f"ceiling: {names} — a code pipeline runs synchronously on the web worker, "
+                f"so lower timeout_seconds to {PIPELINE_TIMEOUT_CEILING_SECONDS} or less"
             )
 
 
@@ -981,7 +1053,7 @@ class AppVersionSummary(_AppsModel):
 
 
 class AppVersion(_AppsModel):
-    """An append-only snapshot in an app's version history (spec §2.9).
+    """An append-only snapshot in an app's version history.
 
     Rollback = repoint the active version to an earlier snapshot; it is
     never a status transition and never mutates prior history.
@@ -1010,7 +1082,7 @@ class AppVersion(_AppsModel):
 
 
 class PipelineRun(_AppsModel):
-    """The provenance ledger for one pipeline execution (spec §2.8).
+    """The provenance ledger for one pipeline execution.
 
     Opened at trigger fire, incremented by ``app_data`` writes, closed at
     maintainer run end. It is the provenance chain, the freshness signal
@@ -1030,7 +1102,7 @@ class PipelineRun(_AppsModel):
     cursor_before: dict[str, Any] = Field(default_factory=dict)
     cursor_after: dict[str, Any] | None = None
     error: str | None = None
-    # -- Phase 2: code-pipeline attribution (additive; agentic runs default) --
+    # -- Code-pipeline attribution (additive; agentic runs default) --------
     # How this run was invoked: a ``scheduled`` fire (a trigger, agentic or code) or
     # an ``on_request`` code-pipeline invocation (the run_pipeline tool / REST run
     # endpoint). Defaults to ``scheduled`` so every existing agentic open/close is
@@ -1138,10 +1210,10 @@ class PipelineRun(_AppsModel):
         run can write real documents to ONE declared collection while silently
         missing another — status ``succeeded``, ``docs_written`` non-empty, yet a
         collection the app declares (and a served frontend page may read) never
-        appears in the ledger. This is the exact shape of the incident that
-        motivated both signals: a pipeline wrote to ``today_digest`` while the
-        ``records`` collection every page actually read stayed empty, and
-        ``wrote_nothing`` alone couldn't see it (``docs_written`` wasn't empty).
+        appears in the ledger. The shape both signals exist for: a pipeline
+        writes to ``today_digest`` while the ``records`` collection every page
+        actually reads stays empty, which ``wrote_nothing`` alone cannot see
+        (``docs_written`` is not empty).
         A run has no notion of the app's declared collections — that's
         :class:`AppSpec` data — so the caller (``routes.py``, which already holds
         the spec) supplies them as an argument, the same discipline
@@ -1166,8 +1238,8 @@ class PipelineRun(_AppsModel):
 
         **1. It cannot tell "regressed" from "never populated".** An app whose
         upstream genuinely has no rows yet writes nothing forever, legitimately;
-        a pipeline that USED to fill a collection and now writes zero is a real
-        break. The discriminator is this pipeline's OWN ledger history: a
+        a pipeline that filled a collection on earlier runs and now writes zero
+        is a real break. The discriminator is this pipeline's OWN ledger history: a
         collection only counts as watched once some earlier succeeded run of THIS
         pipeline actually wrote to it (*prior_runs* is that history). So a
         first-ever run has an empty baseline and reports nothing, and a
@@ -1221,9 +1293,8 @@ class PipelineRun(_AppsModel):
         """Age of the most recent SUCCEEDED run's completion, or ``None`` if never succeeded.
 
         The freshness signal the system-namespace introspection endpoint
-        (spec §2.6) surfaces per app/collection. Ignores ``failed`` and
-        still-``running`` entries — only a completed success counts as
-        fresh data.
+        surfaces per app/collection. Ignores ``failed`` and still-``running``
+        entries — only a completed success counts as fresh data.
         """
         ended_ats = [r.ended_at for r in runs if r.status == "succeeded" and r.ended_at is not None]
         if not ended_ats:
@@ -1257,14 +1328,13 @@ class PipelineRun(_AppsModel):
 class PipelineIssue(_AppsModel):
     """Why an app needs attention — the ONE input to the ``on_pipeline_failure`` dispatch.
 
-    ``AppLifecycle.handle_pipeline_failure`` used to take a bare ``error: str |
-    None``, which was enough while the only reason to react was "the run raised".
-    A second reason now reaches the same dispatch: a run that SUCCEEDED and still
-    stopped filling a collection it used to fill. That is not a failure and must
-    never be recorded as one — the run genuinely succeeded, and restating it as
-    ``failed`` would corrupt ``stale``/``last_success_at``/freshness, the signals
-    the health surface just made honest. So the run STATUS keeps telling the truth
-    and this carries the orthogonal "needs attention" axis alongside it.
+    Two reasons reach the same dispatch, which is why this is a model and not a
+    bare ``error: str | None``: the run raised, and a run that SUCCEEDED and
+    still stopped filling a collection it had been filling. The second is not a
+    failure and must never be recorded as one — the run genuinely succeeded, and
+    restating it as ``failed`` would corrupt
+    ``stale``/``last_success_at``/freshness. So the run STATUS keeps telling the
+    truth and this carries the orthogonal "needs attention" axis alongside it.
 
     Two shapes rather than a bare string because the reaction has to be actionable:
     a repair agent told only "something went wrong" hunts for an exception that
@@ -1281,12 +1351,12 @@ class PipelineIssue(_AppsModel):
 
     @classmethod
     def run_failed(cls, pipeline_name: str, error: str | None) -> PipelineIssue:
-        """The classic reaction cause: the run raised and closed ``failed``."""
+        """The run raised and closed ``failed``."""
         return cls(kind="run_failed", pipeline_name=pipeline_name, error=error)
 
     @classmethod
     def unwritten(cls, pipeline_name: str, collections: Sequence[str]) -> PipelineIssue:
-        """A SUCCEEDED run that stopped writing collections it previously wrote.
+        """A SUCCEEDED run that stopped writing collections earlier runs wrote.
 
         Built from :meth:`PipelineRun.new_integrity_violations`, which owns the
         regressed-vs-never-populated and edge-vs-level rules.
@@ -1329,10 +1399,9 @@ class PipelineIssue(_AppsModel):
         collections, whether anything raised), ``AppLifecycle._repair_prompt`` owns
         the SURFACES to reach for, and the ``app-repair`` AgentDef owns the
         durable HOW — the hypothesis set, the ordering, the verification bar.
-        The hypothesis list lived here in an earlier cut and was moved down into
-        the AgentDef: it is the same advice for a platform-dispatched repair and a
-        user-reported "my dashboard is empty", so duplicating it in a prompt
-        string would have been a second copy to drift.
+        The hypothesis list belongs to the AgentDef, not here: it is the same
+        advice for a platform-dispatched repair and a user-reported "my dashboard
+        is empty", so a copy in a prompt string would be a second copy to drift.
         """
         if self.kind == "run_failed":
             return (
@@ -1352,7 +1421,7 @@ class PipelineIssue(_AppsModel):
 
 
 class PipelineResult(_AppsModel):
-    """The frozen outcome of ONE code-pipeline execution (Phase 2).
+    """The frozen outcome of ONE code-pipeline execution.
 
     Returned by :meth:`AppPipelineRunner.execute` — the single contract both the
     REST run endpoint (`routes.py` reads these four attributes structurally) and
@@ -1397,8 +1466,7 @@ class AppDataDoc(_AppsModel):
 class AppReadToken(_AppsModel):
     """A short-lived, render-scoped token minted when an app is opened.
 
-    Carries ``app_id`` + a scope only (spec §2.7; ``write`` added in Phase 2
-    for pipeline invocation) — never a general session credential. Default
+    Carries ``app_id`` + a scope only — never a general session credential. Default
     ``scope`` stays ``"read"``; minting ``"write"`` is gated master-key-only at
     the route (see ``routes.py:AppsRoutesController.mint_token``).
     """

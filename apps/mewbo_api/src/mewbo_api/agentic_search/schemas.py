@@ -132,7 +132,7 @@ class WorkspaceInput(_Wire):
 class Workspace(_Wire):
     """A saved multi-source search workspace.
 
-    ``created`` is the legacy display label; ``created_at`` / ``updated_at`` are
+    ``created`` is the display label; ``created_at`` / ``updated_at`` are
     the canonical ISO timestamps. Both are emitted so an un-migrated console
     keeps rendering while a migrated one prefers the ISO fields.
     """
@@ -347,7 +347,7 @@ class TraceAgent(_Wire):
     # dedup); ``returned_count`` is how many it RAW-emitted before dedup. Their
     # delta is the count the lane contributed that collapsed into another lane's
     # card — surfaced as "N filtered" so the trace reads how much each tool
-    # really contributed (the old hardcoded 0 was blind to a 3-card probe).
+    # really contributed — a hardcoded 0 here is blind to a 3-card probe.
     kind: str = ""
     model: str | None = None
     steps: int | None = None
@@ -384,6 +384,16 @@ class AnswerSynthesis(_Wire):
       (a probe is data-bearing iff its evidence isn't a ``NO DATA`` dead-end).
       ``0.0`` means "no probe ran" (e.g. a synthesis with an empty trace) — the
       console suppresses the chip rather than render an unearned ``0%``.
+      **Deliberately over probes RUN, not probes intended:** confidence asks
+      "of the evidence actually gathered, how much was substantive" — a
+      PERMANENTLY refused probe (unresolvable project, unknown agent type,
+      unavailable model) contributed no evidence to average over, so
+      excluding it does not bias the ratio. It does mean this field alone
+      cannot say whether the coordinator's fan-out was cut short; that fact
+      belongs on ``RunStatsWire.probes_rejected`` (``RunPayload.stats``), a
+      sibling field, never folded into this ratio — a reader must consult
+      both to avoid mistaking "high confidence" for "everything intended
+      actually ran".
 
     The echo runner keeps its fixture values; only the orchestrated runner
     derives these from the live trace.
@@ -412,18 +422,17 @@ class RelatedPerson(_Wire):
 class SearchRunCreateRequest(_Wire):
     """Validated ``POST /runs`` body — the run-creation wire contract.
 
-    Closes a real gap: this endpoint used to be parsed as a raw dict with
-    ad hoc per-field ``isinstance``/membership checks and no ``extra="forbid"``
-    — exactly the "client smuggles/typos a field, gets a silent no-op" trap the
-    house Pydantic-contract law exists to close. ``tier``, ``model``,
-    ``project`` and ``fallback_models`` are independent optional overrides;
+    A typed model rather than a raw dict with ad hoc per-field
+    ``isinstance``/membership checks: ``extra="forbid"`` is what closes the
+    "client smuggles/typos a field, gets a silent no-op" trap. ``tier``,
+    ``model``, ``project`` and ``fallback_models`` are independent optional overrides;
     each absent field defers to server policy on its own (a request need not
     set all-or-nothing).
 
     ``model`` / ``project`` keep the established ``/v1/structured`` stance —
     a non-string or blank value is silently ignored rather than rejected — but
-    ``fallback_models`` is a genuinely new field with no prior "ignore junk"
-    contract, so a wrong TYPE (e.g. a string instead of a list) is a real 400,
+    ``fallback_models`` carries no such "ignore junk" contract, so a wrong TYPE
+    (e.g. a string instead of a list) is a real 400,
     while an empty-after-trim list still collapses to ``None`` (inherit
     config policy), mirroring ``backend.py:_extract_fallback_models``.
     """
@@ -482,17 +491,28 @@ class RunStatsWire(_Wire):
 
     Populated at settle from REAL session events (``RunStats`` discipline:
     NEVER fabricate — a value that can't be derived stays ``None``, never a
-    misleading 0). ``probes`` is the spawned probe-lane count; ``tool_calls``
-    the total ``tool_result`` events; ``input_tokens`` / ``output_tokens`` the
-    cross-lane token totals. ``setup_ms`` is the pre-turn wall clock
-    (``created_at`` → first user/llm event — the MCP-handshake gap the old
-    "73s total" hid); ``search_ms`` is ``total_ms − setup_ms``. The two ``_ms``
-    fields are ``None`` when the bracketing event is unavailable (e.g. a
-    fake-runtime transcript with no ``llm_call_*``), so the console suppresses
-    them rather than render a fabricated 0.
+    misleading 0). ``probes`` is the spawned probe-lane count — probes that
+    were admitted and STARTED (whether dispatched immediately or, under the
+    ``AgentQueue`` scheduler, deferred and dispatched once a slot freed —
+    either way it earns a real ``sub_agent`` lifecycle); ``probes_rejected``
+    is spawn attempts PERMANENTLY refused — an unresolvable project, an
+    unknown agent type, an unavailable model, never a capacity wait — and so
+    never became a lane at all. ``probes + probes_rejected`` is the
+    coordinator's actual intent; ``probes`` alone stays what it always meant
+    (what the answer's ``confidence`` is computed over — see
+    ``AnswerSynthesis``), so an existing reader of ``probes`` is unaffected
+    by this addition. ``tool_calls`` is the total ``tool_result``
+    events; ``input_tokens`` / ``output_tokens`` the cross-lane token totals.
+    ``setup_ms`` is the pre-turn wall clock (``created_at`` → first user/llm
+    event — the MCP-handshake gap the old "73s total" hid); ``search_ms`` is
+    ``total_ms − setup_ms``. The two ``_ms`` fields are ``None`` when the
+    bracketing event is unavailable (e.g. a fake-runtime transcript with no
+    ``llm_call_*``), so the console suppresses them rather than render a
+    fabricated 0.
     """
 
     probes: int = 0
+    probes_rejected: int = 0
     tool_calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -598,7 +618,7 @@ class RunRecord(_Wire):
 
 
 class MapJobRecord(_Wire):
-    """Durable record of a map-source (SCG indexing) job (spec §16.2).
+    """Durable record of a map-source (SCG indexing) job.
 
     The map job lives in the *agentic_search* store — NOT the SCG structure
     store — so it reuses the run-event-log + ``RunSseGenerator`` plumbing the
@@ -651,7 +671,6 @@ SEARCH_EVENT_TYPES: frozenset[str] = frozenset(
     }
 )
 
-# Event types that terminate the SSE stream.
 TERMINAL_EVENT_TYPES: frozenset[str] = frozenset({"run_done", "error", "cancelled"})
 
 

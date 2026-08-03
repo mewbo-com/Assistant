@@ -1,10 +1,10 @@
 import {
+  AnswerDelivery,
   AttachmentPayload,
   AttachmentRecord,
   CommandResult,
   CommandSpec,
   CreateWorktreeInput,
-  EventRecord,
   NotificationItem,
   ProjectBranches,
   QuestionAnswerItemPayload,
@@ -73,6 +73,12 @@ export type ProjectSummary = {
   is_worktree?: boolean;
   parent_project_id?: string | null;
   branch?: string | null;
+  // Canonical git identity, filled by the backend only for checkouts that have
+  // a remote. `repo.name` is the REPOSITORY name — distinct from `name` above,
+  // which is the project's display name. Keys are absent, not null, when the
+  // path has no remotes.
+  repo?: { host: string; owner: string; name: string };
+  aliases?: string[];
 };
 
 export type ModelCapabilities = {
@@ -140,15 +146,37 @@ export type ForkResponse = {
  * answers don't fit, `forbidden` = 403 bad token, `error` = anything else).
  */
 export type AnswerQuestionResult =
-  | { ok: true }
+  | {
+      ok: true;
+      /** Where the answer landed, so the card can confirm honestly: `run` = the
+       *  waiting agent received it, `message` = the run had already moved on so
+       *  it was sent as a new message. Absent if the server omitted it. */
+      delivery?: AnswerDelivery;
+    }
   | {
       ok: false;
       kind: "superseded" | "invalid" | "forbidden" | "terminated" | "error";
       message: string;
     };
 
+/**
+ * Server-side narrowing for `GET /api/sessions`, mirroring
+ * `mewbo_core.session.session_query.SessionQuery`. `project` matches a session
+ * that has worked in ANY of the named projects (an auto-select session that
+ * switched mid-task matches every one it touched) — repeated as multiple query
+ * params, never comma-joined, since a project identity is an opaque string the
+ * route must not re-split.
+ */
+export type SessionListFilter = {
+  project?: string[];
+  pinned?: boolean;
+};
+
 export type ApiClient = {
-  listSessions: (includeArchived?: boolean) => Promise<SessionSummary[]>;
+  listSessions: (
+    includeArchived?: boolean,
+    filter?: SessionListFilter
+  ) => Promise<SessionSummary[]>;
   createSession: (context?: SessionContext) => Promise<string>;
   postQuery: (
     sessionId: string,
@@ -157,21 +185,30 @@ export type ApiClient = {
     mode?: QueryMode,
     attachments?: AttachmentPayload[]
   ) => Promise<void>;
-  fetchEvents: (
-    sessionId: string,
-    after?: string
-  ) => Promise<{
-    events: EventRecord[];
-    running: boolean;
-    status?: string;
-    done_reason?: string;
-    terminated?: boolean;
-    recoverable?: boolean;
-  }>;
   fetchUsage: (sessionId: string) => Promise<SessionUsage>;
   getSessionSpec: (sessionId: string) => Promise<SessionSpecResponse>;
+  /**
+   * The one sanctioned path to change a purpose-bound session's project — the
+   * per-turn override is refused server-side (`SessionSpec.field_editable`),
+   * so this is a durable PUT, not a query-context key. `project` is a
+   * required, non-empty string: the route only ever BINDS (an empty/absent
+   * name would null the session's `cwd`, sending the next turn into an empty
+   * temp dir — the defect this route exists to fix), so there is no unbind
+   * verb. Returns the fresh spec projection (same shape as `getSessionSpec`)
+   * so a caller can replace the cache directly instead of refetching.
+   */
+  rebindSessionProject: (sessionId: string, project: string) => Promise<SessionSpecResponse>;
   archiveSession: (sessionId: string) => Promise<void>;
   unarchiveSession: (sessionId: string) => Promise<void>;
+  /**
+   * Pin/unpin, mirroring archive's POST-then-DELETE-on-one-path shape exactly.
+   * Pinning is an ORDERING signal only — the server sorts pinned rows first,
+   * then newest-first, and every active filter still applies to a pinned
+   * session. Returns the resulting `pinned`/`pinned_at` pair so a caller can
+   * patch the cache without a refetch.
+   */
+  pinSession: (sessionId: string) => Promise<{ session_id: string; pinned: boolean; pinned_at: string | null }>;
+  unpinSession: (sessionId: string) => Promise<{ session_id: string; pinned: boolean; pinned_at: string | null }>;
   updateSessionTitle: (
     sessionId: string,
     title: string
@@ -188,10 +225,12 @@ export type ApiClient = {
   sendMessage: (sessionId: string, text: string) => Promise<void>;
   interruptStep: (sessionId: string) => Promise<void>;
   approvePlan: (sessionId: string, approved: boolean) => Promise<void>;
+  /** `notes` is the optional group-level free-text box. Omit the key entirely
+   *  when the user left it blank — an empty string is not a note. */
   answerQuestion: (
     sessionId: string,
     callId: string,
-    body: { call_token: string; answers: QuestionAnswerItemPayload[] },
+    body: { call_token: string; answers: QuestionAnswerItemPayload[]; notes?: string },
   ) => Promise<AnswerQuestionResult>;
   recoverSession: (
     sessionId: string,
@@ -207,11 +246,6 @@ export type ApiClient = {
   fetchPlanMarkdown: (sessionId: string) => Promise<string>;
   listTools: (project?: string) => Promise<ToolSummary[]>;
   listSkills: (project?: string) => Promise<SkillSummary[]>;
-  streamEvents: (
-    sessionId: string,
-    onEvent: (event: EventRecord) => void,
-    onEnd: () => void
-  ) => () => void;
   listModels: () => Promise<ModelInfo>;
   listProjects: () => Promise<ProjectSummary[]>;
   listNotifications: () => Promise<NotificationItem[]>;
@@ -274,12 +308,30 @@ export type MarketplacePlugin = {
 };
 
 /**
+ * Server-reported writability of the config store, attached to `GET
+ * /api/config`. `writable: true` in a healthy deployment, with `code`/
+ * `reason` both null; `writable: false` (e.g. a read-only mounted config
+ * directory) carries a stable machine `code` plus a `reason` string that is
+ * already human-readable prose written for display — render it directly,
+ * never re-map `code` to a hand-written string (that duplicates the server's
+ * copy and drifts).
+ */
+export type ConfigStorageStatus = {
+  writable: boolean;
+  code: string | null;
+  reason: string | null;
+};
+
+/**
  * Shape of GET/PATCH /api/config — the (secret-stripped) config tree plus a
- * `secrets` map of dot-path → "has a stored value" flag.
+ * `secrets` map of dot-path → "has a stored value" flag. `storage` is only
+ * ever populated on the GET response (a PATCH echoes the same `config`/
+ * `secrets` pair but carries no storage status of its own).
  */
 export type ConfigState = {
   config: Record<string, unknown>;
   secrets: Record<string, boolean>;
+  storage?: ConfigStorageStatus;
 };
 
 export type ApiConfig = {

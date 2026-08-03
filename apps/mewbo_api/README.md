@@ -47,4 +47,4 @@ This starts:
 - **API** on port 5124
 - **Console** on port 3000 (proxies `/api/` to the API container)
 
-Set `MASTER_API_TOKEN` in the environment or `.env` file to override the default API key.
+Set `MEWBO_MASTER_API_TOKEN` in the environment or `.env` file to override the default API key.

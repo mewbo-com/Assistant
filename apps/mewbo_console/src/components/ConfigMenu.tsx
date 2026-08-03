@@ -1,7 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
+  AppWindow,
   ArrowLeft,
   Blocks,
+  BookOpen,
   ChevronDown,
   ChevronUp,
   Circle,
@@ -9,6 +11,7 @@ import {
   GitBranch,
   GitFork,
   Loader2,
+  Lock,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -17,11 +20,25 @@ import {
   Zap,
 } from 'lucide-react';
 import { ProjectSummary, SkillSummary, ToolScope } from '../api/client';
-import { CreateWorktreeInput, WorktreeSummary } from '../types';
+import { CreateWorktreeInput, SessionTarget, WorktreeSummary } from '../types';
+import { useApps } from '../hooks/useApps';
+import { useWikiProjects } from './wiki/api/hooks';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import {
   MEWBO_BRANCH_PREFIX,
   defaultMewboBranchName,
 } from '../utils/branchName';
+import {
+  useCheckoutRepository,
+  useRepositories,
+} from '../hooks/useRepositories';
+import {
+  AUTO_PROJECT,
+  AUTO_PROJECT_DESCRIPTION,
+  AUTO_PROJECT_LABEL,
+  MANAGED_PREFIX,
+  ProjectLabel,
+} from '../utils/projectLabel';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import {
   Command,
@@ -68,6 +85,50 @@ type ConfigMenuProps = {
   onSelectProject: (name: string | null) => void;
   onSelectSkill: (name: string | null) => void;
   onResetAll: () => void;
+  /**
+   * Offer the "Wiki & Apps" tab inside the Project drill-in. HOME mode only,
+   * and the caller decides — a target routes session CREATION to a product's
+   * own get-or-create endpoint, so there is nothing for it to do once a session
+   * exists, and the server refuses to retarget a bound one. Shipping the
+   * control in detail mode would offer a pick that can only fail.
+   */
+  targetsEnabled?: boolean;
+  /** The chosen target, held BESIDE `activeProject` and never inside it. */
+  activeTarget?: SessionTarget | null;
+  onSelectTarget?: (target: SessionTarget | null) => void;
+  /**
+   * True when the durable session spec refuses a project override (a
+   * purpose-bound session whose `editable.project` is not `true` — mirrors
+   * the composer's locked-tool-ceiling gate, `InputBar`'s `toolBindingLocked`).
+   * The Project panel stays browsable, but a pick routes through
+   * `onRebindProject` instead of the local-only `onSelectProject`, since the
+   * server would otherwise silently drop it. The "Temporary directory" row
+   * hides in this state — the rebind route only ever BINDS, so there is no
+   * unbind pick to offer.
+   *
+   * The **Auto** row deliberately does NOT hide with it. What disqualifies
+   * "Temporary directory" is a wire shape, not a policy: its pick is `null`,
+   * and the rebind route has no representation for that. `auto` is a real,
+   * non-empty project key — a sibling of the `managed:<uuid>` grammar that the
+   * same `PUT .../project` accepts — so that reason simply does not apply.
+   * Hiding it anyway would make the lock asymmetric in the worst direction: a
+   * session created in auto mode whose agent has since switched into a concrete
+   * project would find every project pickable EXCEPT the one that restores the
+   * behaviour it was created for. Whether a given bound session may go back to
+   * auto is the SERVER's call — it validates the rebind and refuses what it
+   * won't take, and `projectRebindError` surfaces that inline. Offering a pick
+   * the server may refuse beats hiding one it would have accepted.
+   */
+  projectLocked?: boolean;
+  /** A rebind PUT is in flight — guards against firing a second one. */
+  projectRebinding?: boolean;
+  /** The last rebind attempt's error, if any. */
+  projectRebindError?: string | null;
+  /** Durable rebind for a locked session's project (`PUT .../project`). Only
+   *  meaningful, and only ever called, while `projectLocked` is true; the
+   *  server requires a non-empty name (`null` has no route to reach it once
+   *  the "Temporary directory" row is hidden while locked). */
+  onRebindProject?: (name: string) => void;
   // Branch / worktree (optional — if ``gitRepo`` is false the git rows hide)
   gitRepo?: boolean;
   branches?: string[];
@@ -119,7 +180,7 @@ const DOT_CLASSES: Record<McpStatus, string> = {
 /** Selection key for a project entry — managed projects use a `managed:` prefix. */
 function projectKey(p: ProjectSummary): string {
   return p.source === 'managed' && p.project_id
-    ? `managed:${p.project_id}`
+    ? `${MANAGED_PREFIX}${p.project_id}`
     : p.name;
 }
 
@@ -139,9 +200,9 @@ function projectKey(p: ProjectSummary): string {
 // its `<input>` the responsive iOS floor (`text-field md:text-sm` — 16px on
 // narrow viewports, 13px from `md:` up), and `cn()` is last-wins, so ANY size
 // passed here would replace that base step and drop the floor on phones. The
-// primitive owns the type; a caller passes layout. This constant used to carry
-// `text-xs` and did exactly that, silently, while reading as a harmless density
-// tweak — which is the whole argument for not restating type at a call site.
+// primitive owns the type; a caller passes layout — restating a size here
+// would do so silently, while reading as a harmless density tweak. That is
+// the whole argument for not restating type at a call site.
 //
 // The height still has to follow the same breakpoint, or the 16px text is
 // cramped: 32px clears a 16px line box, 28px keeps the dense desktop look.
@@ -225,6 +286,13 @@ export function ConfigMenu({
   onSelectProject,
   onSelectSkill,
   onResetAll,
+  targetsEnabled = false,
+  activeTarget = null,
+  onSelectTarget,
+  projectLocked = false,
+  projectRebinding = false,
+  projectRebindError = null,
+  onRebindProject,
   gitRepo = false,
   branches = [],
   currentBranch = null,
@@ -269,19 +337,50 @@ export function ConfigMenu({
     activeBranch !== null &&
     currentBranch !== null &&
     activeBranch !== currentBranch;
+  // A target counts here for the same reason a project does: it is a deliberate
+  // selection the composer is carrying, and the count is what tells a user
+  // "something is set" without opening the menu. It is NOT added on top of the
+  // project — the two are alternatives at submit time, and double-counting them
+  // would report two scopes where the session gets one.
+  const showTarget = targetsEnabled && activeTarget !== null;
   const totalActive =
-    (activeProject ? 1 : 0) +
+    (showTarget || activeProject ? 1 : 0) +
     (activeSkill ? 1 : 0) +
     activeMcpCount +
     (branchIsNonDefault ? 1 : 0) +
     (activeWorktree ? 1 : 0);
   const hasAnyActive = totalActive > 0;
 
-  const activeProjectEntry = projects.find((p) =>
-    p.project_id ? `managed:${p.project_id}` === activeProject : p.name === activeProject,
-  );
-  const projectLabel =
-    activeProjectEntry?.name ?? (activeProject ? activeProject : 'Temporary directory');
+  // Naming a session's project is a LOOKUP, not a string copy — the console
+  // persists it as `managed:<uuid>`. `ProjectLabel` is the one resolver for
+  // that; hand-rolling a `projects.find` beside it instead falls through to
+  // printing the raw key whenever the list doesn't hold the id (cold cache, or
+  // a project the worktree reaper has since deleted) and names a WORKTREE by
+  // its own project name — which IS its branch, so the Project row would read
+  // identically to the Worktree row below it and the parent repo would appear
+  // nowhere. Built once per `projects` identity, the same way `HomeView`
+  // builds the session list's.
+  const projectResolver = useMemo(() => new ProjectLabel(projects), [projects]);
+  const projectLabel = useMemo(() => {
+    if (!activeProject) return 'Temporary directory';
+    // A `managed:<uuid>` only becomes a name once the list lands, and
+    // `useProjects()` sets no `staleTime`, so first paint is a cache miss.
+    // Say nothing for that beat rather than publish a key the user will read
+    // as the project's actual name. A plain configured name needs no lookup,
+    // so it is never held back.
+    if (projectsLoading && activeProject.startsWith(MANAGED_PREFIX)) return 'Loading...';
+    return (
+      projectResolver.resolve({
+        project: activeProject,
+        branch: activeBranch ?? undefined,
+      }).label ?? 'Temporary directory'
+    );
+  }, [activeProject, activeBranch, projectsLoading, projectResolver]);
+  // What the Project drill-in currently RESOLVES to. A target wins over the
+  // project label because a targeted submit never spends the project scope at
+  // all — the session comes from the product's endpoint already bound. Showing
+  // the project there would name a directory the run will not use.
+  const drillInLabel = showTarget ? (activeTarget as SessionTarget).label : projectLabel;
   const skillLabel = activeSkill ? `/${activeSkill}` : 'None';
   const mcpLabel = activeMcpCount > 0 ? `${activeMcpCount} active` : 'None';
   const branchLabel = (() => {
@@ -302,9 +401,67 @@ export function ConfigMenu({
     if (activeWorktreeEntry) return activeWorktreeEntry.branch;
     return 'Parent repo';
   })();
+  // Registered repositories, fetched here rather than threaded through
+  // ``InputBar``. The SELECTION contract is what must not grow, and it does not:
+  // a repository resolves to a managed project and is chosen through the very
+  // same ``onSelectProject(managed:<id>)`` call a managed project uses. The list
+  // behind it is this panel's own concern, and TanStack shares one cache by
+  // query key, so reading it here is not a second fetch.
+  //
+  // Gated on ``open`` so a composer that is never opened costs no request.
+  const { repositories } = useRepositories(open);
+  const checkout = useCheckoutRepository();
+  // Which repository is mid-clone. Held locally rather than read off the
+  // mutation, because ``isPending`` says only that A checkout is running: with
+  // one shared mutation it would spin every uncheckedout row at once.
+  const [checkingOut, setCheckingOut] = useState<string | null>(null);
+  // A checkout the user ASKED for and that failed is theirs to hear about, so it
+  // banners. A failure to LIST repositories is not: the group is an enrichment
+  // of a picker that must keep working, so it degrades to absent (the hook has
+  // already logged it) exactly as the server's own usage projection does.
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
+
+  /**
+   * Check *slug* out, then select the project it produced.
+   *
+   * Never fires from rendering or from opening this menu — only from the
+   * labelled row the user clicks. The selection is driven off the RESPONSE
+   * rather than a refetch, so the project id is the server's, never a guess.
+   */
+  const setUpRepository = async (slug: string) => {
+    if (checkingOut) return;
+    setCheckingOut(slug);
+    setCheckoutError(null);
+    try {
+      const record = await checkout.mutateAsync(slug);
+      const projectId = record.usage.tasks?.projectId;
+      if (!projectId) {
+        // A 2xx whose projection cannot see the checkout it just made. Refusing
+        // to select beats anchoring a session to a project id we invented.
+        setCheckoutError(
+          'The checkout finished but Mewbo could not link it to a project. Open Settings, Repositories to check on it.',
+        );
+        return;
+      }
+      handlePickProject(`${MANAGED_PREFIX}${projectId}`);
+    } catch (err) {
+      setCheckoutError(err instanceof Error ? err.message : 'The checkout failed.');
+    } finally {
+      setCheckingOut(null);
+    }
+  };
+
   // Project groupings
   const configProjects = projects.filter((p) => p.source !== 'managed');
-  const managedProjects = projects.filter((p) => p.source === 'managed');
+  // A repository's checkout IS a managed project, so it would otherwise list
+  // twice. It belongs under Repositories, where it is named by the repository
+  // it holds rather than by the folder the project store minted for it.
+  const repositoryProjectIds = new Set(
+    repositories.map((r) => r.usage.tasks?.projectId).filter(Boolean),
+  );
+  const managedProjects = projects.filter(
+    (p) => p.source === 'managed' && !repositoryProjectIds.has(p.project_id ?? ''),
+  );
 
   // MCP scope groups (worst-status-wins indicator already computed by caller)
   const pluginOptions = mcpOptions.filter((o) => o.scope === 'plugin');
@@ -317,6 +474,198 @@ export function ConfigMenu({
   ].filter((s) => s.items.length > 0);
 
   const back = () => setView('root');
+
+  /**
+   * The one place a project pick lands. While the session is locked the
+   * server refuses the local-only path (`SessionSpec.field_editable`), so a
+   * pick has to travel through the durable rebind instead — and, unlike an
+   * ordinary selection, it stays on the panel (no `back()`) so a pending
+   * rebind or its error is visible rather than hidden behind a closed popover.
+   * `name === null` (the "Temporary directory" pick) is unreachable here while
+   * locked — that row is hidden below, since the rebind route only ever BINDS.
+   * `AUTO_PROJECT` is NOT null and IS reachable while locked, on purpose: it is
+   * a bind like any other. See the `projectLocked` prop doc for why.
+   */
+  const handlePickProject = (name: string | null) => {
+    if (projectLocked) {
+      if (projectRebinding || name === null) return;
+      onRebindProject?.(name);
+      return;
+    }
+    onSelectProject(name);
+    back();
+  };
+
+  /**
+   * The Projects tab's body — the picker that scopes WHERE a session runs.
+   *
+   * A function rather than a hoisted element so the JSX is built only for the
+   * branch that renders it, and so the two mount sites (tabbed in home mode,
+   * bare in detail mode) share one implementation instead of a copy that drifts.
+   */
+  const renderProjectPicker = () => (
+            <Command className="flex-1 min-h-0">
+              <div className="flex items-center justify-between pr-2">
+                <CommandInput placeholder="Filter projects..." className={COMMAND_INPUT_CLS} />
+                <RefreshIcon onRefresh={onRefreshProjects} label="Refresh projects" />
+              </div>
+              {projectLocked && (
+                <div className="flex items-center gap-1.5 px-3 py-2 text-xs text-[hsl(var(--muted-foreground))] border-b border-[hsl(var(--border))]">
+                  {projectRebinding ? (
+                    <>
+                      <Loader2 className="w-3 h-3 shrink-0 animate-spin" />
+                      <span>Rebinding the session's project…</span>
+                    </>
+                  ) : (
+                    <>
+                      <Lock className="w-3 h-3 shrink-0 text-[hsl(var(--primary-text))]" />
+                      <span>
+                        This session is bound to a project. Picking one below rebinds it.
+                      </span>
+                    </>
+                  )}
+                </div>
+              )}
+              <ErrorBanner error={projectsError} />
+              <ErrorBanner error={checkoutError} />
+              <ErrorBanner error={projectLocked ? projectRebindError : null} />
+              <CommandList className="max-h-[300px]">
+                <CommandEmpty className={COMMAND_EMPTY_CLS}>
+                  {projectsLoading ? 'Loading...' : 'No matches.'}
+                </CommandEmpty>
+                {/* The rebind route only ever BINDS — there is no unbind verb, since
+                    clearing a project would null the session's cwd and send the
+                    next turn into an empty temp dir. So this pick hides entirely
+                    while locked, rather than offering a choice the server refuses. */}
+                {!projectLocked && (
+                  <CommandItem
+                    value="__temp__ Temporary directory"
+                    onSelect={() => handlePickProject(null)}
+                    className={`${COMMAND_ITEM_SINGLE_LINE_CLS} ${!activeProject ? 'font-medium' : ''}`}
+                  >
+                    Temporary directory
+                  </CommandItem>
+                )}
+                {/* Auto-select. Two lines, like every project row, because the
+                    second one carries the whole point: the AGENT chooses, and
+                    Mewbo is not guessing on the user's behalf. Rendered
+                    unconditionally — see the `projectLocked` prop doc for why it
+                    survives a lock that hides "Temporary directory". */}
+                <CommandItem
+                  value={`__auto__ ${AUTO_PROJECT_LABEL} agent picks the project itself`}
+                  onSelect={() => handlePickProject(AUTO_PROJECT)}
+                  className={`${COMMAND_ITEM_TWO_LINE_CLS} ${
+                    ProjectLabel.isAuto(activeProject) ? 'font-medium' : ''
+                  }`}
+                >
+                  <span>{AUTO_PROJECT_LABEL}</span>
+                  {/* Authored copy, not user data: it wraps rather than
+                      truncating, which is what makes it readable without a
+                      tooltip. A project's own description keeps `truncate`
+                      because its length is unbounded. */}
+                  <span className="mt-0.5 w-full whitespace-normal text-xs leading-snug text-[hsl(var(--muted-foreground))]">
+                    {AUTO_PROJECT_DESCRIPTION}
+                  </span>
+                </CommandItem>
+                {configProjects.length > 0 && (
+                  <CommandGroup heading="Configured" className={COMMAND_GROUP_CLS}>
+                    {configProjects.map((project) => {
+                      const key = projectKey(project);
+                      return (
+                        <CommandItem
+                          key={key}
+                          value={`${project.name} ${project.description ?? ''}`}
+                          onSelect={() => handlePickProject(key)}
+                          className={`${COMMAND_ITEM_TWO_LINE_CLS} ${activeProject === key ? 'font-medium' : ''}`}
+                        >
+                          <span>{project.name}</span>
+                          {project.description && (
+                            <span className="text-xs text-[hsl(var(--muted-foreground))] truncate w-full mt-0.5">
+                              {project.description}
+                            </span>
+                          )}
+                        </CommandItem>
+                      );
+                    })}
+                  </CommandGroup>
+                )}
+                {/*
+                  Registered repositories. A row is EITHER a normal selection
+                  (the repository already has a checkout) or the labelled
+                  set-up control (it does not) — the row itself is the control
+                  rather than a nested button, because a `<button>` inside a
+                  `role="option"` has no keyboard path in and cmdk would fire
+                  both handlers on one click. The label says which it is before
+                  it is clicked, so the clone is never a surprise.
+                */}
+                {repositories.length > 0 && (
+                  <CommandGroup heading="Repositories" className={COMMAND_GROUP_CLS}>
+                    {repositories.map((repository) => {
+                      const projectId = repository.usage.tasks?.projectId;
+                      const key = projectId ? `${MANAGED_PREFIX}${projectId}` : null;
+                      const pending = checkingOut === repository.slug;
+                      const busy = checkingOut !== null;
+                      return (
+                        <CommandItem
+                          key={repository.slug}
+                          value={`${repository.name ?? repository.repo} ${repository.slug}`}
+                          onSelect={() => {
+                            if (key) {
+                              handlePickProject(key);
+                              return;
+                            }
+                            void setUpRepository(repository.slug);
+                          }}
+                          className={`${COMMAND_ITEM_TWO_LINE_CLS} ${
+                            key && activeProject === key ? 'font-medium' : ''
+                          } ${busy && !pending ? 'opacity-50' : ''}`}
+                        >
+                          <span className="flex w-full items-center justify-between gap-2">
+                            <span className="truncate">
+                              {repository.name ?? repository.repo}
+                            </span>
+                            {!key && (
+                              <span className="flex shrink-0 items-center gap-1 text-2xs text-[hsl(var(--muted-foreground))]">
+                                {pending && <Loader2 className="w-3 h-3 animate-spin" />}
+                                {pending ? 'Setting up' : 'Set up'}
+                              </span>
+                            )}
+                          </span>
+                          <span className="text-xs text-[hsl(var(--muted-foreground))] truncate w-full mt-0.5">
+                            {key
+                              ? repository.slug
+                              : `${repository.slug}. No checkout yet.`}
+                          </span>
+                        </CommandItem>
+                      );
+                    })}
+                  </CommandGroup>
+                )}
+                {managedProjects.length > 0 && (
+                  <CommandGroup heading="Managed" className={COMMAND_GROUP_CLS}>
+                    {managedProjects.map((project) => {
+                      const key = projectKey(project);
+                      return (
+                        <CommandItem
+                          key={key}
+                          value={`${project.name} ${project.description ?? ''}`}
+                          onSelect={() => handlePickProject(key)}
+                          className={`${COMMAND_ITEM_TWO_LINE_CLS} ${activeProject === key ? 'font-medium' : ''}`}
+                        >
+                          <span>{project.name}</span>
+                          {project.description && (
+                            <span className="text-xs text-[hsl(var(--muted-foreground))] truncate w-full mt-0.5">
+                              {project.description}
+                            </span>
+                          )}
+                        </CommandItem>
+                      );
+                    })}
+                  </CommandGroup>
+                )}
+              </CommandList>
+            </Command>
+  );
 
   return (
     <Popover
@@ -335,10 +684,10 @@ export function ConfigMenu({
         >
           <Sliders className={`w-3.5 h-3.5 ${hasAnyActive ? '' : 'opacity-50'}`} />
           {compact ? (
-            <span className="text-2xs truncate max-w-[80px]">{projectLabel}</span>
+            <span className="text-2xs truncate max-w-[80px]">{drillInLabel}</span>
           ) : (
             <>
-              <span className="truncate max-w-[160px]">{projectLabel}</span>
+              <span className="truncate max-w-[160px]">{drillInLabel}</span>
               {hasAnyActive && (
                 <span className="shrink-0 min-w-[16px] h-4 px-1 inline-flex items-center justify-center rounded-full bg-[hsl(var(--primary))]/15 text-2xs font-medium text-[hsl(var(--primary-text))]">
                   {totalActive}
@@ -367,11 +716,28 @@ export function ConfigMenu({
                 same rationale as AGENT_COLOR_CLASSES. Blue=Project,
                 sky=Branch, violet=Worktree, amber=Skills, emerald=Integrations. */}
             <div className="py-1">
+              {/* One row, two states. With a target chosen the row reports the
+                  TARGET — its own product mark, its own word — because the
+                  drill-in below it resolves to that and the project scope is
+                  not what the run will use. Naming it "Project" while it holds
+                  a wiki project would teach exactly the conflation the tabs
+                  exist to prevent. */}
               <CategoryRow
-                icon={<FolderOpen className={`w-3.5 h-3.5 ${activeProject ? 'text-blue-500' : 'opacity-50'}`} />}
-                label="Project"
-                value={projectLabel}
-                emphasized={!!activeProject}
+                icon={
+                  showTarget ? (
+                    <TargetMark
+                      kind={(activeTarget as SessionTarget).kind}
+                      className="w-3.5 h-3.5 text-[hsl(var(--primary-text))]"
+                    />
+                  ) : projectLocked ? (
+                    <Lock className="w-3.5 h-3.5 text-[hsl(var(--primary-text))]" />
+                  ) : (
+                    <FolderOpen className={`w-3.5 h-3.5 ${activeProject ? 'text-blue-500' : 'opacity-50'}`} />
+                  )
+                }
+                label={showTarget ? 'Target' : 'Project'}
+                value={drillInLabel}
+                emphasized={showTarget || !!activeProject}
                 onClick={() => setView('project')}
               />
               {showGit && (
@@ -431,73 +797,47 @@ export function ConfigMenu({
           </div>
         )}
 
-        {/* Project panel */}
+        {/* Project panel. In home mode it carries a second tab, and the tab
+            strip is the whole point of the design: a wiki project or an app is
+            a TARGET, not a project source. A third `CommandGroup` beside
+            Configured / Repositories / Managed would sit in a flat list of
+            things that set `cwd` and read as a fourth one, which is precisely
+            what it is not. */}
         {view === 'project' && (
           <div className="flex-1 min-h-0 flex flex-col">
             <SubHeader title="Project" onBack={back} />
-            <Command className="flex-1 min-h-0">
-              <div className="flex items-center justify-between pr-2">
-                <CommandInput placeholder="Filter projects..." className={COMMAND_INPUT_CLS} />
-                <RefreshIcon onRefresh={onRefreshProjects} label="Refresh projects" />
-              </div>
-              <ErrorBanner error={projectsError} />
-              <CommandList className="max-h-[300px]">
-                <CommandEmpty className={COMMAND_EMPTY_CLS}>
-                  {projectsLoading ? 'Loading...' : 'No matches.'}
-                </CommandEmpty>
-                <CommandItem
-                  value="__temp__ Temporary directory"
-                  onSelect={() => { onSelectProject(null); back(); }}
-                  className={`${COMMAND_ITEM_SINGLE_LINE_CLS} ${!activeProject ? 'font-medium' : ''}`}
-                >
-                  Temporary directory
-                </CommandItem>
-                {configProjects.length > 0 && (
-                  <CommandGroup heading="Configured" className={COMMAND_GROUP_CLS}>
-                    {configProjects.map((project) => {
-                      const key = projectKey(project);
-                      return (
-                        <CommandItem
-                          key={key}
-                          value={`${project.name} ${project.description ?? ''}`}
-                          onSelect={() => { onSelectProject(key); back(); }}
-                          className={`${COMMAND_ITEM_TWO_LINE_CLS} ${activeProject === key ? 'font-medium' : ''}`}
-                        >
-                          <span>{project.name}</span>
-                          {project.description && (
-                            <span className="text-xs text-[hsl(var(--muted-foreground))] truncate w-full mt-0.5">
-                              {project.description}
-                            </span>
-                          )}
-                        </CommandItem>
-                      );
-                    })}
-                  </CommandGroup>
-                )}
-                {managedProjects.length > 0 && (
-                  <CommandGroup heading="Managed" className={COMMAND_GROUP_CLS}>
-                    {managedProjects.map((project) => {
-                      const key = projectKey(project);
-                      return (
-                        <CommandItem
-                          key={key}
-                          value={`${project.name} ${project.description ?? ''}`}
-                          onSelect={() => { onSelectProject(key); back(); }}
-                          className={`${COMMAND_ITEM_TWO_LINE_CLS} ${activeProject === key ? 'font-medium' : ''}`}
-                        >
-                          <span>{project.name}</span>
-                          {project.description && (
-                            <span className="text-xs text-[hsl(var(--muted-foreground))] truncate w-full mt-0.5">
-                              {project.description}
-                            </span>
-                          )}
-                        </CommandItem>
-                      );
-                    })}
-                  </CommandGroup>
-                )}
-              </CommandList>
-            </Command>
+            {targetsEnabled ? (
+              <Tabs defaultValue="projects" className="flex-1 min-h-0 flex flex-col">
+                <TabsList className="mx-3 mt-2 self-start">
+                  <TabsTrigger value="projects">
+                    <FolderOpen className="w-3 h-3" aria-hidden />
+                    Projects
+                  </TabsTrigger>
+                  <TabsTrigger value="targets">
+                    <BookOpen className="w-3 h-3" aria-hidden />
+                    Wiki &amp; Apps
+                  </TabsTrigger>
+                </TabsList>
+                <TabsContent value="projects" className="mt-1 flex-1 min-h-0 flex flex-col">
+                  {renderProjectPicker()}
+                </TabsContent>
+                {/* Radix unmounts an inactive panel, so the two product reads
+                    below cost nothing until this tab is opened — the same
+                    "browsing is free" rule the Repositories group follows via
+                    `useRepositories(open)`. */}
+                <TabsContent value="targets" className="mt-1 flex-1 min-h-0 flex flex-col">
+                  <TargetPicker
+                    activeTarget={activeTarget}
+                    onSelect={(target) => {
+                      onSelectTarget?.(target);
+                      back();
+                    }}
+                  />
+                </TabsContent>
+              </Tabs>
+            ) : (
+              renderProjectPicker()
+            )}
           </div>
         )}
 
@@ -802,6 +1142,135 @@ export function ConfigMenu({
   );
 }
 
+/**
+ * The product mark for a target kind. One mark per product, and it is the SAME
+ * one the NavRail row uses (`nav-rail/products.ts`) — a wiki target and the Wiki
+ * rail row must not teach two different glyphs. Spelled once here so the tab
+ * strip, the rows and the root summary can never drift apart.
+ */
+function TargetMark({
+  kind,
+  className,
+}: {
+  kind: SessionTarget['kind'];
+  className: string;
+}) {
+  const Icon = kind === 'wiki' ? BookOpen : AppWindow;
+  return <Icon className={className} aria-hidden />;
+}
+
+/**
+ * The "Wiki & Apps" tab — what a new session is ABOUT.
+ *
+ * Deliberately NOT a project source. Picking a row here does not add a key to
+ * the session context; it routes creation to the product's own session
+ * endpoint, requesting a genuinely NEW session (`{requestNew: true}` —
+ * `App.handleCreateAndRun` is the caller that sets it), so the session arrives
+ * already bound to that wiki project or app. That is why it is a tab rather
+ * than a fourth `CommandGroup` in the picker next door: sitting in that flat
+ * list it would read as another way to set `cwd`, which it is not.
+ *
+ * Mounted only while its tab is selected (Radix unmounts the inactive panel),
+ * so neither read fires for a composer nobody opened.
+ */
+function TargetPicker({
+  activeTarget,
+  onSelect,
+}: {
+  activeTarget: SessionTarget | null;
+  onSelect: (target: SessionTarget | null) => void;
+}) {
+  const wiki = useWikiProjects();
+  const apps = useApps();
+  const wikiProjects = wiki.data ?? [];
+  // An archived app has no maintainer to open a session with, and the endpoint
+  // would be a dead end. Filtered here rather than asked of the server, which
+  // returns the gallery whole.
+  const liveApps = (apps.data ?? []).filter((app) => app.status !== 'archived');
+  const loading = wiki.isLoading || apps.isLoading;
+  // A failure to LIST degrades to an absent group, exactly as the Repositories
+  // group does: this tab is an enrichment of a composer that must keep working,
+  // and the hooks have already logged it. Only a failure the user ASKED for
+  // banners, and browsing is not one.
+  return (
+    <Command className="flex-1 min-h-0">
+      <CommandInput placeholder="Filter wiki projects and apps..." className={COMMAND_INPUT_CLS} />
+      <div className="px-3 py-2 text-xs leading-snug text-[hsl(var(--muted-foreground))] border-b border-[hsl(var(--border))]">
+        Point this session at a wiki project or an app. It starts a new session
+        for that product, so the project scope does not apply.
+      </div>
+      <CommandList className="max-h-[300px]">
+        <CommandEmpty className={COMMAND_EMPTY_CLS}>
+          {loading ? 'Loading...' : 'No matches.'}
+        </CommandEmpty>
+        <CommandItem
+          value="__no_target__ None ordinary session"
+          onSelect={() => onSelect(null)}
+          className={`${COMMAND_ITEM_SINGLE_LINE_CLS} ${!activeTarget ? 'font-medium' : ''}`}
+        >
+          None
+        </CommandItem>
+        {wikiProjects.length > 0 && (
+          <CommandGroup heading="Wiki" className={COMMAND_GROUP_CLS}>
+            {wikiProjects.map((project) => {
+              const selected =
+                activeTarget?.kind === 'wiki' && activeTarget.slug === project.slug;
+              return (
+                <CommandItem
+                  key={project.slug}
+                  value={`${project.slug} ${project.desc ?? ''}`}
+                  onSelect={() =>
+                    onSelect({ kind: 'wiki', slug: project.slug, label: project.slug })
+                  }
+                  className={`${COMMAND_ITEM_TWO_LINE_CLS} ${selected ? 'font-medium' : ''}`}
+                >
+                  <span className="flex w-full items-center gap-2 truncate">
+                    <TargetMark kind="wiki" className="w-3 h-3 shrink-0" />
+                    <span className="truncate">{project.slug}</span>
+                  </span>
+                  {project.desc && (
+                    <span className="text-xs text-[hsl(var(--muted-foreground))] truncate w-full mt-0.5">
+                      {project.desc}
+                    </span>
+                  )}
+                </CommandItem>
+              );
+            })}
+          </CommandGroup>
+        )}
+        {liveApps.length > 0 && (
+          <CommandGroup heading="Apps" className={COMMAND_GROUP_CLS}>
+            {liveApps.map((app) => {
+              const selected =
+                activeTarget?.kind === 'app' && activeTarget.appId === app.app_id;
+              return (
+                <CommandItem
+                  key={app.app_id}
+                  value={`${app.title} ${app.summary ?? ''}`}
+                  onSelect={() =>
+                    onSelect({ kind: 'app', appId: app.app_id, label: app.title })
+                  }
+                  className={`${COMMAND_ITEM_TWO_LINE_CLS} ${selected ? 'font-medium' : ''}`}
+                >
+                  <span className="flex w-full items-center gap-2 truncate">
+                    <TargetMark kind="app" className="w-3 h-3 shrink-0" />
+                    <span className="truncate">{app.title}</span>
+                  </span>
+                  {app.summary && (
+                    <span className="text-xs text-[hsl(var(--muted-foreground))] truncate w-full mt-0.5">
+                      {app.summary}
+                    </span>
+                  )}
+                </CommandItem>
+              );
+            })}
+          </CommandGroup>
+        )}
+      </CommandList>
+    </Command>
+  );
+}
+
 function CategoryRow({
   icon,
   label,
@@ -843,7 +1312,7 @@ function CategoryRow({
 //      the user keeps full control and can pick a non-mewbo name (e.g. when
 //      they intend the branch to outlive the worktree).
 //
-// A "use existing branch" toggle exposes the legacy single-branch flow for
+// A "use existing branch" toggle exposes the single-branch flow for
 // the rarer case where the user has already manually created a free branch
 // they want a worktree on. KISS: same form, just disables the "new name"
 // field and submits without ``base``.

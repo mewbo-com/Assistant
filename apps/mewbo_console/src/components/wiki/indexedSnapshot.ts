@@ -11,7 +11,7 @@
  * - Landing-card footer: ``formatLandingCard()``
  *   → "Indexed 2 hours ago · main · a1b2c3d" (lowercase, relative date)
  *
- * Missing values (legacy projects with no branch/commit) drop their pill
+ * Missing values (no branch/commit recorded) drop their pill
  * cleanly — the formatter never renders an empty pill or "·" separator
  * with nothing after it.
  *
@@ -128,7 +128,7 @@ export class IndexedSnapshot {
    * {@link _commitUrl} so citation chips + source cards never re-derive it.
    *
    * **Pinned to the INDEXED COMMIT whenever we have one**, falling back to the
-   * branch only for legacy records that carry no sha. A cited line range is
+   * branch only when no sha is recorded. A cited line range is
    * only truthful against the tree the wiki was generated from: point it at a
    * moving branch and ``#L63-76`` lands on whatever occupies those lines
    * today (this repo's ``main`` runs hundreds of commits past its snapshot),

@@ -25,8 +25,12 @@ import type { Project } from "../wiki/api/types";
 
 // `useWebIdeEnabled` (mounted unconditionally by SessionHeader) reads config
 // via `getConfig()` — stub it so the suite never hits the real API client.
+// A missing export here does NOT fail the mock factory — the query simply
+// rejects and degrades to its empty state, so assertions keep passing while the
+// path under test never runs. `listProjects` feeds the header's repo link.
 vi.mock("../../api/client", () => ({
   getConfig: vi.fn().mockResolvedValue({ config: {}, secrets: {} }),
+  listProjects: vi.fn().mockResolvedValue([]),
 }));
 
 // `useWikiSessionLink` (mounted only for `origin === "wiki"` sessions) reads
@@ -179,5 +183,85 @@ describe("SessionHeader — Open wiki jump", () => {
 
     await waitFor(() => expect(getWikiSessionLink).toHaveBeenCalledWith("s1"));
     expect(screen.queryByRole("button", { name: "Open wiki" })).toBeNull();
+  });
+});
+
+// A Q&A session and an indexing session are BOTH `origin: "wiki"`, and both
+// resolve through the same endpoint — the discriminant is the only thing
+// separating them, and it used to be ignored, so every Q&A session was routed
+// to its project's landing page. These cases pin the branch from both sides.
+describe("SessionHeader — Open answer jump (the `qa` discriminant)", () => {
+  const qaLink = {
+    kind: "qa" as const,
+    slug: "org/repo",
+    answerId: "ans-42",
+    fromPageId: "overview",
+    question: "how does indexing resume?",
+  };
+
+  it("navigates to the answer's deep link, not the project landing page", async () => {
+    getWikiSessionLink.mockResolvedValue(qaLink);
+    // A landing page IS available — the indexing branch would have taken it.
+    listProjects.mockResolvedValue([
+      makeProject({ slug: "org/repo", source: "github", landingPageId: "overview" }),
+    ]);
+    const user = userEvent.setup();
+    const { history } = renderHeader({ ...base, origin: "wiki" });
+
+    const button = await screen.findByRole("button", { name: "Open answer" });
+    expect(button).toHaveAttribute(
+      "title",
+      "Open the wiki answer this session is generating",
+    );
+
+    await user.click(button);
+    expect(history.at(-1)).toBe(
+      buildWikiHref({
+        kind: "qa",
+        question: "how does indexing resume?",
+        pageId: "overview",
+        slug: "org/repo",
+        answer: "ans-42",
+      }),
+    );
+    // The `?answer=` id is what makes the destination the answer rather than
+    // the project — assert it explicitly so a href refactor can't drop it.
+    expect(history.at(-1)).toContain("answer=ans-42");
+  });
+
+  it("is labelled for the answer it opens, never 'Open wiki'", async () => {
+    getWikiSessionLink.mockResolvedValue(qaLink);
+    renderHeader({ ...base, origin: "wiki" });
+
+    await screen.findByRole("button", { name: "Open answer" });
+    expect(screen.queryByRole("button", { name: "Open wiki" })).toBeNull();
+  });
+
+  it("resolves the answer without the project cache (no landingPageId needed)", async () => {
+    getWikiSessionLink.mockResolvedValue(qaLink);
+    listProjects.mockResolvedValue([]); // project not in the cache at all
+    const user = userEvent.setup();
+    const { history } = renderHeader({ ...base, origin: "wiki" });
+
+    await user.click(await screen.findByRole("button", { name: "Open answer" }));
+    // The indexing branch would have fallen back to the gallery here.
+    expect(history.at(-1)).not.toBe(buildWikiHref({ kind: "landing" }));
+    expect(history.at(-1)).toContain("answer=ans-42");
+  });
+
+  it("falls back to the project route when a `qa` link carries no answer id", async () => {
+    // Defensive: an older server that knows the kind but not the id. Routing
+    // to `?answer=undefined` would be worse than the pre-fix behaviour.
+    getWikiSessionLink.mockResolvedValue({ kind: "qa", slug: "org/repo" } as never);
+    listProjects.mockResolvedValue([
+      makeProject({ slug: "org/repo", source: "github", landingPageId: "overview" }),
+    ]);
+    const user = userEvent.setup();
+    const { history } = renderHeader({ ...base, origin: "wiki" });
+
+    await user.click(await screen.findByRole("button", { name: "Open wiki" }));
+    expect(history.at(-1)).toBe(
+      buildWikiHref({ kind: "page", pageId: "overview", slug: "org/repo", platform: "github" }),
+    );
   });
 });

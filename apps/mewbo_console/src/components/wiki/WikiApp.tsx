@@ -11,6 +11,7 @@
 import { useEffect } from "react";
 
 import { ConfigureWizard } from "./ConfigureWizard";
+import { GraphOutlineScreen } from "./GraphOutlineScreen";
 import { IndexingScreen } from "./IndexingScreen";
 import { KnowledgeGraph3DScreen } from "./KnowledgeGraph3DScreen";
 import { LandingScreen } from "./LandingScreen";
@@ -47,6 +48,9 @@ export function WikiApp() {
       case "graph":
         document.title = `Graph${route.slug ? ` · ${route.slug}` : ""} | Mewbo`;
         break;
+      case "outline":
+        document.title = `Outline${route.slug ? ` · ${route.slug}` : ""} | Mewbo`;
+        break;
     }
   }, [route]);
 
@@ -54,7 +58,7 @@ export function WikiApp() {
     case "landing":
       return <LandingScreen />;
     case "configure":
-      return <ConfigureWizard initialUrl={route.url} />;
+      return <ConfigureWizard initialUrl={route.url} initialRepo={route.repo} />;
     case "welcome":
       return (
         <WelcomeScreen
@@ -87,6 +91,10 @@ export function WikiApp() {
     case "graph":
       return (
         <KnowledgeGraph3DScreen slug={route.slug} platform={route.platform} />
+      );
+    case "outline":
+      return (
+        <GraphOutlineScreen slug={route.slug} platform={route.platform} />
       );
   }
 }

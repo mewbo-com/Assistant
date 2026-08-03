@@ -27,7 +27,7 @@ nor a demo fixture (seeding off) is simply not listed.
 from __future__ import annotations
 
 from mewbo_core.config import get_merged_mcp_config
-from mewbo_core.tool_registry import (
+from mewbo_core.tooling.tool_registry import (
     ToolRegistry,
     filter_specs,
     load_registry,
@@ -131,11 +131,15 @@ class SourceCatalog:
         """Names of the MCP servers configured for *project* (config state).
 
         Reads the same merged global + subtree + CWD ``.mcp.json`` chain the
-        registry builds from; tolerates the legacy ``mcpServers`` key. A config
+        registry builds from; tolerates the ``mcpServers`` key spelling. A config
         read failure degrades to an empty list, never an error.
         """
+        # ``project`` arrives from request input, so this deployment did not
+        # author whatever is at that path. A server entry is a command the
+        # process SPAWNS during config resolution — before any tool ceiling
+        # is consulted — so the directory tier must contribute nothing.
         try:
-            merged = get_merged_mcp_config(project)
+            merged = get_merged_mcp_config(project, trust_cwd=False)
         except Exception:
             return []
         servers = merged.get("servers") or merged.get("mcpServers") or {}
@@ -272,7 +276,11 @@ class SourceCatalog:
         omitted, so the console can grey it out instead of dropping a persisted
         workspace source.
         """
-        registry = load_registry(cwd=project)
+        # ``project`` arrives from request input, so this deployment did not
+        # author whatever is at that path. A server entry is a command the
+        # process SPAWNS during config resolution — before any tool ceiling
+        # is consulted — so the directory tier must contribute nothing.
+        registry = load_registry(cwd=project, trust_cwd=False)
         live, reasons = cls._registry_servers(registry)
         avail_ids = {spec.tool_id for spec in registry.list_specs()}
         entries: list[SourceCatalogEntry] = []
@@ -347,7 +355,11 @@ class SourceCatalog:
         graph drive also needs are unioned later by ``WorkspaceGraphBinding``,
         not here; this seam stays the pure connector read-grant.
         """
-        registry = load_registry(cwd=project)
+        # ``project`` arrives from request input, so this deployment did not
+        # author whatever is at that path. A server entry is a command the
+        # process SPAWNS during config resolution — before any tool ceiling
+        # is consulted — so the directory tier must contribute nothing.
+        registry = load_registry(cwd=project, trust_cwd=False)
         live, _ = cls._registry_servers(registry)
         avail_ids = {spec.tool_id for spec in registry.list_specs()}
         configured = set(cls._configured_servers(project))

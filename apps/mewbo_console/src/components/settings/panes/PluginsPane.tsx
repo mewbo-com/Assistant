@@ -4,7 +4,7 @@
  * A pane in the facet registry (`../panes.ts`): zero props, fetches its own
  * data via `usePlugins()` (TanStack Query — see that hook for the queryKey /
  * mutation contract), chrome-agnostic (bare `<SettingsCard>`s, no page width/
- * padding/header). Replaces the old standalone `PluginsView` route.
+ * padding/header).
  *
  * Plugins is its OWN top-level facet, so this pane sits directly above the
  * schema-driven "Plugins" section (`PluginsConfig`, `x-group: "plugins"`) that

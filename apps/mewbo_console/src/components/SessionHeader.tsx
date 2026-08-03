@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useLocation } from "wouter";
 import {
   AppWindow,
@@ -9,18 +9,24 @@ import {
   Clock,
   Download,
   ExternalLink,
+  GitFork,
   MoreHorizontal,
   Menu,
   RotateCcw,
   Share,
+  Sparkles,
   Square,
 } from "lucide-react";
 
-import { SessionSummary, SessionUsage } from "../types";
+import { SessionContext, SessionSummary, SessionUsage } from "../types";
+import { ProjectLabel } from "../utils/projectLabel";
 import { StatusBadge } from "./StatusBadge";
 import { formatSessionTime } from "../utils/time";
 import { ModelSummary } from "./ModelSummary";
 import { ContextWindowBar } from "./ContextWindowBar";
+import { DiffStats } from "./DiffStats";
+import { RepoLink } from "./wiki/RepoLink";
+import { useProjects } from "../hooks/useProjects";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { cn } from "../utils/cn";
 import { LangfuseIcon } from "./LangfuseIcon";
@@ -85,14 +91,20 @@ function formatRemaining(totalSeconds: number): string {
 //     `AppLifecycle._agent_session_context` — see `types.ts`) → AppJumpButton.
 //   - Wiki-origin session (indexing or Q&A, `session.origin === "wiki"`) →
 //     WikiJumpButton. Wiki sessions carry no project slug on `session.context`
-//     (their context only ever advertises the `wiki` capability), so the slug
+//     (their context only ever advertises the `wiki` capability), so the link
 //     is resolved server-side via `GET /v1/wiki/sessions/<id>`
 //     (`useWikiSessionLink`), a reverse lookup over the same job/answer→session
-//     mappings the wiki session-end hooks already maintain. The destination
-//     deep-links to the project's `landingPageId` when the cached
-//     `useWikiProjects()` record has one — same routing the nav rail's own
-//     wiki rows use (`nav-rail/sections.tsx:WikiSection`) — else falls back
-//     to the gallery; never guesses a page id.
+//     mappings the wiki session-end hooks already maintain.
+//     THE DESTINATION IS PER KIND, and conflating them was a real defect: an
+//     indexing session belongs to a PROJECT, so it deep-links to that project's
+//     `landingPageId` when the cached `useWikiProjects()` record has one — the
+//     same routing the nav rail's own wiki rows use
+//     (`nav-rail/sections.tsx:WikiSection`) — else falls back to the gallery,
+//     never guessing a page id. A Q&A session belongs to ONE ANSWER, which is
+//     separately addressable (`?answer=<id>`), and its user is typically
+//     waiting on that answer — routing them to the project's front door
+//     answered a question nobody asked. `WikiSessionLink` is a discriminated
+//     union precisely so this branch cannot be skipped silently again.
 // Both render ONLY when resolvable: absent for a plain/unresolved session,
 // never disabled-with-tooltip.
 interface AppJumpButtonProps {
@@ -126,8 +138,61 @@ function WikiJumpButton({ sessionId }: WikiJumpButtonProps) {
   // matches EXACTLY the rail row's own routing (`sections.tsx:WikiSection`):
   // a project's `landingPageId` wins, else fall back to the gallery — never
   // guess a page id beyond what the project record explicitly carries.
+  // Called unconditionally (hook order) but read only on the `indexing` arm:
+  // an answer's deep link is fully described by the link itself.
   const { data: projects = [] } = useWikiProjects();
   if (!link) return null;
+
+  // `answerId` is checked despite being typed required: it arrives from a
+  // server that may briefly be an older build than the console in front of it,
+  // and routing to `?answer=undefined` would be worse than today's behaviour.
+  if (link.kind === "qa" && link.answerId) {
+    const answerHref = buildWikiHref({
+      kind: "qa",
+      question: link.question,
+      pageId: link.fromPageId,
+      slug: link.slug,
+      answer: link.answerId,
+    });
+    return (
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => setLocation(answerHref)}
+        aria-label="Open answer"
+        title="Open the wiki answer this session is generating">
+        <Sparkles className="size-4" />
+        <span className="hidden lg:inline">Open answer</span>
+      </Button>
+    );
+  }
+
+  // A RUNNING index goes to the indexing screen, not the project. Progress —
+  // phase, counters, ETA — is rendered ONLY there and on the gallery's active
+  // tile; the session transcript this button sits on has none of its own, so
+  // routing a live run to the project answered a question its viewer wasn't
+  // asking. Worse on a FIRST index, where the project has no `landingPageId`
+  // yet and the fallback below lands on the gallery. Both guards are real:
+  // `jobId` is absent against an older server, and a graph-only index is
+  // sessionless — neither may route to `undefined`.
+  // Narrowed on `kind` rather than on the fields: the `qa` arm above returns
+  // only when it also has an `answerId`, so a Q&A link that lacks one still
+  // reaches here and the union is genuinely not narrowed yet.
+  if (link.kind === "indexing" && link.active && link.jobId) {
+    const indexingHref = buildWikiHref({ kind: "indexing", jobId: link.jobId });
+    return (
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => setLocation(indexingHref)}
+        aria-label="Open indexing progress"
+        title="Open the indexing progress for this session">
+        <BookOpen className="size-4" />
+        <span className="hidden lg:inline">Indexing progress</span>
+      </Button>
+    );
+  }
+
   const project = projects.find((p) => p.slug === link.slug);
   const href = project?.landingPageId
     ? buildWikiHref({
@@ -154,6 +219,61 @@ function WikiJumpButton({ sessionId }: WikiJumpButtonProps) {
 // Single compound control. Two states:
 //   * off   → single neutral <Button> "Open in Coder" with the Coder icon
 //   * ready → 3-cell capsule: [status+Open | Extend | Stop]
+
+/**
+ * Whether a session names something an IDE could mount against: a
+ * configured/managed project, a wiki project it indexes/maintains
+ * (`slug`), or a Mewbo App it builds/maintains (`app_id`). This is the
+ * client-side half of a contract with the backend's session→IDE resolver
+ * (`_resolve_session_project` and its wiki/app tiers): the server resolves
+ * the SAME three keys to a mountable checkout, so widening one side without
+ * the other means the capsule offers an IDE the server then refuses with a
+ * 409. Named once here rather than inlined at the render gate because "this
+ * session has an IDE mount target" is a real product rule, not just a
+ * three-way `||`.
+ *
+ * This mirrors the server's MOUNTABLE set, not its AUTHORIZATION for the wiki
+ * tier — those are two different questions there. A wiki maintainer session's
+ * `slug` is what binds `SessionSpec.slug` (a mount target); what actually
+ * authorizes opening an IDE against it is the server-stamped
+ * `wiki:maintain:<slug>` tag, because `context` on a request is merged
+ * verbatim and a caller could put any slug in it. The two are allowed to
+ * differ ONLY in the direction where the server is stricter: this predicate
+ * may show the capsule for a session the server then 409s (cosmetic — the
+ * next poll or click surfaces the refusal), but must never be the thing that
+ * decides whether an IDE is authorized. Do not "fix" the asymmetry by having
+ * this read the tag — that would pull an authorization decision into the
+ * client, which is exactly the drift this comment exists to head off.
+ *
+ * **Precedence is decided per FIELD and is deliberately NOT uniform** — this
+ * is the same law `apps/mewbo_console/CLAUDE.md`'s render-gating section
+ * states for `SessionDetailView`'s subject fields ("take the freshest" is
+ * wrong half the time), found again here rather than invented here:
+ *
+ * - **`project` reads the LIVE context** (`liveContext`, i.e. `getLastContext`
+ *   — the most-recent context event's payload, VERBATIM, never merged). An
+ *   auto-select session's agent can switch projects mid-task, and only the
+ *   live read reflects where the session IS now rather than where it started
+ *   or has ever been.
+ * - **`slug`/`app_id` read the MERGED snapshot** (`session.context`, built
+ *   server-side by `merge_context_events` — `dict.update` folded forward
+ *   across every context event in order, confirmed against
+ *   `mewbo_core/session/session_store.py`, not assumed). These are set ONCE
+ *   at session creation (`WikiMaintainerSession.open` /
+ *   `AppLifecycle._agent_session_context`) and never restated by the
+ *   wiki/app harness on later turns, unlike `project`, which the console
+ *   composer resends every turn. Reading them off `liveContext` — the
+ *   verbatim latest event — is wrong the moment a session has a second turn:
+ *   the key silently drops out of what "live" means, and the capsule
+ *   vanishes for a session that never stopped being app/wiki-bound. This is
+ *   exactly the trap `AppJumpButton` above already sidesteps by reading
+ *   `session.context.app_id`, not live context — unifying the two onto one
+ *   source is what reintroduces this bug, not a simplification of it.
+ */
+function hasIdeMountTarget(session: SessionSummary, liveContext?: SessionContext): boolean {
+  return Boolean(liveContext?.project || session.context?.slug || session.context?.app_id);
+}
+
 interface IdeCapsuleProps {
   projectLabel: string;
   ideInstance: IdeInstance | null;
@@ -164,13 +284,22 @@ interface IdeCapsuleProps {
 }
 
 function IdeCapsule({ projectLabel, ideInstance, ideBusy, onOpen, onExtend, onStop }: IdeCapsuleProps) {
+  // Once an instance exists, `project_name` is the server's own resolver
+  // naming what it actually mounted (a configured project, a wiki checkout, an
+  // app staging dir) — prefer it over the client-computed `projectLabel`,
+  // which only ever knows about `context.project` and would otherwise render
+  // the generic "project" fallback for a wiki/app mount. Before creation there
+  // is no server answer yet, so `projectLabel` (or its own fallback) is all
+  // there is.
+  const displayLabel = ideInstance?.project_name || projectLabel;
+
   if (ideInstance?.status !== "ready") {
     return (
       <Button
         variant="neutral"
         size="sm"
         onClick={onOpen}
-        title={`Open ${projectLabel} in Coder`}
+        title={`Open ${displayLabel} in Coder`}
         leadingIcon={<SiCoder className="w-3.5 h-3.5" />}>
         <span className="hidden lg:inline">Open in Coder</span>
         <span className="lg:hidden">Coder</span>
@@ -187,11 +316,11 @@ function IdeCapsule({ projectLabel, ideInstance, ideBusy, onOpen, onExtend, onSt
   return (
     <div
       className="inline-flex items-center h-7 rounded-full border border-[hsl(var(--border))] bg-[hsl(var(--muted))]/60 shadow-sm overflow-hidden"
-      title={`Coder is running for ${projectLabel}`}>
+      title={`Coder is running for ${displayLabel}`}>
       <button
         type="button"
         onClick={onOpen}
-        title={`Open ${projectLabel} in Coder`}
+        title={`Open ${displayLabel} in Coder`}
         className={cn(cellBase, "hover:bg-[hsl(var(--accent))]")}>
         <span className="relative inline-flex items-center justify-center">
           <SiCoder className="w-3.5 h-3.5 text-[hsl(var(--success))]" />
@@ -314,6 +443,18 @@ function OverflowMenu({
 
 export interface SessionHeaderProps {
   session: SessionSummary;
+  /**
+   * The session's LIVE context — the most recent `context` event's payload
+   * (`getLastContext`), which `SessionDetailView` already derives for the
+   * composer and the recovery model.
+   *
+   * It matters now that a session can move: the agent switches project mid-run
+   * and records it as a `context` event, so `session.context` (a list-fetch
+   * snapshot) names where the session STARTED while this names where it IS.
+   * Optional, defaulting to the snapshot, so a caller that has no event stream
+   * (and every existing test) keeps the old reading rather than blanking.
+   */
+  context?: SessionContext;
   /** Live usage snapshot for the subtitle (model summary + context bar). */
   usage: SessionUsage | null;
   /** Three-signal terminated flag from `SessionDetailView` (hides Terminate). */
@@ -336,14 +477,15 @@ export interface SessionHeaderProps {
 }
 
 /**
- * In-pane session header — the sticky top of the session detail view. Re-homes
- * every session obligation that used to live on the detail NavBar: back, the
- * editable title + regenerate, the timestamp/model/context subtitle, the global
- * StatusBadge, the IDE capsule, the overflow menu (archive/share/export/langfuse
- * /terminate) and the terminate dialog. On mobile a hamburger opens the rail.
+ * In-pane session header — the sticky top of the session detail view. Owns
+ * every session-level obligation: back, the editable title + regenerate, the
+ * timestamp/model/context subtitle, the global StatusBadge, the IDE capsule,
+ * the overflow menu (archive/share/export/langfuse/terminate) and the
+ * terminate dialog. On mobile a hamburger opens the rail.
  */
 export function SessionHeader({
   session,
+  context,
   usage,
   isTerminated,
   liveStatus,
@@ -361,25 +503,62 @@ export function SessionHeader({
   // Poll-derived truth wins whenever the poll has returned a value; `??` only
   // falls back to the snapshot on `undefined` (poll not started/returned
   // yet), never on an intentionally empty `liveDoneReason`.
-  const displayStatus = liveStatus ?? session.status ?? "idle";
+  // No `"idle"` default any more: this header renders from the route's session
+  // id while the sessions listing is still in flight, and stamping "Idle" on a
+  // session whose state simply is not known yet is a claim rather than a
+  // placeholder — one that reads as wrong the moment a running session's poll
+  // answers. The badge is omitted until either source has said something.
+  const displayStatus = liveStatus ?? session.status;
   const displayDoneReason = liveDoneReason ?? session.done_reason;
   const { openMobileRail } = useRailControls();
   const [terminateOpen, setTerminateOpen] = useState(false);
   const isArchived = Boolean(session.archived);
 
   // Model(s) used — prefer usage data (richer: all models per turn) with a
-  // fallback to the session context model for legacy/unloaded sessions.
+  // fallback to the session context model when usage data is absent.
   const models = usage?.models_used?.length
     ? usage.models_used
     : session.context?.model ? [session.context.model] : [];
   const currentModel = usage?.root_model || session.context?.model || null;
 
+  // Cache read, not a second fetch — `useProjects()` is the shared `["projects"]`
+  // TanStack query the composer's picker and the landing page already keep warm.
+  // Read here rather than prop-drilled so `SessionDetailView` stays untouched.
+  const { projects } = useProjects();
+  // The live context when the caller has one, else the list-fetch snapshot.
+  const liveContext = context ?? session.context;
+  // ONE resolver for both facts. The project label and the repo slug walk the
+  // same managed-id → worktree-defers-to-parent chain, so building two would be
+  // two chances to disagree about which workspace the session is in.
+  const projectResolver = useMemo(() => new ProjectLabel(projects), [projects]);
+  const repoSlug = useMemo(
+    () => projectResolver.repoSlug(liveContext),
+    [projectResolver, liveContext],
+  );
+  // Which project the session is running in RIGHT NOW. Legible here because it
+  // is no longer a fixed property of the session: an auto-select session starts
+  // in a temporary directory and the agent moves it, possibly more than once,
+  // so the header is the only always-visible place that can answer "where is
+  // this running" without opening the composer.
+  const projectLabel = useMemo(
+    () => projectResolver.resolve(liveContext).label,
+    [projectResolver, liveContext],
+  );
+  // The SERVER-side total, i.e. the same number the landing-page row renders.
+  // Deliberately NOT `SessionDetailView`'s timeline-derived `sessionFiles`
+  // aggregate — two sources for one fact is the bug this replaces.
+  const diffStat = session.diff_stat;
+
   // IDE state lives here so the header owns the capsule control. Both hooks are
   // safe to call unconditionally — `useIdeStatus(null)` no-ops and
   // `useWebIdeEnabled` returns null until the config resolves.
   const webIdeEnabled = useWebIdeEnabled();
+  // `hasIdeMountTarget` reads `project` off the LIVE context (an auto-select
+  // session has no project until the agent picks one) and `slug`/`app_id` off
+  // the session's merged snapshot (set once at creation, never restated
+  // per-turn) — see that function's doc for why the two sources differ.
   const ideTrackingSessionId =
-    webIdeEnabled === true && Boolean(session.context?.project)
+    webIdeEnabled === true && hasIdeMountTarget(session, liveContext)
       ? session.session_id ?? null
       : null;
   const { instance: ideInstance, refresh: refreshIde, setInstance: setIdeInstance } =
@@ -468,7 +647,7 @@ export function SessionHeader({
               {session.title}
             </h2>
           }
-          {/* Subtitle line — timestamp · model name · context window. */}
+          {/* Subtitle line — timestamp · model · context window · project · repo · diff. */}
           <div className="hidden min-w-0 items-center gap-1.5 text-xs text-[hsl(var(--muted-foreground))] md:flex">
             <span className="truncate">{formatSessionTime(session.created_at)}</span>
             {models.length > 0 &&
@@ -483,13 +662,43 @@ export function SessionHeader({
                 <ContextWindowBar usage={usage} compact />
               </>
             }
+            {projectLabel &&
+              <>
+                <span aria-hidden className="shrink-0">·</span>
+                <span
+                  className="flex shrink-0 items-center gap-1"
+                  title={`Running in ${projectLabel}`}>
+                  <GitFork className="size-3 shrink-0" aria-hidden />
+                  <span className="max-w-[14ch] truncate">{projectLabel}</span>
+                </span>
+              </>
+            }
+            {repoSlug &&
+              <>
+                <span aria-hidden className="shrink-0">·</span>
+                {/* `short` (owner/repo) keeps the dense header readable; the
+                    host stays legible in RepoLink's own "Open on <host>" title. */}
+                <RepoLink slug={repoSlug} display="short" className="shrink-0" />
+              </>
+            }
+            {diffStat && (diffStat.additions > 0 || diffStat.deletions > 0) &&
+              <>
+                <span aria-hidden className="shrink-0">·</span>
+                <DiffStats
+                  additions={diffStat.additions}
+                  deletions={diffStat.deletions}
+                  className="shrink-0" />
+              </>
+            }
           </div>
         </div>
 
-        <StatusBadge
-          status={displayStatus}
-          doneReason={displayDoneReason}
-          compact={isMobile} />
+        {displayStatus && (
+          <StatusBadge
+            status={displayStatus}
+            doneReason={displayDoneReason}
+            compact={isMobile} />
+        )}
       </div>
 
       {/* Right zone: artifact jump → IDE capsule → overflow menu. */}
@@ -504,7 +713,7 @@ export function SessionHeader({
 
         {ideTrackingSessionId !== null &&
           <IdeCapsule
-            projectLabel={session.context?.project || "project"}
+            projectLabel={projectLabel || "project"}
             ideInstance={ideInstance}
             ideBusy={ideBusy}
             onOpen={handleOpenIde}

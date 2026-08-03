@@ -21,10 +21,16 @@ import shutil
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from langchain_core.messages import AIMessage
-from mewbo_core.agent_context import AgentContext
+from mewbo_core.agents.agent_context import AgentContext
+from mewbo_core.agents.hypervisor import AgentHypervisor
 from mewbo_core.classes import ActionStep
-from mewbo_core.context import ContextSnapshot
-from mewbo_core.exit_plan_mode import (
+from mewbo_core.hooks import HookManager
+from mewbo_core.loop.orchestrator import Orchestrator
+from mewbo_core.loop.tool_use_loop import ToolUseLoop
+from mewbo_core.permissions import PermissionDecision, PermissionPolicy
+from mewbo_core.session.context import ContextSnapshot
+from mewbo_core.session.token_budget import TokenBudget
+from mewbo_core.tooling.exit_plan_mode import (
     PLAN_DIR_ROOT,
     ExitPlanModeTool,
     ensure_plan_dir,
@@ -33,13 +39,7 @@ from mewbo_core.exit_plan_mode import (
     plan_dir_for,
     plan_file_for,
 )
-from mewbo_core.hooks import HookManager
-from mewbo_core.hypervisor import AgentHypervisor
-from mewbo_core.orchestrator import Orchestrator
-from mewbo_core.permissions import PermissionDecision, PermissionPolicy
-from mewbo_core.token_budget import TokenBudget
-from mewbo_core.tool_registry import ToolRegistry, ToolSpec
-from mewbo_core.tool_use_loop import ToolUseLoop
+from mewbo_core.tooling.tool_registry import ToolRegistry, ToolSpec
 
 # ---------------------------------------------------------------------------
 # Helpers (mirroring test_tool_use_loop.py)
@@ -162,7 +162,7 @@ def _patch_plan_config(
     Delegates to the real config loader for any key we don't explicitly
     override, so tests do not accidentally break unrelated config reads.
     """
-    from mewbo_core import tool_use_loop as _tul
+    from mewbo_core.loop import tool_use_loop as _tul
 
     real_get = _tul.get_config_value
     overrides = {
@@ -175,7 +175,7 @@ def _patch_plan_config(
             return overrides[(section, key)]
         return real_get(section, key, default=default, **kwargs)
 
-    return patch("mewbo_core.tool_use_loop.get_config_value", side_effect=fake_get)
+    return patch("mewbo_core.loop.tool_use_loop.get_config_value", side_effect=fake_get)
 
 
 def _make_mcp_spec(tool_id: str) -> ToolSpec:
@@ -356,8 +356,7 @@ class TestQuotedMetacharAllowed:
     chaining, expansion, substitution) that would evade the allowlist. A
     metachar sitting inside a single- or double-quoted argument is literal
     data to the shell and poses no evasion risk, so it must be allowed.
-    This was the regression in session 3183ad54… where
-    ``grep "JAZZ\\|BREEZY"`` was rejected.
+    The shape that regressed: ``grep "JAZZ\\|BREEZY"`` was rejected.
     """
 
     def test_quoted_alternation_allowed(self):
@@ -488,9 +487,9 @@ class TestPlanModeSchemaFiltering:
         assert "mcp__devin__ask_question" in names
 
     def test_v1_strict_behaviour_regression_guard(self):
-        """Regression guard: an empty shell allowlist for root now yields
-        read-only + MCP tools only (edit excluded for root by the depth
-        guard, shell excluded by the empty allowlist, MCP unconditional).
+        """An empty shell allowlist for root yields read-only + MCP tools only:
+        edit is excluded for root by the depth guard, shell by the empty
+        allowlist, and MCP is unconditional.
         """
         read_spec = _make_spec("read_file", read_only=True)
         edit_spec = _make_edit_spec()
@@ -514,7 +513,7 @@ class TestPlanModeSchemaFiltering:
             [read_spec, edit_spec],
             "plan",
         )
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
             model_obj = MagicMock()
             mock_build.return_value = model_obj
             model_obj.bind_tools.return_value = MagicMock()
@@ -643,9 +642,9 @@ class TestPlanModePermission:
         assert "shell command blocked" in msg
 
     def test_shell_allowlist_allows_quoted_metachar_command(self):
-        # Regression: the substring metachar guard used to reject this
-        # because of the `|` inside the quoted regex. grep with quoted
-        # alternation is the canonical plan-mode exploration pattern.
+        # A substring metachar guard rejects this on the `|` inside the quoted
+        # regex. grep with quoted alternation is the canonical plan-mode
+        # exploration pattern, so the guard must respect quoting.
         loop = self._make_loop()
         step = ActionStep(
             tool_id="aider_shell_tool",
@@ -845,7 +844,7 @@ class TestPlanModeEndToEnd:
             bound = MagicMock()
             bound.ainvoke = fake_model.ainvoke
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 model_obj = MagicMock()
                 model_obj.bind_tools.return_value = bound
                 mock_build.return_value = model_obj
@@ -881,9 +880,8 @@ class TestPlanModeHypervisorIntegration:
     """Integration: plan-mode root spawn_agent is not denied.
 
     Drives ToolUseLoop.run() to exercise both schema (_bind_model) and
-    permission (_plan_mode_permission) in a single test.  This is the
-    test that would have caught the schema-permission gap in production
-    session 58e760587c6e.
+    permission (_plan_mode_permission) in a single test.  Testing either
+    half alone leaves the schema-permission gap open.
     """
 
     def test_root_spawn_agent_not_denied_by_permission(self):
@@ -918,7 +916,7 @@ class TestPlanModeHypervisorIntegration:
             bound = MagicMock()
             bound.ainvoke = fake_model.ainvoke
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 model_obj = MagicMock()
                 model_obj.bind_tools.return_value = bound
                 mock_build.return_value = model_obj
@@ -989,7 +987,7 @@ class TestAllowedRootsIncludesPlanDir:
     ``is_inside_plan_dir``. The lower guard (``resolve_safe_path`` in
     ``mewbo_tools.core``) must also accept them — otherwise edits are
     approved upstream and rejected downstream, and plan.md can never be
-    written. This was the showstopper in session 3183ad5449…
+    written.
     """
 
     def test_get_allowed_roots_includes_plan_dir_root(self):
@@ -1022,9 +1020,8 @@ class TestAllowedRootsIncludesPlanDir:
     def test_resolve_safe_path_rejects_unrelated_tmp_paths(self):
         """Arbitrary ``/tmp`` files are NOT allowed — only ``/tmp/mewbo``.
 
-        Guards against the regression where the entire ``/tmp`` tree was
-        opened up; that let the edit/read tools touch other users' pytest
-        dirs, ``/tmp/ssh-*`` agent sockets, etc.
+        Opening the whole ``/tmp`` tree lets the edit/read tools touch other
+        users' pytest dirs, ``/tmp/ssh-*`` agent sockets, and the like.
         """
         from mewbo_tools.core import resolve_safe_path
 
@@ -1050,8 +1047,8 @@ class TestEpisodicPlanApproval:
     """SessionRuntime.approve_plan/reject_plan emit transcript events."""
 
     def _make_runtime(self):
-        from mewbo_core.session_runtime import SessionRuntime
-        from mewbo_core.session_store import create_session_store
+        from mewbo_core.loop.session_runtime import SessionRuntime
+        from mewbo_core.session.session_store import create_session_store
 
         store = create_session_store()
         return SessionRuntime(session_store=store)

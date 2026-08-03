@@ -31,9 +31,11 @@ import { buildHref } from "./router";
 
 interface ConfigureWizardProps {
   initialUrl?: string;
+  /** Slug (`host/owner/repo`) of an already-registered repository to seed from. */
+  initialRepo?: string;
 }
 
-export function ConfigureWizard({ initialUrl = "" }: ConfigureWizardProps) {
+export function ConfigureWizard({ initialUrl = "", initialRepo }: ConfigureWizardProps) {
   const [, navigate] = useLocation();
   const {
     platformList,
@@ -47,6 +49,7 @@ export function ConfigureWizard({ initialUrl = "" }: ConfigureWizardProps) {
     platform,
     gitSlug,
     branches,
+    seedDefaultBranch,
     step,
     setStep,
     STEPS,
@@ -54,7 +57,7 @@ export function ConfigureWizard({ initialUrl = "" }: ConfigureWizardProps) {
     goBack,
     onSubmit,
     isPending,
-  } = useWizardMachine({ initialUrl });
+  } = useWizardMachine({ initialUrl, initialRepo });
 
   return (
     <div className="flex flex-col flex-1 overflow-y-auto">
@@ -105,7 +108,7 @@ export function ConfigureWizard({ initialUrl = "" }: ConfigureWizardProps) {
                   languages={languageList}
                   models={modelList}
                   branches={branches.data?.branches ?? []}
-                  defaultBranch={branches.data?.defaultBranch ?? null}
+                  defaultBranch={branches.data?.defaultBranch ?? seedDefaultBranch}
                   branchesLoading={branches.isLoading}
                   developerMode={developerMode}
                 />

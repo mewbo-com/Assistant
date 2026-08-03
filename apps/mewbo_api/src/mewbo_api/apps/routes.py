@@ -1,4 +1,4 @@
-"""Flask-RESTX namespace for the Mewbo Apps REST surface (design spec §4A).
+"""Flask-RESTX namespace for the Mewbo Apps REST surface.
 
 Wire shapes match the ALREADY-COMMITTED clients verbatim (console
 ``src/api/apps.ts`` + ``src/types.ts``, Aura, and the injected SDK
@@ -19,9 +19,9 @@ Read-only introspection (master key OR app-scoped read token)::
 
     GET    /apps/<id>/data/<collection>   AppDataDoc envelopes (filter/sort/limit)
     GET    /apps/<id>/system              consolidated AppSystemHealth (§2.6)
-    GET    /apps/<id>/pipelines           declared pipeline surface (Phase 2)
+    GET    /apps/<id>/pipelines           declared pipeline surface
 
-Pipeline invocation (``mode="code"`` only — Phase 2)::
+Pipeline invocation (``mode="code"`` only)::
 
     GET    /apps/<id>/pipelines/<name>    invoke, read-auth, params from the query string
     POST   /apps/<id>/pipelines/<name>    invoke, WRITE-auth, params from the JSON body
@@ -45,7 +45,7 @@ READ-ONLY at the REST layer — no write verb exists, so a write attempt 405s.
 A ``mode="agentic"`` pipeline (the default) is never synchronously invocable —
 GET/POST on it 409s; it runs only on its own schedule or via its maintainer.
 
-Error bodies carry a top-level ``message`` (the legacy ``message`` wire-shape
+Error bodies carry a top-level ``message`` (the ``message`` wire-shape
 ``ApiResponseKit`` documents as ``shape="message"``, which the console's
 ``readJson`` surfaces as ``data.message``) — matching the ``agentic_search``
 routes. ``ApiResponseKit`` exposes no generic runtime error builder (only the
@@ -195,6 +195,23 @@ class AppRearmRequest(BaseModel):
     seed: bool = False
 
 
+class AppSessionRequest(BaseModel):
+    """Body for ``POST /apps/<id>/session`` — entirely optional.
+
+    ``new_session`` names what it does: open a session that is NOT the app's canonical
+    maintainer. The default is the get-or-create the app detail header's "open
+    session" action depends on — a link into the ongoing conversation as much as
+    a way to start one — while a composer submitting a turn against this app
+    asked for a NEW conversation and must never be handed the maintainer's
+    transcript to grow. ``extra="forbid"`` so a misspelled field is a 400 rather
+    than the silent reuse this exists to prevent.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    new_session: bool = False
+
+
 class AppTokenMintRequest(BaseModel):
     """Body for ``POST /apps/<id>/token`` — optional write-scope elevation.
 
@@ -273,11 +290,11 @@ class AppsRoutesController:
         ``_require_master_token`` split for key-management routes.
 
         *runner* is the ``mode="code"`` pipeline-execution collaborator
-        (Phase 2, the ``AppRunStarter`` idiom): ``None`` (the default) makes
+        (the ``AppRunStarter`` idiom): ``None`` (the default) makes
         every invoke degrade to a clean 503 "pipeline execution not configured"
         rather than a crash, so this controller works before the runner lands.
 
-        *tracker* (Phase 2 revised ruling) is the ledger-writer: when wired,
+        *tracker* is the ledger-writer: when wired,
         :meth:`invoke_pipeline` routes execution through
         ``AppPipelineRunTracker.record_code_run(kind="on_request",
         dispatch_failure=False, require_effect=True)`` so an invoke that actually
@@ -312,7 +329,7 @@ class AppsRoutesController:
     def _error(message: str, status: int) -> tuple[dict, int]:
         """Error body carrying a top-level ``message`` (the shape the console reads).
 
-        The console's ``readJson`` surfaces ``data.message``; this is the legacy
+        The console's ``readJson`` surfaces ``data.message``; this is the
         ``message`` wire-shape ``ApiResponseKit`` documents as ``shape="message"``,
         used verbatim by the ``agentic_search`` routes.
         """
@@ -339,8 +356,8 @@ class AppsRoutesController:
 
         The top-level ``spec`` is the RENDERED manifest — the injected SDK
         (:attr:`sdk_files`) is folded into its ``frontend.files`` so the served
-        stlite bundle can ``import mewbo_app`` (the one server-side delivery seam,
-        spec §2.5 "the SDK is the only sanctioned network path"). The ``versions``
+        stlite bundle can ``import mewbo_app`` — the one server-side delivery
+        seam, and the only sanctioned network path. The ``versions``
         snapshots are left verbatim (SDK-free) — they are history, never rendered,
         and polluting them would drift every stored version.
 
@@ -449,7 +466,7 @@ class AppsRoutesController:
         now: datetime,
         declared_collections: Sequence[str],
     ) -> dict[str, Any]:
-        """The ``AppFreshnessWire`` sub-object (spec §2.8), derived from the ledger."""
+        """The ``AppFreshnessWire`` sub-object, derived from the ledger."""
         last_run = runs[0] if runs else None
         last_success = next((r for r in runs if r.status == "succeeded"), None)
         upcoming = [
@@ -481,12 +498,12 @@ class AppsRoutesController:
 
     @staticmethod
     def _pipeline_mode(pipeline: PipelineSpec) -> str:
-        """The pipeline's declared execution mode (Phase 2, additive on the model).
+        """The pipeline's declared execution mode (additive on the model).
 
         Read defensively via ``getattr`` — ``mode`` lands on :class:`PipelineSpec`
         alongside the materialized-pipeline runner, built concurrently — so this
         controller works against both the pre- and post-field model shape. A
-        pipeline with no declared ``mode`` has exactly the shape every legacy
+        pipeline with no declared ``mode`` has exactly the shape every stored
         pipeline has: a ``wake_prompt`` that re-engages the maintainer, i.e.
         ``"agentic"`` — never invocable synchronously (see :meth:`invoke_pipeline`).
         """
@@ -500,12 +517,12 @@ class AppsRoutesController:
     def _pipeline_rows(
         pipelines: list[PipelineSpec], triggers: list[TriggerSpec]
     ) -> list[dict[str, Any]]:
-        """The declared per-pipeline tier the clients render (Phase 1).
+        """The declared per-pipeline tier the clients render.
 
         Each row carries the DECLARED ``schedule`` union (or ``null``), the
         ``on_demand`` flag, the platform-stamped ``trigger_ref``, whether that
         ref is currently ARMED on the maintainer, and the execution ``mode``
-        (Phase 2, additive) — so a client renders "refreshes hourly" vs
+        (additive) — so a client renders "refreshes hourly" vs
         "on-demand" vs the unscheduled warning, plus whether the pipeline is
         synchronously invocable. Additive: the top-level ``unscheduled_pipelines``
         field is unchanged (locked with the console).
@@ -662,6 +679,37 @@ class AppsRoutesController:
             return self._not_found()
         return app.model_dump(mode="json"), 200
 
+    def get_or_create_session(self, app_id: str, body: Any) -> tuple[dict, int]:
+        """Get-or-create the app's durable maintainer session. ``O(1)``.
+
+        The reverse-invocation channel back to an app: ``submit`` mints or reuses
+        a maintainer session as a side effect but hands it back to nobody but the
+        builder's own kick-off, so an app reached only via REST/an operator
+        (or whose console-streamed builder session already ended) had no way to
+        open a conversation with it. Delegates the whole get-or-create + archived
+        + reuse-vs-mint decision to :meth:`AppLifecycle.get_or_create_maintainer_session`
+        (see its docstring for the archived-app ruling) — this method only maps
+        the result onto the wire and the unknown-app case onto 404.
+
+        An optional body ``{"new_session": true}`` asks for a session that is NOT the
+        canonical maintainer, always minting and always reporting
+        ``created: true``. That is the composer's shape; the default reuse is the
+        detail header's. A fresh session is bound to the app by its TAG only and
+        is read-plus-stage — see
+        :meth:`AppLifecycle.get_or_create_maintainer_session`.
+        """
+        if not isinstance(body, dict):
+            return self._error("request body must be a JSON object", 400)
+        try:
+            data = AppSessionRequest.model_validate(body)
+        except ValidationError as exc:
+            return self._error(str(exc), 400)
+        result = self.lifecycle.get_or_create_maintainer_session(app_id, fresh=data.new_session)
+        if result is None:
+            return self._not_found()
+        session_id, created = result
+        return {"session_id": session_id, "created": created}, 201 if created else 200
+
     # -- read-only data + system introspection -----------------------------
 
     def read_data(
@@ -672,22 +720,34 @@ class AppsRoutesController:
         filter: dict[str, Any] | None,
         sort: str | None,
         limit: int,
+        offset: int = 0,
     ) -> tuple[dict, int]:
-        """Query one collection; ``documents`` are full :class:`AppDataDoc` envelopes.
+        """Query one page of a collection. ``O(collection)``, bounded by *limit*.
 
         The console's ``AppDataDoc`` type carries the envelope, and the injected
         SDK's ``data.query`` unwraps ``row["doc"]`` — so returning the envelope
         (``{app_id, collection, key, doc, updated_at}``) rather than a bare body
         is the unambiguous contract (a body that itself held a ``doc`` dict field
         would otherwise trip the SDK's tolerant fallback).
+
+        ``truncated`` is the load-bearing half. The page cap is fine; a page cap
+        that a caller cannot SEE is not — it drops the oldest-written rows under
+        the default ``updated_at`` sort and still answers 200. One extra document
+        is fetched purely to decide the flag; it is never served.
         """
         if self._load_app(app_id) is None:
             return self._not_found()
         docs = self.data_store.query(
-            app_id, collection, filter=filter, limit=limit, sort=sort
+            app_id, collection, filter=filter, limit=limit + 1, sort=sort, offset=offset
         )
-        documents = [d.model_dump(mode="json") for d in docs]
-        return {"collection": collection, "documents": documents}, 200
+        truncated = len(docs) > limit
+        documents = [d.model_dump(mode="json") for d in docs[:limit]]
+        return {
+            "collection": collection,
+            "documents": documents,
+            "offset": offset,
+            "truncated": truncated,
+        }, 200
 
     def system_health(self, app_id: str) -> tuple[dict, int]:
         """Consolidated read-only introspection (freshness + triggers + runs + maintainer)."""
@@ -711,7 +771,7 @@ class AppsRoutesController:
             "unscheduled_pipelines": self._unscheduled_pipelines(triggers, app.pipelines),
         }, 200
 
-    # -- pipeline surface + invocation (Phase 2) -----------------------
+    # -- pipeline surface + invocation ---------------------------------
 
     def list_pipelines(self, app_id: str) -> tuple[dict, int]:
         """List the app's declared pipeline surface (read-auth, like ``/system``).
@@ -843,11 +903,10 @@ class AppsRoutesController:
         write-auth) verbs; exactly one of *raw_query_params* / *json_body* is
         passed by the caller.
 
-        A ``mode="agentic"`` pipeline (the default for every pre-Phase-2
-        pipeline — see :meth:`_pipeline_mode`) 409s: it runs on its own schedule
+        A ``mode="agentic"`` pipeline (the default when a pipeline declares no
+        mode — see :meth:`_pipeline_mode`) 409s: it runs on its own schedule
         or via its maintainer, never synchronously. An unwired :attr:`runner`
-        (``None``, the default before the materialized-pipeline runner lands)
-        503s. A runner/tracker exception surfaces as a clean 502 with
+        (``None``) 503s. A runner/tracker exception surfaces as a clean 502 with
         ``{message}`` — never a traceback body. A TRACKED failure (the tracker is
         wired and the runner raised) maps to 502 from ``run.error`` instead.
 
@@ -863,7 +922,7 @@ class AppsRoutesController:
 
         When :attr:`tracker` is wired, execution routes through
         ``record_code_run(kind="on_request", dispatch_failure=False,
-        require_effect=True)`` (Phase 2 revised ruling): a run that wrote
+        require_effect=True)``: a run that wrote
         data or genuinely failed is ledgered; a cache hit or a no-write success
         mints no row. :attr:`runner` alone (no tracker) still works — no ledger,
         matching every existing fake-runner-only test.
@@ -1174,6 +1233,33 @@ app_create_request = apps_ns.model(
     },
 )
 
+app_session_model = apps_ns.model(
+    "AppSession",
+    {
+        "session_id": fields.String(
+            example="7c1f0a84b2c39e2d",
+            description="The app's maintainer session (or its builder session for "
+            "a draft that never submitted).",
+        ),
+        "created": fields.Boolean(
+            example=False, description="Whether a session was freshly minted for this call."
+        ),
+    },
+)
+
+app_session_request = apps_ns.model(
+    "AppSessionRequest",
+    {
+        "new_session": fields.Boolean(
+            example=False,
+            description="Open an ADDITIONAL session against this app instead of "
+            "reusing its maintainer (default false). A fresh session is bound by "
+            "its tag and is read-plus-stage: it can read and stage the app, but "
+            "cannot write its data plane, run its pipelines, or resubmit it.",
+        ),
+    },
+)
+
 app_patch_request = apps_ns.model(
     "AppPatchRequest",
     {
@@ -1286,7 +1372,7 @@ app_pipeline_row_model = apps_ns.model(
         "mode": fields.String(
             example="agentic",
             description=(
-                "'agentic' (wakes the maintainer; the legacy default) or "
+                "'agentic' (wakes the maintainer; the default) or "
                 "'code' (synchronously invocable via GET/POST .../pipelines/<name>)."
             ),
         ),
@@ -1466,6 +1552,14 @@ app_data_model = apps_ns.model(
             ),
             description="Full AppDataDoc envelopes; the SDK unwraps `row['doc']`.",
         ),
+        "offset": fields.Integer(
+            example=0, description="Documents skipped before this page, in sort order."
+        ),
+        "truncated": fields.Boolean(
+            example=False,
+            description="More documents exist past this page — re-read at "
+            "`offset + len(documents)`.",
+        ),
     },
 )
 
@@ -1586,6 +1680,33 @@ class AppArchive(_ControllerResource):
         return self.controller.archive_app(app_id)
 
 
+class AppSession(_ControllerResource):
+    """Get-or-create the app's durable maintainer session (reverse-invocation channel)."""
+
+    @apps_ns.doc(security="apikey")
+    @apps_ns.expect(app_session_request)
+    @apps_ns.response(200, "The app's existing maintainer session.", app_session_model)
+    @apps_ns.response(201, "A maintainer session was minted for this app.", app_session_model)
+    @kit.errors(404, shape="message")
+    @kit.auth_error()
+    @guard.requires("apps.admin")
+    def post(self, app_id: str) -> tuple[dict, int]:
+        """Return the app's maintainer session, minting one on first call.
+
+        Gated ``apps.admin`` (the management tier, alongside pause/resume/rearm/
+        rollback) rather than ``apps.use``: unlike a render token, the session
+        this hands back can drive ``submit_app``/``app_data`` on the app, so it
+        carries the same authority as pausing or rolling it back, not as opening
+        its rendered frontend.
+
+        An optional ``{"new_session": true}`` body mints an additional session instead
+        of reusing the maintainer — the composer's shape; see the controller.
+        """
+        return self.controller.get_or_create_session(
+            app_id, request.get_json(silent=True) or {}
+        )
+
+
 class AppData(_ControllerResource):
     """Read-only query over one collection (master key OR app-scoped token)."""
 
@@ -1602,7 +1723,17 @@ class AppData(_ControllerResource):
                 "in": "query",
                 "type": "string",
             },
-            "limit": {"description": "Max documents (<=500).", "in": "query", "type": "integer"},
+            "limit": {
+                "description": "Page size (<=500). A larger value is capped, and the "
+                "response's `truncated` flag reports that more remain.",
+                "in": "query",
+                "type": "integer",
+            },
+            "offset": {
+                "description": "Documents to skip before this page, in sort order.",
+                "in": "query",
+                "type": "integer",
+            },
         },
     )
     @apps_ns.response(200, "The collection's AppDataDoc envelopes.", app_data_model)
@@ -1613,7 +1744,11 @@ class AppData(_ControllerResource):
         enforced_by="AppsRoutesController.authorize_read",
     )
     def get(self, app_id: str, collection: str) -> tuple[dict, int]:
-        """Query a collection. Read-only — no write verb exists on this route."""
+        """Query one page of a collection. Read-only — no write verb exists on this route.
+
+        ``O(collection)``, bounded: at most ``_MAX_DATA_LIMIT`` documents per call.
+        Walk a larger collection with ``offset``; ``truncated`` says when to.
+        """
         auth = self._read_auth(app_id)
         if auth:
             return auth
@@ -1627,8 +1762,14 @@ class AppData(_ControllerResource):
             flt = parsed if isinstance(parsed, dict) else None
         limit = request.args.get("limit", type=int) or _DEFAULT_DATA_LIMIT
         limit = max(1, min(limit, _MAX_DATA_LIMIT))
+        offset = max(0, request.args.get("offset", type=int) or 0)
         return self.controller.read_data(
-            app_id, collection, filter=flt, sort=request.args.get("sort"), limit=limit
+            app_id,
+            collection,
+            filter=flt,
+            sort=request.args.get("sort"),
+            limit=limit,
+            offset=offset,
         )
 
 
@@ -1895,6 +2036,7 @@ def init_apps_routes(api: Any, controller: AppsRoutesController) -> None:
         (AppsCollection, "/apps"),
         (AppItem, "/apps/<string:app_id>"),
         (AppArchive, "/apps/<string:app_id>/archive"),
+        (AppSession, "/apps/<string:app_id>/session"),
         (AppData, "/apps/<string:app_id>/data/<string:collection>"),
         (AppSystem, "/apps/<string:app_id>/system"),
         (AppToken, "/apps/<string:app_id>/token"),
@@ -1917,6 +2059,7 @@ __all__ = [
     "AppPatchRequest",
     "AppRearmRequest",
     "AppRollbackRequest",
+    "AppSessionRequest",
     "AppTokenMintRequest",
     "apps_ns",
     "init_apps_routes",

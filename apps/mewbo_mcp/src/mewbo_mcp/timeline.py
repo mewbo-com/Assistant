@@ -1,13 +1,10 @@
 """The MCP projection of a session transcript.
 
-This module used to be a hand-maintained Python PORT of the console's
-``buildTimeline``, kept in step with it by convention. Convention lost: the port
-rendered no plan, todos, widget, run-failure or question rows, so an MCP reader
-and a console reader looking at the same session saw different conversations —
-and neither could tell.
-
-Turn reconstruction now lives ONCE, in
-:class:`mewbo_core.transcript_timeline.TranscriptTimeline`. Everything below is
+Turn reconstruction lives ONCE, in
+:class:`mewbo_core.transcript_timeline.TranscriptTimeline`. A second,
+hand-maintained port kept in step by convention is exactly how an MCP reader
+and a console reader end up looking at the same session and seeing different
+conversations, with neither able to tell. Everything below is
 a projection of that assembler's output into the shapes MCP callers already
 consume. No boundary rule is decided here; when a rule changes it changes in
 core and every surface moves together.
@@ -30,14 +27,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from mewbo_core.contracts.types import BLOCKED_CODES
 from mewbo_core.hooks import OutcomeAssertion
-from mewbo_core.transcript_timeline import (
+from mewbo_core.session.transcript_timeline import (
     EventRecord,
     TimelineEntry,
     TranscriptTimeline,
     TurnTokenUsage as CoreTurnTokenUsage,
 )
-from mewbo_core.types import BLOCKED_CODES
 from pydantic import ValidationError
 
 # ``BLOCKED_CODES`` is core's canonical set of tool-envelope codes that make a
@@ -151,6 +148,29 @@ class Turn:
         """Number of steps (``tool_result`` events) in this turn."""
         return len(self.steps)
 
+    # One entry per PANEL — not per event. Populated from the assembler's
+    # ``generative_ui`` rows, which upsert on ``ui_id``, so a run that refined a
+    # card it already showed contributes ONE row carrying the latest content
+    # rather than the stale version beside the current one. Reading the raw
+    # events here instead would make MCP the only surface that stacks
+    # near-copies, handing a reader a stale panel with nothing marking it
+    # stale. Shaped like an ``EventRecord``
+    # (``{ts, payload}``) so the projection above it never had to learn the
+    # difference. ``ts`` is the panel's FIRST appearance, per the assembler.
+    generative_ui: list[EventRecord] = field(default_factory=list)
+
+    # Each COMPLETED ``switch_project`` in this turn, in order. Without it an MCP
+    # reader gets a transcript in which the session never moved and silently
+    # attributes every later step to the project the turn opened in — the same
+    # defect this module's own header describes, one row later. It matters more
+    # here than on a visual surface: an MCP consumer IS an agent, so a wrong
+    # directory becomes a wrong action rather than a confusing screen.
+    #
+    # A REFUSED switch contributes nothing, because the assembler already
+    # declined to emit a row for one; the honest reading of a refusal is that the
+    # session stayed where it was.
+    project_switches: list[dict[str, object]] = field(default_factory=list)
+
     def token_usage(self) -> TurnTokenUsage | None:
         """Compute this turn's token rollup, or ``None`` if there is none."""
         return compute_turn_token_usage(self.events)
@@ -206,6 +226,19 @@ def build_timeline(events: list[EventRecord]) -> list[Turn]:
             # carries no turn metadata at all and would be skipped entirely.
             owner.done_reason = entry.run_failure.reason
             owner.error = entry.run_failure.text
+        if owner is not None and entry.role == "generative_ui" and entry.generative_ui:
+            # Read BEFORE the turn-metadata gate below, for the same reason the
+            # failure row is: a panel is a CARD row, so it carries no turn
+            # metadata and the gate would skip it entirely.
+            owner.generative_ui.append({"ts": entry.ts, "payload": dict(entry.generative_ui)})
+        if owner is not None and entry.role == "project_switch" and entry.project_switch:
+            # Read BEFORE the turn-metadata gate below, for the same reason the
+            # failure and panel rows are: a switch is a CARD row, so it carries
+            # no turn metadata and the gate would skip it entirely. That skip is
+            # exactly how this surface came to report a session that never moved.
+            owner.project_switches.append(
+                {"ts": entry.ts, **entry.project_switch.model_dump(exclude_none=True)}
+            )
         # Only a row that CARRIES turn metadata concluded a turn; a marker or a
         # card row shares the turn id without ending anything.
         if entry.turn is None:

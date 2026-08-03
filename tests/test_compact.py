@@ -6,7 +6,8 @@ import asyncio
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from mewbo_core.compact import (
+from mewbo_core.llm.prompt_registry import get_prompt_registry
+from mewbo_core.session.compact import (
     CompactionMode,
     CompactionResult,
     _extract_file_references,
@@ -18,7 +19,6 @@ from mewbo_core.compact import (
     record_compaction,
     resolve_compact_models,
 )
-from mewbo_core.prompt_registry import get_prompt_registry
 
 # The compaction prompts moved to the central prompt registry ;
 # byte-equality is pinned by tests/test_prompt_registry_compact.py. These
@@ -154,7 +154,7 @@ class TestRecordCompaction:
     """
 
     def _make_store(self, tmp_path):
-        from mewbo_core.session_store import SessionStore
+        from mewbo_core.session.session_store import SessionStore
 
         store = SessionStore(root_dir=str(tmp_path))
         sid = store.create_session()
@@ -248,7 +248,7 @@ class TestCompactConversationFocus:
 
         llm = MagicMock()
         llm.ainvoke = _capture
-        with patch("mewbo_core.llm.build_chat_model", return_value=llm):
+        with patch("mewbo_core.llm.llm.build_chat_model", return_value=llm):
             asyncio.run(
                 compact_conversation(
                     [_user("hi")],
@@ -269,7 +269,7 @@ class TestCompactConversationFocus:
 
         llm = MagicMock()
         llm.ainvoke = _capture
-        with patch("mewbo_core.llm.build_chat_model", return_value=llm):
+        with patch("mewbo_core.llm.llm.build_chat_model", return_value=llm):
             asyncio.run(
                 compact_conversation(
                     [_user("hi")],
@@ -283,7 +283,7 @@ class TestCompactConversationFocus:
     def test_events_summarized_count_populated(self):
         llm = AsyncMock()
         llm.ainvoke.return_value = MagicMock(content="<summary>ok</summary>")
-        with patch("mewbo_core.llm.build_chat_model", return_value=llm):
+        with patch("mewbo_core.llm.llm.build_chat_model", return_value=llm):
             r = asyncio.run(
                 compact_conversation(
                     [_user("a"), _user("b"), _user("c")],
@@ -307,7 +307,7 @@ class TestCompactConversation:
         llm.ainvoke.return_value = MagicMock(
             content="<analysis>draft</analysis><summary>Done.</summary>"
         )
-        with patch("mewbo_core.llm.build_chat_model", return_value=llm):
+        with patch("mewbo_core.llm.llm.build_chat_model", return_value=llm):
             r = asyncio.run(
                 compact_conversation(
                     [_user("do X"), _assistant("done")],
@@ -322,8 +322,8 @@ class TestCompactConversation:
         llm = AsyncMock()
         llm.ainvoke.return_value = MagicMock(content="<summary>Old</summary>")
         with (
-            patch("mewbo_core.llm.build_chat_model", return_value=llm),
-            patch("mewbo_core.compact.get_config_value", return_value=2),
+            patch("mewbo_core.llm.llm.build_chat_model", return_value=llm),
+            patch("mewbo_core.session.compact.get_config_value", return_value=2),
         ):
             r = asyncio.run(
                 compact_conversation(
@@ -342,7 +342,7 @@ class TestCompactConversation:
     def test_partial_explicit_pivot(self):
         llm = AsyncMock()
         llm.ainvoke.return_value = MagicMock(content="<summary>s</summary>")
-        with patch("mewbo_core.llm.build_chat_model", return_value=llm):
+        with patch("mewbo_core.llm.llm.build_chat_model", return_value=llm):
             r = asyncio.run(
                 compact_conversation(
                     [_user(f"m{i}") for i in range(5)],
@@ -355,7 +355,7 @@ class TestCompactConversation:
     def test_pre_compact_hook_applied(self):
         llm = AsyncMock()
         llm.ainvoke.return_value = MagicMock(content="<summary>ok</summary>")
-        with patch("mewbo_core.llm.build_chat_model", return_value=llm):
+        with patch("mewbo_core.llm.llm.build_chat_model", return_value=llm):
             r = asyncio.run(
                 compact_conversation(
                     [_user("a"), _user("b"), _user("c")],
@@ -371,7 +371,7 @@ class TestCompactConversation:
 
         llm = AsyncMock()
         llm.ainvoke.return_value = MagicMock(content="<summary>fine</summary>")
-        with patch("mewbo_core.llm.build_chat_model", return_value=llm):
+        with patch("mewbo_core.llm.llm.build_chat_model", return_value=llm):
             r = asyncio.run(
                 compact_conversation(
                     [_user("x")],
@@ -382,7 +382,7 @@ class TestCompactConversation:
         assert r.summary == "fine"
 
     def test_partial_nothing_to_summarize(self):
-        with patch("mewbo_core.compact.get_config_value", return_value=10):
+        with patch("mewbo_core.session.compact.get_config_value", return_value=10):
             r = asyncio.run(
                 compact_conversation(
                     [_user("recent")],
@@ -408,15 +408,15 @@ class TestGetCompactPrompt:
 
     def test_defaults_to_standard_when_config_missing(self):
         # Unknown config key falls through to default=False -> standard prompt.
-        with patch("mewbo_core.compact.get_config_value", return_value=False):
+        with patch("mewbo_core.session.compact.get_config_value", return_value=False):
             assert get_compact_prompt() == COMPACT_PROMPT
 
     def test_caveman_mode_true_returns_caveman_prompt(self):
-        with patch("mewbo_core.compact.get_config_value", return_value=True):
+        with patch("mewbo_core.session.compact.get_config_value", return_value=True):
             assert get_compact_prompt() == CAVEMAN_COMPACT_PROMPT
 
     def test_caveman_mode_false_returns_standard_prompt(self):
-        with patch("mewbo_core.compact.get_config_value", return_value=False):
+        with patch("mewbo_core.session.compact.get_config_value", return_value=False):
             assert get_compact_prompt() == COMPACT_PROMPT
 
     def test_caveman_prompt_preserves_output_structure(self):
@@ -476,7 +476,7 @@ class TestCompactFromBackgroundThread:
 
         def run_in_thread() -> None:
             try:
-                with patch("mewbo_core.llm.build_chat_model", return_value=llm):
+                with patch("mewbo_core.llm.llm.build_chat_model", return_value=llm):
                     r = asyncio.run(
                         compact_conversation(
                             [_user("old msg"), _assistant("old reply")],
@@ -502,7 +502,7 @@ class TestCompactFromBackgroundThread:
         llm = AsyncMock()
         llm.ainvoke.return_value = MagicMock(content="<summary>Compact.</summary>")
         events = [_user(f"msg {i}") for i in range(10)]
-        with patch("mewbo_core.llm.build_chat_model", return_value=llm):
+        with patch("mewbo_core.llm.llm.build_chat_model", return_value=llm):
             r = asyncio.run(compact_conversation(events, mode=CompactionMode.FULL))
         # The summary replaces all events, so tokens_saved should be positive
         assert r.tokens_saved > 0, f"Expected positive tokens_saved, got {r.tokens_saved}"
@@ -513,34 +513,34 @@ class TestCompactFromBackgroundThread:
 
 class TestResolveCompactModels:
     def test_default_keyword_resolves_to_agent_model(self):
-        with patch("mewbo_core.compact.get_config_value", return_value=["default"]):
+        with patch("mewbo_core.session.compact.get_config_value", return_value=["default"]):
             assert resolve_compact_models("agent-model") == ["agent-model"]
 
     def test_explicit_model_preserved(self):
         with patch(
-            "mewbo_core.compact.get_config_value",
+            "mewbo_core.session.compact.get_config_value",
             return_value=["haiku", "default"],
         ):
             assert resolve_compact_models("sonnet") == ["haiku", "sonnet"]
 
     def test_empty_string_treated_as_default(self):
-        with patch("mewbo_core.compact.get_config_value", return_value=["", "haiku"]):
+        with patch("mewbo_core.session.compact.get_config_value", return_value=["", "haiku"]):
             assert resolve_compact_models("sonnet") == ["sonnet", "haiku"]
 
     def test_empty_list_falls_back_to_agent(self):
-        with patch("mewbo_core.compact.get_config_value", return_value=[]):
+        with patch("mewbo_core.session.compact.get_config_value", return_value=[]):
             assert resolve_compact_models("sonnet") == ["sonnet"]
 
     def test_deduplicates(self):
         with patch(
-            "mewbo_core.compact.get_config_value",
+            "mewbo_core.session.compact.get_config_value",
             return_value=["default", "default", "haiku"],
         ):
             assert resolve_compact_models("sonnet") == ["sonnet", "haiku"]
 
     def test_non_list_config_falls_back(self):
         """If config returns a non-list (e.g. mocked int), treat as default."""
-        with patch("mewbo_core.compact.get_config_value", return_value=42):
+        with patch("mewbo_core.session.compact.get_config_value", return_value=42):
             assert resolve_compact_models("sonnet") == ["sonnet"]
 
 
@@ -563,9 +563,9 @@ class TestCompactModelFallback:
             return bad_llm if call_count == 1 else good_llm
 
         with (
-            patch("mewbo_core.llm.build_chat_model", side_effect=_build),
+            patch("mewbo_core.llm.llm.build_chat_model", side_effect=_build),
             patch(
-                "mewbo_core.compact.resolve_compact_models",
+                "mewbo_core.session.compact.resolve_compact_models",
                 return_value=["cheap-model", "fallback-model"],
             ),
         ):
@@ -583,9 +583,9 @@ class TestCompactModelFallback:
         llm = AsyncMock()
         llm.ainvoke.return_value = MagicMock(content="<summary>ok</summary>")
         with (
-            patch("mewbo_core.llm.build_chat_model", return_value=llm),
+            patch("mewbo_core.llm.llm.build_chat_model", return_value=llm),
             patch(
-                "mewbo_core.compact.resolve_compact_models",
+                "mewbo_core.session.compact.resolve_compact_models",
                 return_value=["my-haiku"],
             ),
         ):

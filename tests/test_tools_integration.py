@@ -7,7 +7,7 @@ import types
 import pytest
 from mewbo_core.common import get_mock_speaker
 from mewbo_core.config import set_mcp_config_path
-from mewbo_core.llm import sanitize_tool_schema
+from mewbo_core.llm.llm import sanitize_tool_schema
 from mewbo_tools.integration.homeassistant import HomeAssistant, cache_monitor
 from mewbo_tools.integration.mcp import (
     MCPToolRunner,

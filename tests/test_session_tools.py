@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for ``mewbo_core.session_tools``.
+"""Unit tests for ``mewbo_core.tooling.session_tools``.
 
 Covers the ``SessionToolRegistry`` contract exposed in Task 4 of the
 widget-builder-as-plugin refactor:
@@ -15,7 +15,7 @@ import types
 
 from mewbo_core.classes import ActionStep
 from mewbo_core.common import MockSpeaker
-from mewbo_core.session_tools import SessionToolFactory, SessionToolRegistry
+from mewbo_core.tooling.session_tools import SessionToolFactory, SessionToolRegistry
 
 # ---------------------------------------------------------------------------
 # Fixture: a minimal SessionTool used as the import target for load_entry.
@@ -143,11 +143,11 @@ class TestBuildFor:
 class TestBuildForCapabilityGate:
     """A capability-gated session tool surfaces from the session caps alone.
 
-    Regression: a runtime capability grant (the ``scg`` provider)
-    unions the capability into ``session_capabilities``, but session tools were
-    selected ONLY by ``allowed_tools`` — so the root agent of an ordinary
-    session never got ``scg_*`` and answered ``TOOLS-MISSING`` on re-engagement.
-    These tests pin the bridge at the real ``build_for`` seam.
+    A runtime capability grant (the ``scg`` provider) unions the capability
+    into ``session_capabilities``. Selecting session tools by ``allowed_tools``
+    alone leaves the root agent of an ordinary session without ``scg_*``,
+    answering ``TOOLS-MISSING`` on re-engagement. These tests pin the bridge at
+    the real ``build_for`` seam.
     """
 
     def _gated_registry(self) -> SessionToolRegistry:
@@ -245,20 +245,19 @@ class TestBuildForCapabilityGate:
 
 
 # ---------------------------------------------------------------------------
-# build_for — explicit-scope structural ceiling (Phase 3)
+# build_for — explicit-scope structural ceiling
 # ---------------------------------------------------------------------------
 
 
 class TestBuildForExplicitScopeCeiling:
     """A non-empty ``allowed_tools`` caps the capability gate.
 
-    Regression for Phase 3 (closes the debt): the ``wiki`` plugin
-    stamps ``requires-capabilities: ["wiki"]`` on ALL its session tools, so a
-    session holding the ``wiki`` capability used to auto-surface the FULL wiki
-    retrieval surface onto EVERY agent via the capability gate — even the
-    ``wiki-qa`` hypervisor whose AgentDef ``tools:`` deliberately omits retrieval
-    tools to force probe-delegation. Once a caller declares an explicit
-    ``allowed_tools`` scope, that list is now the structural ceiling: a
+    The ``wiki`` plugin stamps ``requires-capabilities: ["wiki"]`` on ALL its
+    session tools, so on the capability gate alone a session holding ``wiki``
+    would auto-surface the FULL wiki retrieval surface onto EVERY agent — even
+    the ``wiki-qa`` hypervisor whose AgentDef ``tools:`` deliberately omits
+    retrieval tools to force probe-delegation. Once a caller declares an
+    explicit ``allowed_tools`` scope, that list is the structural ceiling: a
     capability-matched tool is built only if it is ALSO in the allowlist. The
     fully-open capability grant survives for the plain-session case
     (``allowed_tools is None``).
@@ -295,11 +294,10 @@ class TestBuildForExplicitScopeCeiling:
         return reg
 
     def test_gated_tool_excluded_when_absent_from_nonempty_allowlist(self):
-        """The regression this fix targets.
+        """An explicit allowlist outranks the capability gate.
 
         ``wiki_read_page`` is capability-matched (session holds ``wiki``) but the
-        caller's explicit allowlist omits it, so it is NOT built. Pre-fix the
-        capability gate overrode the allowlist and surfaced it anyway.
+        caller's explicit allowlist omits it, so it is NOT built.
         """
         reg = self._wiki_registry()
         tools = reg.build_for(
@@ -408,13 +406,12 @@ class TestBuildForUnconditional:
         assert [t.tool_id for t in tools] == ["schedule_trigger"]
 
     def test_permissive_root_with_mcp_allowlist_still_gets_it(self):
-        """THE df875 regression: a permissive FE root keeps schedule_trigger.
+        """A permissive FE root keeps schedule_trigger.
 
         The console/Aura ALWAYS send a large ``context.mcp_tools`` list
-        (permissive: ``strict_tool_scope=False``) that never lists built-ins.
-        Under the old ``extra_session_tools`` path those roots got
-        ``schedule_trigger`` regardless — Aura's "set an alarm in 10 minutes"
-        flow arms a time trigger through it. The permissive allowlist is an MCP
+        (permissive: ``strict_tool_scope=False``) that never lists built-ins,
+        yet Aura's "set an alarm in 10 minutes" flow arms a time trigger
+        through ``schedule_trigger``. The permissive allowlist is an MCP
         ceiling only; it must NOT cap the unconditional tool.
         """
         reg = self._registry()
@@ -594,12 +591,20 @@ class TestLoadEntry:
         finally:
             sys.modules.pop(module_name, None)
 
-    def test_load_entry_unconditional_surfaces_without_the_bundle_capability(self):
-        """``"unconditional": true`` lets ONE entry opt out of its bundle's gate.
+    def test_load_entry_unconditional_composes_with_the_bundle_capability(self):
+        """``"unconditional": true`` relaxes the ALLOWLIST ceiling, not the capability.
 
-        The manifest is loaded with a non-empty ``requires_capabilities`` (the
-        bundle-wide gate) and the session advertises NO capability, so only the
-        per-entry flag can explain the tool being selected.
+        The two flags are orthogonal axes and both apply: the entry is loaded
+        with a non-empty ``requires_capabilities``, so a session that advertised
+        nothing still does not get it, and one that advertised the capability
+        does — WITHOUT naming it in an allowlist, which is the part
+        ``unconditional`` contributes.
+
+        This composition is the only way to express "default-on for a permissive
+        session that advertised the capability". The plain capability gate
+        cannot: it is capped by ANY explicit ``allowed_tools``, ``[]`` included,
+        and every console/Aura session sends one — so a tool that must reach a
+        console ROOT has no other route. ``present_ui`` is the first such tool.
         """
         module_name = "mewbo_test_session_tools_uncond"
         self._make_fixture_module(module_name, _FakeSessionTool)
@@ -614,7 +619,40 @@ class TestLoadEntry:
                 },
                 requires_capabilities=("wiki",),
             )
+            assert reg.ids_for(None, session_capabilities=()) == []
+            assert reg.ids_for(None, session_capabilities=("wiki",)) == ["fake_tool"]
+            # The contribution of the flag: a PERMISSIVE allowlist that never
+            # names the tool still surfaces it once the capability is held.
+            assert reg.ids_for(
+                [], session_capabilities=("wiki",), strict_tool_scope=False
+            ) == ["fake_tool"]
+        finally:
+            sys.modules.pop(module_name, None)
+
+    def test_load_entry_unconditional_without_a_bundle_capability_is_always_on(self):
+        """``schedule_trigger``'s shape.
+
+        An unconditional entry whose bundle declares NO capability has nothing
+        to satisfy, so it surfaces to any session without a strict scope exactly
+        as it always did. This is what makes the composition above additive
+        rather than a behaviour change for anything shipped.
+        """
+        module_name = "mewbo_test_session_tools_uncond_free"
+        self._make_fixture_module(module_name, _FakeSessionTool)
+        try:
+            reg = SessionToolRegistry()
+            reg.load_entry(
+                {
+                    "tool_id": "fake_tool",
+                    "module": module_name,
+                    "class": "_FakeSessionTool",
+                    "unconditional": True,
+                }
+            )
             assert reg.ids_for(None, session_capabilities=()) == ["fake_tool"]
+            assert reg.ids_for([], session_capabilities=(), strict_tool_scope=False) == [
+                "fake_tool"
+            ]
         finally:
             sys.modules.pop(module_name, None)
 
@@ -657,8 +695,17 @@ class TestLoadEntry:
                 },
                 requires_capabilities=("wiki",),
             )
-            assert reg.ids_for(["other_tool"], strict_tool_scope=True) == []
-            assert reg.ids_for(["other_tool"], strict_tool_scope=False) == ["fake_tool"]
+            # The session holds the bundle capability throughout, so the ONLY
+            # variable under test is the allowlist ceiling.
+            assert (
+                reg.ids_for(
+                    ["other_tool"], session_capabilities=("wiki",), strict_tool_scope=True
+                )
+                == []
+            )
+            assert reg.ids_for(
+                ["other_tool"], session_capabilities=("wiki",), strict_tool_scope=False
+            ) == ["fake_tool"]
         finally:
             sys.modules.pop(module_name, None)
 
@@ -688,7 +735,7 @@ class TestLoadEntry:
     def test_load_entry_missing_class_is_skipped(self):
         reg = SessionToolRegistry()
         reg.load_entry(
-            {"tool_id": "fake_tool", "module": "mewbo_core.session_tools"}
+            {"tool_id": "fake_tool", "module": "mewbo_core.tooling.session_tools"}
         )
         assert reg.build_for(["fake_tool"], session_id="s1", event_logger=None) == []
 
@@ -811,8 +858,8 @@ class TestCapabilitiesFor:
 
 
 # ---------------------------------------------------------------------------
-# capability_mode privilege tier (Phase 1a — the two-surface
-# fix: session tools attenuate under a read_only spawn just like registry tools)
+# capability_mode privilege tier — session tools attenuate under a read_only
+# spawn just like registry tools
 # ---------------------------------------------------------------------------
 
 
@@ -881,3 +928,75 @@ class TestBuildForCapabilityMode:
             ["a", "b"], session_id="s1", event_logger=None, capability_mode="read_only"
         )
         assert [t.tool_id for t in built] == ["b"]
+
+
+class TestRealScheduleTriggerUnderTheComposedGate:
+    """The composed gate against the ONE unconditional factory that ships.
+
+    `unconditional` used to waive the bundle capability outright; it now only
+    relaxes the allowlist ceiling, and capabilities apply on top. The claim that
+    this moves nothing in production rests entirely on `schedule_trigger`
+    declaring no capabilities — so drive its REAL builder rather than a fixture
+    that restates the assumption. This gate has already shipped one silent
+    regression (df875); reasoning about it was not enough then either.
+    """
+
+    def _factory(self):
+        from mewbo_core.triggers.session_tool import (
+            register_schedule_trigger_provider,
+            schedule_trigger_factory,
+        )
+
+        # The provider only stores the pair; nothing here builds the tool, so
+        # sentinels are enough and no trigger store is touched. The autouse
+        # `_reset_schedule_trigger_provider` fixture clears it again after.
+        register_schedule_trigger_provider(object(), object())  # type: ignore[arg-type]
+        factory = schedule_trigger_factory()
+        assert factory is not None
+        return factory
+
+    def test_it_declares_no_capabilities(self):
+        """The single fact the whole byte-identical claim rests on.
+
+        If `schedule_trigger` ever gains a `requires_capabilities`, the
+        composition silently narrows its reach to sessions advertising that
+        capability — and every mobile alarm/reminder flow goes with it.
+        """
+        factory = self._factory()
+        assert factory.unconditional is True
+        assert factory.requires_capabilities == ()
+
+    def test_it_resolves_identically_across_the_whole_df875_matrix(self):
+        """Every case the df875 law enumerates, for a session advertising NOTHING.
+
+        An empty capability set is the adversarial input for the new check: if
+        the composition leaked into a capability-free factory, these would be
+        exactly the assertions that broke.
+        """
+        reg = SessionToolRegistry()
+        reg.register(self._factory())
+        tid = ["schedule_trigger"]
+
+        # Plain root — no allowlist at all.
+        assert reg.ids_for(None, session_capabilities=()) == tid
+        # Permissive FE root: an allowlist that never names a built-in.
+        assert reg.ids_for([], session_capabilities=(), strict_tool_scope=False) == tid
+        assert (
+            reg.ids_for(["mcp__x"], session_capabilities=(), strict_tool_scope=False) == tid
+        )
+        # Strict AgentDef scope that omits it — the one case that withholds it.
+        assert reg.ids_for(["other"], session_capabilities=(), strict_tool_scope=True) == []
+        # Strict scope that names it.
+        assert reg.ids_for(tid, session_capabilities=(), strict_tool_scope=True) == tid
+
+    def test_build_for_instantiates_it_on_a_permissive_root(self):
+        """The ids the gate names must be the tools the agent actually holds."""
+        from mewbo_core.triggers.session_tool import ScheduleTriggerTool
+
+        reg = SessionToolRegistry()
+        reg.register(self._factory())
+        built = reg.build_for(
+            [], session_id="s1", event_logger=None, strict_tool_scope=False
+        )
+        assert [t.tool_id for t in built] == ["schedule_trigger"]
+        assert isinstance(built[0], ScheduleTriggerTool)

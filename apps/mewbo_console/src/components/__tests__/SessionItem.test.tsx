@@ -15,7 +15,11 @@ import type { ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SessionItem } from "../SessionItem";
-import { ProjectLabel } from "../../utils/projectLabel";
+import {
+  AUTO_PROJECT,
+  AUTO_PROJECT_LABEL,
+  ProjectLabel,
+} from "../../utils/projectLabel";
 import type { SessionSummary } from "../../types";
 import * as client from "../../api/client";
 
@@ -30,7 +34,11 @@ vi.mock("../../api/client", () => ({
 
 const recoverSession = vi.mocked(client.recoverSession);
 
-function renderItem(session: SessionSummary, onClick = vi.fn()) {
+function renderItem(
+  session: SessionSummary,
+  onClick = vi.fn(),
+  extra: { onArchive?: () => void; onUnarchive?: () => void; onPin?: () => void; onUnpin?: () => void } = {},
+) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -38,7 +46,12 @@ function renderItem(session: SessionSummary, onClick = vi.fn()) {
   const ui: ReactElement = (
     <QueryClientProvider client={qc}>
       <Router hook={hook}>
-        <SessionItem session={session} projectLabel={new ProjectLabel([])} onClick={onClick} />
+        <SessionItem
+          session={session}
+          projectLabel={new ProjectLabel([])}
+          onClick={onClick}
+          {...extra}
+        />
       </Router>
     </QueryClientProvider>
   );
@@ -106,5 +119,91 @@ describe("SessionItem — capability & workspace transparency", () => {
     renderItem({ ...base, capabilities: [], workspace: null });
     expect(screen.queryByText("scg")).toBeNull();
     expect(screen.queryByText(/^ws-/)).toBeNull();
+  });
+
+  it("renders a known capability id as its human label, not the raw id", () => {
+    renderItem({ ...base, capabilities: ["stlite"] });
+    expect(screen.getByText("Widget")).toBeInTheDocument();
+    expect(screen.queryByText("stlite")).toBeNull();
+  });
+
+  it("falls back to the raw id for an unknown capability", () => {
+    renderItem({ ...base, capabilities: ["some_future_cap"] });
+    expect(screen.getByText("some_future_cap")).toBeInTheDocument();
+  });
+});
+
+describe("SessionItem — diff stat", () => {
+  it("renders +additions and -deletions when the session has a diff_stat", () => {
+    renderItem({ ...base, diff_stat: { additions: 12, deletions: 3 } });
+    expect(screen.getByText("+12")).toBeInTheDocument();
+    expect(screen.getByText("-3")).toBeInTheDocument();
+  });
+
+  it("renders neither when diff_stat is absent", () => {
+    renderItem({ ...base });
+    expect(screen.queryByText(/^\+\d/)).toBeNull();
+    expect(screen.queryByText(/^-\d/)).toBeNull();
+  });
+
+  it("renders neither for a zero/zero diff_stat", () => {
+    renderItem({ ...base, diff_stat: { additions: 0, deletions: 0 } });
+    expect(screen.queryByText(/^\+\d/)).toBeNull();
+    expect(screen.queryByText(/^-\d/)).toBeNull();
+  });
+});
+
+describe("SessionItem — the auto-select row label", () => {
+  // The landing-page row reads through the same `ProjectLabel` resolver the
+  // header and the composer do, so naming the sentinel in one place named it
+  // in three. Pinned here because the row is the surface a user scans FIRST,
+  // and "auto" sitting beside a fork glyph reads as a registered project.
+  it("names auto-select rather than printing the wire token", () => {
+    renderItem({ ...base, context: { project: AUTO_PROJECT } });
+    expect(screen.getByText(AUTO_PROJECT_LABEL)).toBeInTheDocument();
+    expect(screen.queryByText(AUTO_PROJECT)).toBeNull();
+  });
+
+  it("names the concrete project once the agent has switched", () => {
+    renderItem({ ...base, context: { project: "relay" } });
+    expect(screen.getByText("relay")).toBeInTheDocument();
+    expect(screen.queryByText(AUTO_PROJECT_LABEL)).toBeNull();
+  });
+});
+
+describe("SessionItem — pin/unpin", () => {
+  it("renders no pin control when neither handler is supplied", () => {
+    renderItem({ ...base });
+    expect(screen.queryByRole("button", { name: /pin session/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /unpin session/i })).toBeNull();
+  });
+
+  it("shows 'Pin session' for an unpinned row and calls onPin, not opening the row", async () => {
+    const user = userEvent.setup();
+    const onPin = vi.fn();
+    const { onClick } = renderItem({ ...base, pinned: false }, vi.fn(), { onPin, onUnpin: vi.fn() });
+    const button = screen.getByRole("button", { name: /pin session/i });
+    await user.click(button);
+    expect(onPin).toHaveBeenCalledWith("s1");
+    expect(onClick).not.toHaveBeenCalled();
+  });
+
+  it("shows 'Unpin session' for a pinned row and calls onUnpin", async () => {
+    const user = userEvent.setup();
+    const onUnpin = vi.fn();
+    renderItem({ ...base, pinned: true, pinned_at: "2026-01-01T00:00:00+00:00" }, vi.fn(), {
+      onPin: vi.fn(),
+      onUnpin,
+    });
+    await user.click(screen.getByRole("button", { name: /unpin session/i }));
+    expect(onUnpin).toHaveBeenCalledWith("s1");
+  });
+
+  it("renders a quiet Pinned marker only when pinned", () => {
+    renderItem({ ...base, pinned: true, pinned_at: "2026-01-01T00:00:00+00:00" });
+    expect(screen.getByLabelText("Pinned")).toBeInTheDocument();
+    cleanup();
+    renderItem({ ...base, pinned: false });
+    expect(screen.queryByLabelText("Pinned")).toBeNull();
   });
 });

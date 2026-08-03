@@ -319,13 +319,14 @@ def test_render_user_query_includes_ref_when_set(submission) -> None:
     assert rendered.index("slug:") < rendered.index("ref: develop")
 
 
-# ── auth note derives from durable credential presence (Finder-B B4) ────────────
+# ── auth note derives from durable credential presence ────────────────────────
 
 
 def test_render_user_query_auth_note_credential_on_file(store, submission):
-    """[B4] A durable credential on file → 'credential on file', not 'public
-    repo'. Derived from the store, not submission.token — which refresh strips,
-    so a private-repo refresh used to render the wrong 'public repo' note."""
+    """A durable credential on file → 'credential on file', not 'public repo'.
+
+    Derived from the store, not from submission.token — refresh strips that,
+    so a private-repo refresh would otherwise render the wrong note."""
     from mewbo_api.wiki.jobs import _render_user_query
     from mewbo_graph.wiki.credentials import CredentialScope, CredentialStore
     from mewbo_graph.wiki.types import RepoCredential
@@ -341,7 +342,7 @@ def test_render_user_query_auth_note_credential_on_file(store, submission):
 
 
 def test_render_user_query_auth_note_none_on_file(store, submission):
-    """[B4] No durable credential → 'none on file — public repo assumed', still
+    """No durable credential → 'none on file — public repo assumed', still
     instructing token=null in the note."""
     from mewbo_api.wiki.jobs import _render_user_query
 
@@ -352,7 +353,7 @@ def test_render_user_query_auth_note_none_on_file(store, submission):
 
 
 def test_render_user_query_auth_note_host_scoped_credential(store):
-    """[B4] A HOST-scoped credential (shared across a host's repos) also counts
+    """A HOST-scoped credential (shared across a host's repos) also counts
     as 'on file' — the note mirrors what resolve_chain would find, not just the
     repo scope."""
     from mewbo_api.wiki.jobs import _render_user_query

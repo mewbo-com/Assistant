@@ -23,6 +23,7 @@ import okhttp3.RequestBody
 import okhttp3.ResponseBody
 import retrofit2.Response
 import retrofit2.http.Body
+import retrofit2.http.DELETE
 import retrofit2.http.GET
 import retrofit2.http.Multipart
 import retrofit2.http.PATCH
@@ -57,6 +58,24 @@ interface AuraApi {
      * from [listSessions] unless `include_archived=true`. */
     @POST("api/sessions/{id}/archive")
     suspend fun archiveSession(@Path("id") sessionId: String): ArchiveSessionResponseDto
+
+    /**
+     * Pin / unpin, ONE path mirroring [archiveSession]'s own POST-then-DELETE shape exactly (the
+     * server's pin route is deliberately the same Resource pattern, not a second `/unpin` path).
+     * Pinning is an ORDERING signal, never a filter bypass — the server sorts pinned-first, and
+     * every active filter still applies to a pinned session (this client narrows to
+     * [com.mewbo.aura.ui.sessions.RecentsFilter] rows entirely client-side, so a pinned session
+     * outside the active scope simply never reaches the ordering step).
+     *
+     * Plain-DTO return, so any non-2xx surfaces as a [retrofit2.HttpException] and degrades to
+     * `false` in [com.mewbo.aura.data.repo.SessionRepository.setPinned] — the same error path
+     * [archiveSession] uses.
+     */
+    @POST("api/sessions/{id}/pin")
+    suspend fun pinSession(@Path("id") sessionId: String): PinSessionResponseDto
+
+    @DELETE("api/sessions/{id}/pin")
+    suspend fun unpinSession(@Path("id") sessionId: String): PinSessionResponseDto
 
     /**
      * `200` = session was idle, a new run started (`run_id` present).
@@ -155,7 +174,7 @@ interface AuraApi {
         @Body request: DeviceToolResultRequest,
     ): Response<ResponseBody>
 
-    // ---- Mewbo Apps (design spec docs/superpowers/specs/2026-07-17-mewbo-apps-design.md §4A/§4D) ----
+    // ---- Mewbo Apps (design: apps/mewbo_api/src/mewbo_api/apps/CLAUDE.md) ----
     // The backend routes (`apps.routes.AppsRoutesController`) had not landed at the time this client
     // was written — every DTO below was FIELD-VERIFIED against the web console's own mirror
     // (`apps/mewbo_console/src/types.ts` + `src/api/apps.ts`, landed concurrently by the console
@@ -212,14 +231,19 @@ interface AuraApi {
     suspend fun createApp(@Body request: AppCreateRequest): AppCreateResponseDto
 
     /**
-     * Delivers a human answer for a pending `user_question` event (the blocked `ask_user_question`
-     * tool call resolves with it). `200` = delivered (`{"resolved":true}`); `403` bad token / `404`
-     * unknown-or-already-read / `409` already delivered / `422` answers don't fit / `410` session
-     * terminated. The authoritative card settle is the `user_question_answered` SSE event, so `404`/
-     * `409` mean it already fired (settle silently, answered-elsewhere); everything else is a genuine
-     * failure. Raw [ResponseBody] like [postDeviceToolResult] — the caller branches on
-     * [Response.code], and a `200` body may be empty. The `X-Mewbo-Surface` header (stamped globally
-     * by [com.mewbo.aura.di.AuthInterceptor]) is recorded server-side as `answered_via`.
+     * Delivers a human answer for a pending `user_question` event. `200` = delivered
+     * (`{"resolved":true,"delivery":"run"|"message"}` — `"run"` resolved the still-blocked tool call,
+     * `"message"` means the run had already moved on so the answer landed as a new chat message
+     * instead; this is the SAME endpoint whether the card is still pending or the run already
+     * timed out/declined/etc., since either way it's the one place a human answer can land). `403` bad
+     * token / `404` unknown-or-already-read / `409` already delivered / `422` answers don't fit / `410`
+     * session terminated. The authoritative card settle is the `user_question_answered` SSE event
+     * (which now also carries `delivery`), so `404`/`409` mean it already fired (settle silently,
+     * answered-elsewhere); `422` is user-actionable, everything else a genuine failure. Raw
+     * [ResponseBody] like [postDeviceToolResult] — the caller branches on [Response.code], and a `200`
+     * body isn't decoded here (the SSE event is the source of truth, not this response). The
+     * `X-Mewbo-Surface` header (stamped globally by [com.mewbo.aura.di.AuthInterceptor]) is recorded
+     * server-side as `answered_via`.
      */
     @POST("api/sessions/{sessionId}/questions/{callId}/answer")
     suspend fun answerQuestion(
@@ -270,7 +294,7 @@ data class SessionSummaryDto(
     val title: String? = null,
     val status: String = "",
     /**
-     * Drawer running-dot gate (spec §6.7). Verified against the live backend 2026-07-02: `status`
+     * Drawer running-dot gate (spec §6.7). Verified against the live backend: `status`
      * values in the wild are only {completed, failed, awaiting_approval, canceled, idle} - it never
      * reads literally "running" - this separate boolean on the sessions-list payload is the actual
      * liveness signal.
@@ -289,6 +313,13 @@ data class SessionSummaryDto(
      */
     val terminated: Boolean = false,
     @SerialName("terminated_at") val terminatedAt: String? = null,
+    /**
+     * Pin state. The server emits BOTH keys only for a pinned session — an unpinned row carries
+     * NEITHER, so absent must read as not-pinned (hence the `false`/`null` defaults, same tolerant
+     * shape as [terminated]). `pinned_at` is server-assigned; the client never mints one.
+     */
+    val pinned: Boolean = false,
+    @SerialName("pinned_at") val pinnedAt: String? = null,
 ) {
     fun toDomain() = SessionSummary(
         sessionId = sessionId,
@@ -304,6 +335,8 @@ data class SessionSummaryDto(
         updatedAt = updatedAt ?: createdAt ?: "",
         terminated = terminated,
         terminatedAt = terminatedAt,
+        pinned = pinned,
+        pinnedAt = pinnedAt,
     )
 }
 
@@ -323,6 +356,22 @@ data class RenameSessionResponseDto(
 data class ArchiveSessionResponseDto(
     @SerialName("session_id") val sessionId: String,
     val archived: Boolean = false,
+)
+
+/**
+ * Pin/unpin acknowledgement. **Every field defaults, `session_id` included** — unlike the
+ * neighbouring response DTOs, whose shapes are verified against a shipped endpoint. This one is
+ * written against a route that did not yet exist in `backend.py` when it was added, so a narrower
+ * response body (`{"ok": true}`, a bare `{}`) must still decode rather than throwing a
+ * `MissingFieldException` on a call the server actually honoured. The repository therefore treats
+ * the REQUESTED state as the truth and reads [pinnedAt] only as a bonus; server truth arrives with
+ * the next `listSessions` refresh either way.
+ */
+@Serializable
+data class PinSessionResponseDto(
+    @SerialName("session_id") val sessionId: String? = null,
+    val pinned: Boolean = false,
+    @SerialName("pinned_at") val pinnedAt: String? = null,
 )
 
 @Serializable
@@ -782,15 +831,18 @@ data class AppCreateResponseDto(
 
 /**
  * Answer body for `POST /api/sessions/{id}/questions/{callId}/answer` (ask-user wire contract):
- * the single-use `call_token` carried on the `user_question` event, plus one [QuestionAnswerItemDto]
- * per question. The backend FORBIDS extra keys (`set(body) - {"call_token","answers"}` ⇒ 400), which
- * is safe here because the request carries exactly these two fields and the shared `Json`
- * (`explicitNulls = false`, [com.mewbo.aura.di.DataModule]) drops the unused half of each item.
+ * the single-use `call_token` carried on the `user_question` event, one [QuestionAnswerItemDto] per
+ * question, and an optional group-level [notes] (posted only when the user typed into the
+ * `notes_placeholder` field — never an empty string). The backend FORBIDS extra keys
+ * (`set(body) - {"call_token","answers","notes"}` ⇒ 400), which is safe here because the request
+ * carries exactly these fields and the shared `Json` (`explicitNulls = false`,
+ * [com.mewbo.aura.di.DataModule]) drops a `null` [notes] off the wire entirely.
  */
 @Serializable
 data class QuestionAnswerRequest(
     @SerialName("call_token") val callToken: String,
     val answers: List<QuestionAnswerItemDto>,
+    val notes: String? = null,
 )
 
 /** One question's answer: `selected_indexes` XOR `text` — never both (`explicitNulls = false` drops

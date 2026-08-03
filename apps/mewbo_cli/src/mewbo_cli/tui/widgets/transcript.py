@@ -55,7 +55,7 @@ class TranscriptView(VerticalScroll):
     ``new_text`` (Edit/Write tool calls).
     """
 
-    # Expose a ``lines`` property so legacy tests that check ``len(tv.lines)``
+    # Expose a ``lines`` property so callers that check ``len(tv.lines)``
     # continue to pass. We track lines written via the internal counter.
     #
     # Design language: vertical rhythm + per-kind accents driven
@@ -137,7 +137,7 @@ class TranscriptView(VerticalScroll):
         self._tool_cards: dict[str, Static] = {}
         self._tool_diffs: set[str] = set()
 
-        # Track total lines written for legacy compatibility (tv.lines).
+        # Track total lines written for the ``tv.lines`` accessor.
         self._line_count: int = 0
 
         # Live "working" activity indicator (the spinner shown while a turn/step
@@ -189,7 +189,7 @@ class TranscriptView(VerticalScroll):
 
     @property
     def lines(self) -> list[str]:
-        """Pseudo-line list for legacy compatibility (``len(tv.lines)``).
+        """Pseudo-line list backing ``len(tv.lines)``.
 
         Returns a list of empty strings whose length equals the number of
         content items written since mount.  The actual text lives in mounted
@@ -317,7 +317,7 @@ class TranscriptView(VerticalScroll):
         ``outcome`` is the turn's honest session-derived status (e.g.
         ``TurnEngine.last_turn_outcome()``) — ``None`` or ``"completed"`` (a
         command/skill dispatch with no query turn, or a clean finish) keeps the
-        historical green ``✓ done · {N}s`` line; anything else renders its OWN
+        plain green ``✓ done · {N}s`` line; anything else renders its OWN
         glyph/tone from :data:`ICONS`, so a blocked or unmet-goal turn never
         reads as success.
         """

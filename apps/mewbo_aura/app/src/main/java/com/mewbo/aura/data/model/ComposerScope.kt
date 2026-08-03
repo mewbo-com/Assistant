@@ -19,18 +19,50 @@ data class ComposerScope(
     /** `null` = untouched (every tool at its own catalog default); non-null = the user's explicit set. */
     val activeToolIds: Set<String>? = null,
 ) {
+    /** `true` while the session is in auto-select mode ([AUTO_PROJECT_KEY]) - no project is fixed
+     * and the model picks one with `switch_project`. Distinct from `selectedProjectKey == null`,
+     * which is the throwaway temp-dir cwd nobody will move off. */
+    val isAutoProject: Boolean
+        get() = selectedProjectKey == AUTO_PROJECT_KEY
+
     val projectDisplayName: String
         get() = when {
             // Genuinely no project chosen -> a temp-dir cwd (data/CLAUDE.md); "Temporary" is correct.
             selectedProjectKey == null -> "Temporary"
+            // The sentinel is not a project and will never resolve against [projects] - label it
+            // before the catalog lookup below, which would otherwise degrade it to the raw "auto".
+            selectedProjectKey == AUTO_PROJECT_KEY -> "Auto"
             // A project IS selected but the catalog can't resolve it to a name yet: [projects] is still
             // null (not fetched), or a revisited session hydrated [selectedProjectKey] before
-            // refreshComposerScope loaded the catalog (commit 3add535). Never claim "Temporary" here -
-            // that was the user-reported revisit-race bug. Degrade to the raw key until
+            // refreshComposerScope loaded the catalog. Never claim "Temporary" here -
+            // that misrepresents a real, still-resolving project as no project at all. Degrade to
+            // the raw key until
             // the catalog resolves it, mirroring the sheet's "rows degrade to their placeholder label"
             // posture (ComposerOptionsSheet KDoc) rather than showing a factually wrong label.
             else -> projects.orEmpty().firstOrNull { it.contextKey == selectedProjectKey }?.name ?: selectedProjectKey
         }
+
+    /**
+     * The open-session chrome's "where am I working" readout (`ChatTopBar`) - [projectDisplayName]
+     * for a scoped session, `null` when the session has no project at all, so the bar stays clean
+     * rather than carrying a permanent "Temporary" line for the throwaway-cwd case.
+     *
+     * It reads the SAME [selectedProjectKey] the next `/query` resends, which is what makes it
+     * follow a mid-run project switch: `ChatViewModel` adopts every persisted `context` event's
+     * project as the event arrives, and a `switch_project` writes one.
+     */
+    val activeProjectLabel: String?
+        get() = selectedProjectKey?.let { projectDisplayName }
+
+    /**
+     * The project key a tool-catalog fetch ([com.mewbo.aura.data.repo.SessionScopeRepository.tools])
+     * is scoped to: the selection itself, EXCEPT in auto mode, where it is `null` (unscoped).
+     * [AUTO_PROJECT_KEY] names no directory - the resolver refuses it outright rather than treating
+     * it as "no project" - so scoping a catalog to it would ask for tools from a workspace that
+     * does not exist yet, where the honest answer is the unscoped superset the model picks from.
+     */
+    val toolScopeKey: String?
+        get() = toolScopeKeyOf(selectedProjectKey)
 
     /** Tool count for the pre-session scope indicator (`ChatSurface`) - `null`
      * while [tools] hasn't loaded yet (the indicator shows just the project name, no count). */
@@ -38,8 +70,8 @@ data class ComposerScope(
         get() = tools?.let { resolvedActiveToolIds.size }
 
     /**
-     * Provenance-faceted breakdown of the ACTIVE (resolved) tools for the scope row (user directive
-     * 2026-07-14: show grouped counts like "2 project · 5 system · 3 plugin" instead of one total).
+     * Provenance-faceted breakdown of the ACTIVE (resolved) tools for the scope row (user directive:
+     * show grouped counts like "2 project · 5 system · 3 plugin" instead of one total).
      * Facets are ordered by [FACET_ORDER] (most user-relevant first), zero facets dropped, and any
      * tool whose [ToolSummary.scope] is null or unrecognized is collected into [FACET_OTHER]. Empty
      * while the catalog hasn't loaded. Counts sum to [activeToolCount] by construction.
@@ -119,6 +151,26 @@ data class ComposerScope(
     fun mcpToolsForContext(): List<String>? = if (toolsNarrowed) resolvedActiveToolIds.toList() else null
 
     companion object {
+        /**
+         * The reserved `context.project` value meaning "no fixed project — Mewbo picks one, and may
+         * move the session between projects mid-run" (core's `project_catalog.AUTO_PROJECT`). A
+         * sentinel sibling to the `managed:<id>` grammar ([ProjectSummary.contextKey]), NOT a
+         * project: it never appears in the catalog and resolves to no directory until a
+         * `switch_project` names one, which is why the resolver REFUSES it instead of quietly
+         * handing back a temp dir.
+         *
+         * Contrast `selectedProjectKey == null`, which sends no `project` field at all — a
+         * throwaway temp-dir cwd the session stays in. Spelled here exactly once: a picker row, a
+         * display label and a wire value that each carried their own copy of a sentinel is how
+         * `app:<app_id>` came to be stamped with no reader for it.
+         */
+        const val AUTO_PROJECT_KEY = "auto"
+
+        /** [toolScopeKey] for a key held on its own rather than in a live scope - what
+         * `ChatViewModel.selectProject` needs, since it must scope the re-fetch to the key the USER
+         * just tapped, not to whatever a concurrent second tap has since put into state. */
+        fun toolScopeKeyOf(projectKey: String?): String? = projectKey?.takeUnless { it == AUTO_PROJECT_KEY }
+
         /** Display/section order for tool [ToolSummary.scope] provenance — most user-relevant first
          * (a project's own tools before shared system/plugin/core ones). Drives both the scope-row
          * facet order ([activeToolFacets]) and the tool picker's scope-section grouping. */

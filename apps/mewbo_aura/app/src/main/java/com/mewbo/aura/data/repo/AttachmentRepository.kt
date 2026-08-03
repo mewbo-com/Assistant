@@ -42,8 +42,8 @@ class AttachmentRepository @Inject constructor(
     suspend fun upload(sessionId: String, staged: List<StagedAttachment>, model: String?): List<AttachmentRecordDto> {
         if (staged.isEmpty()) return emptyList()
         // toPart throws instead of returning null on a revoked/
-        // stale SAF grant - mapNotNull used to silently drop that attachment, so upload() could
-        // return successfully having sent fewer attachments than the user picked, with no signal
+        // stale SAF grant - a mapNotNull that dropped the null would let upload() return
+        // successfully having sent fewer attachments than the user picked, with no signal
         // to anyone. Letting the exception propagate routes it through ChatViewModel.send()'s
         // existing catch(Exception) -> appendClientError path (the same error-envelope convention
         // every other send failure already uses) rather than adding a new plumbing shape here.

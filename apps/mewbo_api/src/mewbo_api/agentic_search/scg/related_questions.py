@@ -1,15 +1,15 @@
 """RelatedQuestionsRunner — a parallel structured follow-up generator.
 
-The "Related Questions" rail used to depend on the search agent VOLUNTARILY
-emitting a top-level ``related_questions`` list on its ``scg_results`` call
-(last-write-wins, frequently empty). This runner makes the rail deterministic:
+The "Related Questions" rail does not depend on the search agent VOLUNTARILY
+emitting a top-level ``related_questions`` list on its ``scg_results`` call —
+last-write-wins and frequently empty. This runner makes the rail deterministic:
 ONE schema-constrained round-trip that, given the query + the synthesized
 answer, proposes a few natural follow-ups — fired ALONGSIDE the synthesis
 reveal (its own LLM call, off the main answer path) and projected onto
 ``RunPayload.related_questions``.
 
 It is **not** a second control loop and adds no orchestration: it reuses the
-core no-loop :class:`~mewbo_core.structured_synthesis.StructuredSynthesizer`
+core no-loop :class:`~mewbo_core.loop.structured_synthesis.StructuredSynthesizer`
 (one emit + one reask, the same validation machinery as ``/v1/structured``
 synthesis mode), so the only new surface is the prompt + the tiny output
 schema. Best-effort by contract — a follow-up list is never load-bearing, so
@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mewbo_core.common import get_logger
-from mewbo_core.structured_synthesis import StructuredSynthesizer
+from mewbo_core.loop.structured_synthesis import StructuredSynthesizer
 
 logging = get_logger(name="api.agentic_search.scg.related_questions")
 

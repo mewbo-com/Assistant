@@ -55,8 +55,7 @@ type ModelSelectorProps = {
  * Top-level model control for the composer footer. The trigger is a visible
  * pill showing the ACTIVE model name (Devin's "Fast" label idiom); the popover
  * co-locates the primary model picker and the opt-in fallback chain, because
- * both are model concerns and belong together (they used to be buried in two
- * separate ConfigMenu tabs). Brand icons + name reuse `ModelBrandIcon` +
+ * both are model concerns and belong together. Brand icons + name reuse `ModelBrandIcon` +
  * `formatModelName` — no bespoke glyphs.
  */
 export function ModelSelector({

@@ -20,10 +20,13 @@ from mewbo_graph.plugins.wiki.clone import (  # noqa: F401 — _resolve_runtime 
     _resolve_runtime,
 )
 from mewbo_graph.plugins.wiki.grounder import _DEFAULT_GROUNDER_PATHS
+from mewbo_graph.plugins.wiki.mermaid import MermaidValidator
 from mewbo_graph.wiki.credentials import CredentialScope
 
 if TYPE_CHECKING:
     from mewbo_core.classes import ActionStep
+
+    from mewbo_graph.wiki.types import GraphResolution, IndexFingerprint
 
 logging = get_logger(name="mewbo_graph.plugins.wiki.finalize")
 
@@ -134,6 +137,29 @@ class WikiFinalizeTool(WikiSessionTool):
                 f"({sorted(page_ids) or 'none'})",
             )
 
+        # 3c. Mermaid gate. A diagram that fails to parse renders as an error card,
+        # so the page ships visibly broken while the index reports success — the
+        # pipeline had no step that noticed.
+        #
+        # This refuses the FINALIZE, never the pages. Every page is already
+        # persisted by ``wiki_submit_page`` and stays persisted: the expensive
+        # work (clone, scan, graph, enrich, generation) is never redone, and the
+        # refusal names the page, block and line so a repair is scoped to the few
+        # broken diagrams instead of the whole wiki. Deliberately NOT a
+        # ``update_job(status="failed")`` like the zero-pages and empty-graph
+        # gates above — this state is repairable in-run, and the run must stay
+        # alive for the model to repair it. Returning without setting
+        # ``_terminate_run_pending`` is what keeps it alive: the loop reads the
+        # refusal, fixes the diagrams and calls finalize again.
+        #
+        # Gating per BLOCK, not per page, is load-bearing: every affected page
+        # observed carried exactly one bad diagram among otherwise-good ones, so
+        # rejecting whole pages would discard sound work for no reason.
+        rejection = MermaidValidator().review((p.id, p.body) for p in pages)
+        if rejection is not None:
+            emit_log(ctx, rejection.error.message)
+            return MockSpeaker(content=str(rejection.model_dump()))
+
         # 4. Resolve identity from the persisted submission. The wizard
         # is the canonical source: it carries the explicit platform, the
         # full repo URL (host + path), and the language. We do NOT do
@@ -171,6 +197,8 @@ class WikiFinalizeTool(WikiSessionTool):
         commit_sha = (job.commit_sha if job else None) or None
         commit_short = commit_sha[:7] if commit_sha else None
         maintainer_edited = _detect_grounder(ctx.clone_dir)
+        fingerprint = _resolve_index_fingerprint(ctx)
+        resolution = _resolve_graph_resolution(ctx)
 
         # 5b. Completion correctness (GraphRAG ordering law): the
         # knowledge graph is the substrate every downstream feature (Q&A,
@@ -212,6 +240,8 @@ class WikiFinalizeTool(WikiSessionTool):
             commitSha=commit_sha,
             commitShort=commit_short,
             maintainerEdited=maintainer_edited,
+            fingerprint=fingerprint,
+            resolution=resolution,
         )
         # create_project is upsert in both backends — no duplicate error.
         ctx.store.create_project(project)
@@ -233,11 +263,11 @@ class WikiFinalizeTool(WikiSessionTool):
         # terminally failed so the completed project surfaces immediately.
         _supersede_stale_jobs(ctx)
 
-        # 7c. Supersede prior-commit ARTIFACTS. ``upsert_nodes`` never deleted by
-        # slug, so before this the store was the UNION of every commit ever
-        # indexed — a file deleted months ago still served to retrieval, and
-        # ``node_count`` meaningless as "the graph for this commit". Now that
-        # every node/edge/entity carries its commit, a completed index reaps every
+        # 7c. Supersede prior-commit ARTIFACTS. ``upsert_nodes`` never deletes by
+        # slug, so without this reap the store would be the UNION of every commit
+        # ever indexed — a file deleted months ago still served to retrieval, and
+        # ``node_count`` meaningless as "the graph for this commit". Every
+        # node/edge/entity carries its commit, so a completed index reaps every
         # OTHER commit's graph + entity artifacts for the slug (``None``-stamped
         # rows — QA-minted entities — are preserved). Pages are already pruned to
         # this run's plan above, so they are not swept here. Best-effort: a store
@@ -303,10 +333,10 @@ def _host_from_url(url: str) -> str | None:
 
 
 def _split_owner_repo(slug: str) -> tuple[str, str] | None:
-    """Pull ``(owner, repo)`` from a fully-qualified or legacy slug.
+    """Pull ``(owner, repo)`` from a slug of any segment depth.
 
     Delegates to :class:`CredentialScope`, which owns the slug grammar (last two
-    segments = owner/repo; trailing ``.git`` stripped; a legacy ``owner/repo``
+    segments = owner/repo; trailing ``.git`` stripped; a 2-segment ``owner/repo``
     and a GitLab-subgroup ``host/group/sub/proj`` both parse). ``None`` for a
     host-only or unparseable slug — there is no repo to address.
     """
@@ -347,7 +377,7 @@ def _resolve_project_desc(store: Any, slug: str, *, repo_url: str, platform: str
     """The description a (re)index should persist — user override wins.
 
     THE read-preserve seam, shared by ``wiki_finalize`` AND ``GraphOnlyIndexer``
-    (which used to carry a copy of the last two tiers). ``Project`` is rebuilt
+    so neither carries its own copy of the tiers below. ``Project`` is rebuilt
     wholesale at every finalize, so without this an edited description would be
     silently overwritten by the platform fetch on the very next reindex.
 
@@ -359,8 +389,7 @@ def _resolve_project_desc(store: Any, slug: str, *, repo_url: str, platform: str
        a private host, where the fetch returns "", doesn't blow away a description
        a previous successful run wrote.
 
-    A store that predates the settings record simply yields ``None`` at tier 1 and
-    the behaviour is byte-identical to before.
+    A store with no settings record yields ``None`` at tier 1 and falls through.
     """
     try:
         settings = store.get_project_settings(slug)
@@ -375,6 +404,53 @@ def _resolve_project_desc(store: Any, slug: str, *, repo_url: str, platform: str
         if existing is not None and existing.desc:
             desc = existing.desc
     return desc
+
+
+def _resolve_index_fingerprint(ctx: Any) -> IndexFingerprint | None:
+    """The fingerprint THIS run's graph phase stamped on the job, or ``None``.
+
+    A READ-ONLY copy, never a re-probe: ``build_graph_core`` is the only place
+    that computes an ``IndexFingerprint`` — it stamps ``IndexingJob.fingerprint``
+    at the moment it actually builds the graph, not here. Re-probing live at
+    finalize would answer "what is available NOW", not "what built the
+    artifacts actually in the store" — the two disagree exactly when a resume
+    skipped the ``graph`` phase (``ResumePlan.should_skip("graph")``) because
+    an earlier invocation of this SAME job already built it; that earlier
+    invocation's stamp survives on the job record because a resume reuses the
+    same ``job_id``, so reading it here (rather than re-deriving) is what
+    makes the fingerprint describe the graph that is actually persisted.
+
+    Shared between ``wiki_finalize`` AND ``GraphOnlyIndexer`` — the same
+    read-preserve seam ``_resolve_project_desc`` already is for ``desc`` — so
+    the two ``Project`` write sites can never disagree about where a
+    fingerprint comes from.
+
+    ``None`` is a legitimate answer, not a failure: a job whose stamp was lost
+    to ``update_job``'s unlocked read-modify-write (a concurrent Cancel, most
+    commonly) simply never recorded one. A ``Project`` with no fingerprint reads exactly the
+    same as one with a mismatched one downstream — "cannot compare, full
+    rebuild" — never a silent match.
+    """
+    job = ctx.store.get_job(ctx.job_id)
+    return job.fingerprint if job is not None else None
+
+
+def _resolve_graph_resolution(ctx: Any) -> GraphResolution | None:
+    """The resolver outcome THIS run's graph phase stamped, or ``None``.
+
+    The same read-preserve seam as :func:`_resolve_index_fingerprint`, for the
+    same reason and with the same failure mode. ``build_graph_core`` writes the
+    project row directly when it finishes, but ``Project`` is constructed
+    WHOLESALE here — so without this read a first index would persist no
+    outcome at all (no row existed to update), and every re-index would
+    overwrite a good one back to ``None``.
+
+    ``None`` stays a legitimate answer: a resume that skipped the ``graph``
+    phase, or a lost ``update_job`` patch. It reads downstream as "unknown",
+    never as "resolution was fine".
+    """
+    job = ctx.store.get_job(ctx.job_id)
+    return job.resolution if job is not None else None
 
 
 def _fetch_description(
@@ -457,23 +533,39 @@ def _detect_grounder(clone_dir: Any) -> bool:
 
 
 def _graph_is_populated(ctx: Any) -> bool:
-    """True iff the code graph holds at least one node for ``ctx.slug``.
+    """True iff THIS job's commit built at least one node for ``ctx.slug``.
 
-    The completion-correctness gate: "completed without creating the graph" is a
-    failure. The two failure shapes are NOT the same question, and conflating
-    them is what made this gate toothless:
+    Scoped to ``ctx.commit_sha``, and that is the whole point of the gate. Read
+    unscoped it asked "has any commit ever built a graph for this slug", which
+    a re-index of a previously-indexed repo answers ``True`` for before doing
+    any work — so the gate passed precisely in the case it exists to catch. A
+    job with no commit stamped (a commit-less catalog path) has one generation,
+    so the union is that generation and ``every()`` is the honest scope.
+
+    The two failure shapes are NOT the same question, and conflating them makes
+    this gate toothless:
 
     - ``NotImplementedError`` — the graph BACKEND is absent, by design, on a
       lean graph-less install. That is a known capability gap rather than
       uncertainty, and a BM25-only wiki must still be allowed to finalize.
     - Anything else — the read did not happen, so nothing here knows whether the
-      graph is populated. That now fails CLOSED. It used to return ``True``,
-      which let a transient store error launder an unverified (possibly empty)
-      graph into a ``complete`` index. Refusing costs one re-drive; the recovery
-      path re-runs finalize once the store answers again.
+      graph is populated. That fails CLOSED: answering ``True`` would let a
+      transient store error launder an unverified (possibly empty) graph into a
+      ``complete`` index. Refusing costs one re-drive; the recovery path re-runs
+      finalize once the store answers again.
     """
+    from mewbo_graph.wiki.types import CommitScope  # noqa: PLC0415
+
+    commit = getattr(ctx, "commit_sha", None)
     try:
-        return bool(ctx.store.query_graph(ctx.slug))
+        if commit:
+            # ``count_graph_nodes`` is the purpose-built commit-scoped counter
+            # the resume skip predicate already keys on, so the gate and the
+            # skip decision cannot disagree about what "this commit built a
+            # graph" means — and it answers with a count instead of
+            # materialising every node just to test non-emptiness.
+            return ctx.store.count_graph_nodes(ctx.slug, commit_sha=commit) > 0
+        return bool(ctx.store.query_graph(ctx.slug, scope=CommitScope.every()))
     except NotImplementedError:
         return True  # graph backend absent by design — don't block finalize
     except Exception as exc:
@@ -552,6 +644,8 @@ __all__ = [
     "_fetch_description",
     "_resolve_description",
     "_resolve_project_desc",
+    "_resolve_index_fingerprint",
+    "_resolve_graph_resolution",
     "_detect_grounder",
     "_graph_is_populated",
     "_reap_clone_dir",

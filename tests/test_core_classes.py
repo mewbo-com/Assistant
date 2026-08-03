@@ -77,7 +77,7 @@ def test_internal_tool_ids_do_not_log_validation_errors(monkeypatch):
     directly (update_todos, exit_plan_mode, spawn_agent, ...) — is converted
     to an ``ActionStep`` and lands in the final ``TaskQueue``. None of those
     ids are registered via ``set_available_tools``, so without
-    ``INTERNAL_TOOL_IDS`` every historical step would log a false-positive.
+    ``INTERNAL_TOOL_IDS`` every such step logs a false-positive.
     """
     set_available_tools(["home_assistant_tool"])
     recorder = _RecordingLogger()

@@ -121,7 +121,9 @@
     { "path": "agents/wiki-indexer.md" },
     { "path": "agents/wiki-enricher.md" },
     { "path": "agents/wiki-page-writer.md" },
+    { "path": "agents/wiki-refresh-act.md" },
     { "path": "agents/wiki-qa.md" },
-    { "path": "agents/wiki-qa-probe.md" }
+    { "path": "agents/wiki-qa-probe.md" },
+    { "path": "agents/wiki-qa-fast.md" }
   ]
 }

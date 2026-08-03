@@ -21,6 +21,7 @@ deterministic, and its ``summarize_session`` mirrors the in-worker reality
 with the verbatim ``done_reason``).
 """
 
+import json
 import threading
 
 import pytest
@@ -354,9 +355,9 @@ def test_agent_done_carries_evidence_and_marks_dead_ends(store, monkeypatch):
 def test_synthesis_confidence_and_sources_from_probes(store, monkeypatch):
     """Confidence/sources_count derive from data-bearing probes, not a fixture.
 
-    Regression: ``_settle`` left both at the schema defaults, so every live
-    run rendered ``0%`` / ``0 sources`` next to a real cited answer. They now come
-    from the trace: 1 of 2 probes returned evidence ⇒ confidence 0.5, 1 source.
+    Leaving both at the schema defaults renders ``0%`` / ``0 sources`` next to
+    a real cited answer. ``_settle`` derives them from the trace: 1 of 2 probes
+    returned evidence ⇒ confidence 0.5, 1 source.
     """
     _enable_scg(monkeypatch)
     OrchestratedSearchRunner().start(
@@ -462,9 +463,8 @@ def test_explicit_model_override_wins_over_tier(store, monkeypatch):
 def test_scg_search_playbook_is_skill_instructions(store, monkeypatch):
     """The scg-search playbook IS delivered as the trusted skill_instructions.
 
-    Regression: the runner used to call ``run_sync`` without
-    ``skill_instructions``, asking a generic agent to "proceed per the
-    scg-search playbook" it had never seen.
+    Calling ``run_sync`` without ``skill_instructions`` asks a generic agent to
+    "proceed per the scg-search playbook" it has never seen.
     """
     _enable_scg(monkeypatch)
     runtime = FakeRuntime(_ok_transcript())
@@ -606,10 +606,10 @@ def test_agent_error_maps_to_error_terminal(store, monkeypatch):
 def test_non_success_done_reason_never_completes(store, monkeypatch, done_reason):
     """Non-success terminals settle ``failed`` — never coerced to completed.
 
-    Regression: ``_terminal`` used to re-derive status from the raw completion
-    payload and mapped these ``done_reason`` values to ``completed`` —
-    drifting from ``summarize_session`` (the engine's single status
-    chokepoint), which classes them awaiting_approval/incomplete/failed.
+    Re-deriving status from the raw completion payload maps these
+    ``done_reason`` values to ``completed``, drifting from
+    ``summarize_session`` (the engine's single status chokepoint), which classes
+    them awaiting_approval/incomplete/failed.
     """
     _enable_scg(monkeypatch)
     transcript = [_completion("partial text", done_reason=done_reason)]
@@ -890,6 +890,217 @@ def test_run_stats_derives_tokens_and_tool_calls(store, monkeypatch):
     # setup_ms = created_at→first user event; search_ms = total − setup.
     assert stats.setup_ms is not None
     assert stats.search_ms is not None
+
+
+def test_run_stats_probes_rejected_zero_when_no_refusals(store, monkeypatch):
+    """No ``spawn_agent``/``spawn_agents`` tool_result events ⇒ stays 0, not None.
+
+    The additive field defaults honestly for every transcript that never named
+    a refusal — existing consumers of ``probes`` alone see no behavior change.
+    """
+    _enable_scg(monkeypatch)
+    OrchestratedSearchRunner().start(
+        _run(store), _ws(), store=store, runtime=FakeRuntime(_ok_transcript())
+    )
+    stats = store.get_run("run-1").payload.stats
+    assert stats is not None
+    assert stats.probes == 2
+    assert stats.probes_rejected == 0
+
+
+def test_run_stats_probes_rejected_counts_refused_single_spawns(store, monkeypatch):
+    """A PERMANENT ``spawn_agent`` refusal leaves ONLY a tool_result.
+
+    Admission refusal (core ``spawn_agent.py``: ``_emit_event`` for the
+    ``sub_agent`` "start" runs AFTER registration, which only happens once a
+    spawn is accepted) means a refused probe never earns a ``sub_agent`` event
+    at all — ``len(trace)`` alone reports exactly the ONE admitted probe and
+    gives no sign a second was ever attempted. Two ``spawn_agent`` calls: one
+    admitted (its lifecycle follows normally) and one PERMANENTLY refused —
+    reported as ``_SpawnOutcome.report()``'s structured envelope
+    ``{"error": {"code", "message", "permanence"}}``, still ``success: True``
+    on the tool_result since the tool itself didn't raise. Capacity no longer
+    produces this shape at all (an over-subscribed spawn now waits instead);
+    the codes that do are project/agent-type/model resolution failures.
+    """
+    _enable_scg(monkeypatch)
+    transcript = [
+        {"type": "user", "ts": utc_now_iso(), "payload": {"text": "query"}},
+        _tool_result(
+            "spawn_agent",
+            result=json.dumps(
+                {
+                    "agent_id": "probe-a",
+                    "status": "submitted",
+                    "task": "probe github",
+                    "message": "Agent spawned.",
+                }
+            ),
+        ),
+        _sub_agent("probe-a", "start", detail="probe github#search"),
+        _sub_agent(
+            "probe-a",
+            "stop",
+            detail="completed",
+            status="completed",
+            summary="EVIDENCE (pathway: github#search): found.",
+        ),
+        _tool_result(
+            "spawn_agent",
+            result=json.dumps(
+                {
+                    "error": {
+                        "code": "unresolvable_project",
+                        "message": "sub-agent not spawned — no such project 'nonexistent'",
+                        "permanence": "permanent",
+                    }
+                }
+            ),
+        ),
+        _completion("One match. [github#search]"),
+    ]
+    OrchestratedSearchRunner().start(
+        _run(store), _ws(), store=store, runtime=FakeRuntime(transcript)
+    )
+    record = store.get_run("run-1")
+    stats = record.payload.stats
+    assert stats is not None
+    assert stats.probes == 1  # only the admitted probe earned a lane
+    assert stats.probes_rejected == 1  # the refusal is NOT silently dropped
+    # Intended = probes + probes_rejected; started (`probes`) alone never
+    # changes meaning, and confidence stays over what actually ran — refused
+    # attempts are excluded, never diluting the ratio (they gathered no
+    # evidence to average in; see AnswerSynthesis.confidence).
+    assert stats.probes + stats.probes_rejected == 2
+    assert record.payload.answer.confidence == 1.0  # 1/1 data-bearing probes RUN
+
+
+def test_run_stats_probes_rejected_counts_batch_spawn_envelope(store, monkeypatch):
+    """``spawn_agents`` (batch fan-out) carries its own honest ``rejected`` tally.
+
+    The batch envelope is ALWAYS one JSON object — the ``rejected`` count it
+    already computes (entries that never RESOLVED — project/agent-type/model
+    failures, never a capacity wait, which the scheduler now accepts and
+    defers instead of refusing) is read straight off it rather than
+    re-derived, so accounting stays correct whichever fan-out shape a future
+    playbook uses. Mirrors the real shape: ``accepted``/``dispatched``/
+    ``deferred`` cover what the scheduler did with the accepted entries;
+    ``rejected`` is exclusively permanent resolution failures.
+    """
+    _enable_scg(monkeypatch)
+    transcript = [
+        {"type": "user", "ts": utc_now_iso(), "payload": {"text": "query"}},
+        _tool_result(
+            "spawn_agents",
+            result=json.dumps(
+                {
+                    "kind": "agent_batch",
+                    "text": "Accepted 1/3 agent(s); 2 refused — see 'code'/'reason'.",
+                    "agents": [
+                        {"index": 0, "agent_id": "probe-a", "status": "submitted",
+                         "task": "probe github"},
+                        {"index": 1, "agent_id": None, "status": "rejected",
+                         "task": "probe linear",
+                         "code": "unknown_agent_type",
+                         "reason": "ERROR: Unknown agent type 'not-a-real-type'"},
+                        {"index": 2, "agent_id": None, "status": "rejected",
+                         "task": "probe jira",
+                         "code": "unresolvable_project",
+                         "reason": "ERROR: sub-agent not spawned — no such project"},
+                    ],
+                    "agent_ids": ["probe-a", None, None],
+                    "accepted": 1,
+                    "spawned": 1,
+                    "dispatched": 1,
+                    "deferred": 0,
+                    "rejected": 2,
+                }
+            ),
+        ),
+        _sub_agent("probe-a", "start", detail="probe github#search"),
+        _sub_agent(
+            "probe-a",
+            "stop",
+            detail="completed",
+            status="completed",
+            summary="EVIDENCE (pathway: github#search): found.",
+        ),
+        _completion("One match. [github#search]"),
+    ]
+    OrchestratedSearchRunner().start(
+        _run(store), _ws(), store=store, runtime=FakeRuntime(transcript)
+    )
+    stats = store.get_run("run-1").payload.stats
+    assert stats is not None
+    assert stats.probes == 1
+    assert stats.probes_rejected == 2
+    assert stats.probes + stats.probes_rejected == 3
+
+
+def test_run_stats_probes_rejected_excludes_timeouts_and_deferred_waits(store, monkeypatch):
+    """A tool-call TIMEOUT and a scheduler DEFERRAL are NOT refusals.
+
+    Treating "the result doesn't parse as an accepted ``{agent_id, status}``
+    object" as a refusal silently counts the
+    loop's own per-tool-call timeout string (``"ERROR: Tool 'spawn_agent'
+    timed out after 120.0s"`` — the probe WAS admitted and started, it just
+    ran long) as a rejection. It would have kept doing so even after capacity
+    stopped refusing anything, becoming a mislabelled timeout counter instead
+    of trending to zero. Three ``spawn_agent`` calls: one normal accept, one
+    that times out (a bare non-JSON ``ERROR: ...`` string with no ``error``
+    envelope), and one accepted-but-DEFERRED by the scheduler (still a JSON
+    ``{agent_id, status: "submitted"}`` object, no ``code`` — capacity no
+    longer refuses, it waits). None of the three should count as refused.
+    """
+    _enable_scg(monkeypatch)
+    transcript = [
+        {"type": "user", "ts": utc_now_iso(), "payload": {"text": "query"}},
+        _tool_result(
+            "spawn_agent",
+            result=json.dumps(
+                {"agent_id": "probe-a", "status": "submitted", "task": "probe github"}
+            ),
+        ),
+        _sub_agent("probe-a", "start", detail="probe github#search"),
+        _sub_agent(
+            "probe-a",
+            "stop",
+            detail="completed",
+            status="completed",
+            summary="EVIDENCE (pathway: github#search): found.",
+        ),
+        # A per-tool-call timeout — the LOOP's own `_get_tool_timeout` ceiling,
+        # unrelated to admission. Plain string, never JSON.
+        _tool_result(
+            "spawn_agent",
+            result="ERROR: Tool 'spawn_agent' timed out after 120.0s",
+        ),
+        # Accepted but DEFERRED by the AgentQueue scheduler — still a real
+        # agent_id + "submitted", it just waits for a slot; it earns its own
+        # sub_agent lifecycle exactly like an immediately-dispatched probe.
+        _tool_result(
+            "spawn_agent",
+            result=json.dumps(
+                {"agent_id": "probe-b", "status": "submitted", "task": "probe linear"}
+            ),
+        ),
+        _sub_agent("probe-b", "start", detail="probe linear#search"),
+        _sub_agent(
+            "probe-b",
+            "stop",
+            detail="completed",
+            status="completed",
+            summary="EVIDENCE (pathway: linear#search): found.",
+        ),
+        _completion("Two matches. [github#search][linear#search]"),
+    ]
+    OrchestratedSearchRunner().start(
+        _run(store), _ws(), store=store, runtime=FakeRuntime(transcript)
+    )
+    stats = store.get_run("run-1").payload.stats
+    assert stats is not None
+    assert stats.probes == 2  # both admitted probes earned a lane
+    assert stats.probes_rejected == 0  # neither the timeout nor the defer counts
 
 
 def test_coordinator_lane_appended_to_trace(store, monkeypatch):

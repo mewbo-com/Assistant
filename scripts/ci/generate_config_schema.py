@@ -2,12 +2,27 @@
 """Generate JSON Schema from the AppConfig Pydantic model.
 
 Performs an AST pre-check to verify that the AppConfig class exists in the
-source file before importing it.  Writes the schema to ``configs/app.schema.json``
-and exits with code 0 (unchanged) or 1 (updated / error).
+source file before importing it.  Writes the schema to ``configs/app.schema.json``.
+
+Exit codes (matched with ``generate_openapi_spec.py``):
+
+- ``0`` — the artifact is already current, OR it was rewritten. Rewriting is
+  this script's job, so it is success. Which of the two happened is reported on
+  stdout, where a human or a log reader can see it.
+- non-zero — a genuine error, surfacing as an uncaught traceback.
+
+Conflating "regenerated" with "failed" under one exit code forces every caller
+to mask this script with ``|| true``, which then also swallows real breakage.
+
+``--check`` writes nothing and exits non-zero when the committed artifact would
+change — a local check to run before opening a change, rather than an enforced
+gate. Its non-zero is coarse on purpose: "stale" and "the generator failed"
+share it, so fail closed on it rather than branching on it.
 """
 
 from __future__ import annotations
 
+import argparse
 import ast
 import json
 import sys
@@ -56,6 +71,18 @@ def _generate_schema() -> str:
 # ---------------------------------------------------------------------------
 def main() -> int:
     """Generate the AppConfig JSON schema and write it to disk."""
+    parser = argparse.ArgumentParser(
+        description="Generate configs/app.schema.json from the AppConfig model."
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Write nothing; exit non-zero if the committed schema is stale.",
+    )
+    args = parser.parse_args()
+
+    # Errors below are deliberately left to propagate: an uncaught traceback is
+    # the non-zero exit that tells a caller the artifact was never produced.
     _ast_check()
     new_schema = _generate_schema()
 
@@ -65,10 +92,15 @@ def main() -> int:
             print(f"Schema unchanged: {SCHEMA_OUTPUT_PATH}")
             return 0
 
+    if args.check:
+        print(f"Schema STALE: {SCHEMA_OUTPUT_PATH}")
+        print("Regenerate with: uv run python scripts/ci/generate_config_schema.py")
+        return 1
+
     SCHEMA_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     SCHEMA_OUTPUT_PATH.write_text(new_schema, encoding="utf-8")
     print(f"Schema updated: {SCHEMA_OUTPUT_PATH}")
-    return 1
+    return 0
 
 
 if __name__ == "__main__":

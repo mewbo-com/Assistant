@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 from mewbo_graph.wiki.graph import GraphIndex, GraphParseResult
 from mewbo_graph.wiki.store import JsonWikiStore
-from mewbo_graph.wiki.types import IndexingJob
+from mewbo_graph.wiki.types import CommitScope, IndexingJob
 
 KOTLIN_FIXTURE = Path(__file__).parent / "fixtures" / "tiny_kotlin_repo"
 JAVA_FIXTURE = Path(__file__).parent / "fixtures" / "tiny_java_repo"
@@ -99,13 +99,12 @@ def test_kotlin_object_and_companion_subkind(graph):
 def test_kotlin_nested_named_object_inside_anonymous_companion(graph, tmp_path):
     """A named object nested inside an anonymous companion must NOT swap names.
 
-    Regression: `_pair_defs_with_names` used to walk `names` with a single
-    left-to-right pointer, so the OUTER (anonymous companion) def — whose
-    wider byte range also contains the INNER def's own name token — grabbed
-    "Inner" first, leaving the inner object to fall back to "Companion". The
-    fix picks the TIGHTEST containing def per name token (same algorithm as
-    `_subkinds_for`), so nesting can no longer swap names between two real
-    nodes.
+    Walking `names` with a single left-to-right pointer lets the OUTER
+    (anonymous companion) def — whose wider byte range also contains the INNER
+    def's own name token — grab "Inner" first, leaving the inner object to fall
+    back to "Companion". `_pair_defs_with_names` picks the TIGHTEST containing
+    def per name token (same algorithm as `_subkinds_for`), so nesting cannot
+    swap names between two real nodes.
     """
     src = tmp_path / "nested.kt"
     src.write_text(
@@ -134,9 +133,10 @@ def test_kotlin_property_nodes_top_level_and_member_only(graph):
     # (User) and radius (Circle) are PRIMARY-CONSTRUCTOR val/var properties
     # (`class_parameter`, a different grammar node — see
     # test_kotlin_primary_constructor_properties); greeter is HomeScreen's
-    # constructor-promoted property.
+    # constructor-promoted property; LIGHT/DARK are Mode's enum entries.
     assert names == {
         "VERSION", "defaultMode", "title", "mode", "id", "name", "radius", "greeter",
+        "LIGHT", "DARK",
     }
     # `val handler = { ... }` inside compose.kt's function body is a LOCAL
     # variable, not a field — must not become a graph node.
@@ -172,7 +172,8 @@ def test_kotlin_enum_class_members_after_semicolon(graph, tmp_path):
     )
     result = graph.parse_file(slug="x/y", file_path=src, repo_root=tmp_path)
     assert {n.name for n in result.nodes if n.type == "Method"} == {"label"}
-    assert {n.name for n in result.nodes if n.type == "Property"} == {"tag"}
+    props = {n.name: n.subkind for n in result.nodes if n.type == "Property"}
+    assert props == {"tag": None, "LIGHT": "enum_entry", "DARK": "enum_entry"}
 
 
 def test_kotlin_qualified_supertype_captures_only_final_segment(graph, tmp_path):
@@ -220,10 +221,9 @@ def test_kotlin_extension_function_references_edge(graph):
     ]
     assert len(ext_edges) == 1
     edge = ext_edges[0]
-    # CRITICAL regression guard: the source id must equal the PERSISTED
-    # Function node's id — computed from the def's byte, not the name
-    # token's — mirroring (but not replicating) the pre-existing EXTENDS
-    # block's dangling-source bug.
+    # The source id must equal the PERSISTED Function node's id — computed
+    # from the def's byte, not the name token's. Deriving it from the name
+    # token instead yields a dangling source.
     assert edge.source == shout.node_id
     assert edge.target_name == "String"
 
@@ -239,7 +239,9 @@ def test_build_graph_core_validates_kotlin_fixture(tmp_path, monkeypatch):
         KOTLIN_FIXTURE, "example.com/o/kt", tmp_path, monkeypatch
     )
     assert outcome["result"]["nodeCount"] > 0
-    nodes = outcome["store"].query_graph("example.com/o/kt")
+    nodes = outcome["store"].query_graph(
+        "example.com/o/kt", scope=CommitScope.every()
+    )
     assert any(n.type == "Object" for n in nodes)
     assert any(n.subkind == "data_class" for n in nodes)
 
@@ -299,11 +301,11 @@ def test_java_qualified_extends_captures_final_segment(graph, tmp_path):
 def test_java_multiple_heritage_classes_do_not_cross_contaminate(graph, tmp_path):
     """Two heritage-bearing classes in one file must each keep their OWN target.
 
-    Regression guard: java.scm used to ALSO capture `implements`, which for
-    "extends X implements Y" pushed the subclass:superclass ratio to 1:2 for
-    the single most common Java class shape — the shared per-file 1:1 zip in
-    `graph.py` would then misalign every subsequent heritage-bearing class's
-    edge (this file's ``B`` would have wrongly EXTENDS'd to "Greeter").
+    Capturing `implements` alongside `extends` in java.scm pushes the
+    subclass:superclass ratio to 1:2 for "extends X implements Y", the single
+    most common Java class shape — and the shared per-file 1:1 zip in `graph.py`
+    then misaligns every subsequent heritage-bearing class's edge (this file's
+    ``B`` would wrongly EXTENDS "Greeter").
     """
     src = tmp_path / "Multi.java"
     src.write_text(
@@ -321,6 +323,8 @@ def test_build_graph_core_validates_java_fixture(tmp_path, monkeypatch):
         JAVA_FIXTURE, "example.com/o/java", tmp_path, monkeypatch
     )
     assert outcome["result"]["nodeCount"] > 0
-    nodes = outcome["store"].query_graph("example.com/o/java")
+    nodes = outcome["store"].query_graph(
+        "example.com/o/java", scope=CommitScope.every()
+    )
     assert any(n.subkind == "record" for n in nodes)
     assert any(n.subkind == "enum" for n in nodes)

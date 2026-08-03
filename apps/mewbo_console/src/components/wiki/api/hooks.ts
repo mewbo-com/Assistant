@@ -30,7 +30,7 @@ import {
   submitWizard,
   updateProject,
 } from "./client";
-import type { ProjectSettingsPatch, WizardSubmission } from "./types";
+import type { ProjectSettingsPatch, RefreshMode, WizardSubmission } from "./types";
 
 export function useWikiProjects() {
   return useQuery({
@@ -70,8 +70,8 @@ export function useProjectFreshness(slug: string | null, enabled = true) {
  * a cap kicks in. Pass ``hierarchy`` to fetch the directory-scaffold
  * payload (``Folder`` supernodes) the 3D galaxy collapses on.
  *
- * Backward compatible: the second arg still accepts a bare ``limit``
- * number (legacy call sites), or an options object for ``hierarchy``.
+ * Backward compatible: the second arg accepts a bare ``limit``
+ * number, or an options object for ``hierarchy``.
  */
 export function useKnowledgeGraph(
   slug: string | null,
@@ -291,10 +291,17 @@ export function useBranches(input: { repoUrl: string; token?: string; slug?: str
   });
 }
 
+/**
+ * Queue a re-index. The variable is an OBJECT rather than a bare slug so the
+ * caller can name the {@link RefreshMode} it wants: ``auto`` (the default, and
+ * today's behaviour — try the cheap scoped delta) or ``full`` (rebuild
+ * everything, which is the only path that regenerates documentation).
+ */
 export function useRequestWikiRefresh() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (slug: string) => requestWikiRefresh(slug),
+    mutationFn: ({ slug, mode }: { slug: string; mode?: RefreshMode }) =>
+      requestWikiRefresh(slug, mode),
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ["wiki", "jobs", "active"] });
       qc.invalidateQueries({ queryKey: ["wiki", "projects"] });

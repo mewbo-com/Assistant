@@ -5,7 +5,8 @@
  * header instead.)
  *
  * Left: back-to-all-wikis + repo slug + optional "Maintainer Edited" pill.
- * Right: secondary actions (Edit Wiki / Graph / Copy badge / Settings) shown
+ * Right: secondary actions (Edit Wiki / Outline / Graph / Copy badge /
+ * Settings) shown
  * inline ≥ md and collapsed into a "⋯" menu below md (the `AppDetail`
  * overflow convention); the Copy-link CTA stays inline at every width with a
  * shorter label on narrow screens. The rich Edit-Wiki / Copy-badge surfaces
@@ -31,6 +32,7 @@ import {
   Copy,
   FileText,
   Info,
+  ListTree,
   MoreHorizontal,
   Network,
   Pencil,
@@ -61,7 +63,7 @@ import { buildHref, type PlatformId } from "./router";
 import { canonicalRepoUrl, shortSlug } from "./slug";
 
 interface WikiTopBarProps {
-  /** Canonical slug (``host/owner/repo`` or legacy ``owner/repo``). */
+  /** Canonical slug (``host/owner/repo``, or ``owner/repo`` when no host was recorded). */
   repo?: string;
   /** Persisted repo URL — preferred over slug-derived ``https://host/...``. */
   repoUrl?: string;
@@ -111,11 +113,16 @@ export function WikiTopBar({
 
   const badge = WikiBadge.forPage({ slug: repo, pageId: badgePageId, platform });
   const graphHref = repo ? buildHref({ kind: "graph", slug: repo, platform }) : null;
+  // The textual channel over the same graph — a co-equal entry point, not a
+  // fallback the graph button implies. Kept as its own affordance rather than
+  // folded into "Graph" so a reader who wants the outline (the primary,
+  // always-usable channel) never has to open the spatial view first to find it.
+  const outlineHref = repo ? buildHref({ kind: "outline", slug: repo, platform }) : null;
   const repoHref = repo ? canonicalRepoUrl(repo, repoUrl) : null;
   // Edit-Wiki and Copy-badge are maintainer chores done at a desk, so they
   // stay off the phone entirely rather than crowding the overflow menu; the
   // menu carries only what a reader plausibly wants on mobile.
-  const hasMobileActions = Boolean(graphHref || (showSettings && repo));
+  const hasMobileActions = Boolean(graphHref || outlineHref || (showSettings && repo));
 
   return (
     <div className="border-b border-[hsl(var(--border))] bg-[hsl(var(--card))]/60 backdrop-blur-sm">
@@ -200,6 +207,26 @@ export function WikiTopBar({
               </Popover>
             )}
 
+            {outlineHref && (
+              <Button
+                variant="ghost"
+                size="sm"
+                asChild
+                aria-label="Open code outline in new tab"
+                title="Code outline"
+              >
+                <a
+                  href={outlineHref}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1.5"
+                >
+                  <ListTree className="h-3.5 w-3.5" />
+                  Outline
+                </a>
+              </Button>
+            )}
+
             {graphHref && (
               <Button
                 variant="ghost"
@@ -271,6 +298,14 @@ export function WikiTopBar({
                   />
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="w-52">
+                  {outlineHref && (
+                    <DropdownMenuItem asChild>
+                      <a href={outlineHref} target="_blank" rel="noreferrer">
+                        <ListTree className="h-3.5 w-3.5 mr-2" />
+                        Open outline
+                      </a>
+                    </DropdownMenuItem>
+                  )}
                   {graphHref && (
                     <DropdownMenuItem asChild>
                       <a href={graphHref} target="_blank" rel="noreferrer">

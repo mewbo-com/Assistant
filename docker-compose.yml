@@ -3,7 +3,7 @@ services:
     image: mongo:7
     restart: unless-stopped
     ports:
-      - "${MONGO_PORT:-27018}:27017"
+      - "${MEWBO_MONGO_PORT:-27018}:27017"
     volumes:
       - mongo-data:/data/db
     environment:
@@ -31,26 +31,38 @@ services:
         BASE_IMAGE: ghcr.io/bearlike/mewbo-base:latest
         WIKI_EXTRAS: "1"
         # scip-python + scip Go CLI for precise Python symbol resolution in the
-        # wiki code-graph indexer. OFF until the indexer shells out to them —
-        # flip to "1" (and rebuild the api image) to provision the ~55 MB pair.
-        SCIP_EXTRAS: "0"
+        # wiki code-graph indexer. ON: the indexer now shells out to them —
+        # `build_graph._apply_resolver` gates on both binaries being on PATH and
+        # degrades to tree-sitter's name-matched edges without them. That
+        # fallback is why this stayed unnoticed at "0": the degraded graph is
+        # fully populated and passes validation, it simply has NO cross-file
+        # edge at all. Turning it off again costs ~55 MB and every "who calls
+        # this" answer. Requires an api image rebuild to take effect.
+        SCIP_EXTRAS: "1"
     network_mode: host
     # Survive a host reboot — without this the api stays DOWN after a crash
     # while mongo/mcp (which have it) come back, so the whole stack looks dead.
     restart: unless-stopped
-    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
-    # Supplementary group so the api process can reach /var/run/docker.sock
-    # (needed by the Web IDE feature's Docker SDK calls). Set DOCKER_GID in
-    # docker.env to your host's docker group GID (`stat -c '%g' /var/run/docker.sock`).
-    group_add:
-      - "${DOCKER_GID:-999}"
-    env_file: docker.env
+    user: "${MEWBO_HOST_UID:-1000}:${MEWBO_HOST_GID:-1000}"
+    # MEWBO_ENV_FILE lets the deployment materialise this file somewhere other
+    # than the repo, so the secrets need not sit in the working tree at all —
+    # redeploy.sh renders them from the secrets manager into a private temp
+    # directory and exports this. It must come from the SHELL: interpolation
+    # cannot read the very file it is being used to locate. Falls back to .env
+    # for a plain local checkout.
+    env_file: ${MEWBO_ENV_FILE:-.env}
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
     depends_on:
       - mongo
     volumes:
-      - ./configs:/app/configs:ro
+      # WRITABLE on purpose: PATCH /api/config (the console's Settings page)
+      # persists app.json back to this directory, so a read-only mount makes
+      # every settings save fail. Mount the DIRECTORY, never app.json as a
+      # single file — a config write renames a temp file over the target, and
+      # renaming over a path that is itself a bind-mount point fails with
+      # EBUSY. The mcp service below keeps :ro; it only ever reads.
+      - ./configs:/app/configs
       - api-data:/app/data
       # Plan-mode scratch dirs live at /tmp/mewbo/plans/<session_id>/.
       # ``/tmp`` is inside the container's writable layer and would be wiped
@@ -60,36 +72,73 @@ services:
       - plans-data:/tmp/mewbo/plans
       # Wiki indexing: git clones survive restarts; wiped only by `docker compose down -v`.
       - wiki-clones:/tmp/mewbo/wiki/clones
-      # Web IDE: Docker SDK needs write access to the socket to create
-      # code-server sibling containers. Deadline files bind-mounted into
-      # each IDE container live under /tmp/mewbo-ide.
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /tmp/mewbo-ide:/tmp/mewbo-ide
-      # Runtime CLI toolbox (gh, tea) — see the volume definition at the bottom.
+      # Mewbo Apps staging: where an app's source is materialized for its
+      # tools to read and write. It lived in the container's writable layer
+      # before this, so it was wiped on every recreate — which the Web IDE
+      # cannot work against, since the broker has to mount the same bytes.
+      # Still re-materializable from the app store on demand, so losing it
+      # costs a restage, never the app.
+      - apps-staging:/tmp/mewbo/apps
+      # Runtime CLI toolbox (gh, tea, models) — see the volume definition at the bottom.
       - mewbo-tools:/opt/mewbo-tools
-      # Project directories and init scripts — add in docker-compose.override.yml
+      # Startup init scripts, SOURCED in filename order by docker/entrypoint.sh.
+      # The images bake NONE of these (see Dockerfile.api section 3), so this
+      # mount is how runtime setup arrives — edit or add a script and restart,
+      # no rebuild. Read-only: init reads the host tree, never writes back.
+      # Dropping the mount is a supported degradation, not an error; the
+      # entrypoint treats a missing directory as "no init" and still starts.
+      - ./docker/init.d:/app/docker/init.d:ro
+      # Project directories — add in docker-compose.override.yml
       # (see docker-compose.override.example.yml for the template)
     environment:
       - MEWBO_HOME=/app/data
-      - MEWBO_IDE_STATE_DIR=/tmp/mewbo-ide
+      # Pin the config directory rather than letting it be discovered by
+      # walking up from the working directory. The walk lands here anyway,
+      # but only by accident of where the process starts, and a wrong answer
+      # is SILENT: an unreadable path loads as an empty document, so the
+      # container comes up healthy on built-in defaults — no gateway, no
+      # operator settings, nothing in the log. It is a CONTAINER path, so it
+      # belongs here and not in the env file, which is also injected into
+      # host processes at deploy time where /app/configs does not exist.
+      - MEWBO_CONFIG_DIR=/app/configs
       - MEWBO_WIKI_CLONE_ROOT=/tmp/mewbo/wiki/clones
+      # Pinned rather than left to its default because the IDE broker mounts
+      # the same volume at this exact path, and the two must agree: the api
+      # resolves a workspace here, the broker addresses it as a subpath of the
+      # volume. A default that drifted on one side alone would resolve fine
+      # and then mount nothing.
+      - MEWBO_APPS_ROOT=/tmp/mewbo/apps
       # CLAUDE_PLUGIN_ROOT is set at runtime from plugins.install_path in app.json
-      # (or $MEWBO_HOME/plugins/ by default). Override here or in docker.env
-      # to pin an explicit path.
-      - CLAUDE_PLUGIN_ROOT=${CLAUDE_PLUGIN_ROOT:-}
+      # (or $MEWBO_HOME/plugins/ by default). To pin an explicit path, set it in
+      # .env — which arrives via env_file above.
+      #
+      # It is deliberately NOT listed here. An `environment:` entry takes
+      # precedence over env_file, and `${VAR:-}` interpolates from .env and the
+      # shell but NEVER from an env_file — so `- CLAUDE_PLUGIN_ROOT=${CLAUDE_PLUGIN_ROOT:-}`
+      # resolved to empty and silently discarded the .env value this
+      # comment tells you to set. The image already defaults it to empty, so
+      # nothing needs to restate that here.
+      # Selects BrokerContainerBackend over the local Docker SDK — see the
+      # mewbo-ide service below. Matches the tracked default where api runs
+      # with network_mode: host and reaches the broker's published port over
+      # loopback. A deployment that instead joins api to this project's
+      # `default` bridge network (e.g. to reach mongo without host
+      # networking) should override this to http://mewbo-ide:5128 — see
+      # docker-compose.override.example.yml.
+      - MEWBO_IDE_BROKER_URL=http://127.0.0.1:5128
     # The api is the workhorse — LLM orchestration, agentic wiki indexing
     # (tree-sitter + in-memory graph + embeddings), sub-agent fan-out, Web IDE
-    # management — so it gets the largest envelope. The hard cap still keeps a
+    # requests (proxied to the mewbo-ide broker, never the daemon directly) —
+    # so it gets the largest envelope. The hard cap still keeps a
     # runaway index/leak from OOM-killing the whole host. Bump `memory` if you
     # index very large repos.
     deploy:
       resources:
         limits:
-          memory: 4G
+          memory: 8G
           cpus: '4.0'
         reservations:
           memory: 1G
-          cpus: '1.0'
 
   mewbo-mcp:
     image: ghcr.io/bearlike/mewbo-mcp:latest
@@ -100,11 +149,11 @@ services:
       args:
         BASE_IMAGE: ghcr.io/bearlike/mewbo-base:latest
     network_mode: host
-    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
-    # MASTER_API_TOKEN is read from docker.env (same file the api service uses)
+    user: "${MEWBO_HOST_UID:-1000}:${MEWBO_HOST_GID:-1000}"
+    # MEWBO_MASTER_API_TOKEN is read from .env (same file the api service uses)
     # and must match the api service's value — it is the break-glass token the
     # MCP server accepts and the API validates.
-    env_file: docker.env
+    env_file: ${MEWBO_ENV_FILE:-.env}
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
     depends_on:
@@ -119,13 +168,18 @@ services:
       # api_keys collection. Without this, the MCP server cannot validate any
       # key except the master token.
       - api-data:/app/data
-      # Shared with the api: whichever container starts first fetches gh/tea,
+      # Shared with the api: whichever container starts first fetches the CLIs,
       # the other finds them already present and skips the download.
       - mewbo-tools:/opt/mewbo-tools
+      # Same runtime init contract as the api — nothing is baked into the image,
+      # so this mount is what provisions the forge CLIs and git credentials here.
+      - ./docker/init.d:/app/docker/init.d:ro
     environment:
       - MEWBO_HOME=/app/data
+      # Same reason as the api service above.
+      - MEWBO_CONFIG_DIR=/app/configs
       # Point at the api service. Both services run with network_mode: host
-      # so localhost resolves correctly; use the gunicorn port (API_PORT=5125).
+      # so localhost resolves correctly; use the gunicorn port (MEWBO_API_PORT=5125).
       - MEWBO_API_URL=http://localhost:5125
       - MEWBO_MCP_HOST=0.0.0.0
       - MEWBO_MCP_PORT=5127
@@ -149,7 +203,24 @@ services:
     network_mode: host
     # Survive a host reboot (same gap the api had).
     restart: unless-stopped
-    env_file: docker.env
+    env_file: ${MEWBO_ENV_FILE:-.env}
+    volumes:
+      # Dockerfile.console bakes this script, but NOTHING rebuilds the console
+      # image on a redeploy: redeploy.sh runs the vite build on the host and
+      # force-recreates the container, which starts whatever already carries
+      # the tag. So an edit here reaches the container only via this mount.
+      #
+      # It is the whole console when it drifts. The script writes
+      # runtime-config.js from the environment, and every variable it reads has
+      # a `:-` default — so a stale copy reading a renamed variable does not
+      # fail, it emits `VITE_API_KEY: ""` and a plausible-looking file. The
+      # console then calls the API with no credential and the UI reports
+      # "API token is not provided", which reads as an API fault rather than a
+      # config one.
+      #
+      # Same reasoning as nginx-console.conf: the image's copy is whatever the
+      # last publish baked, so mount the repo's authoritative one.
+      - ./docker/console-entrypoint.sh:/docker-entrypoint.d/90-runtime-config.sh:ro
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
     # Runtime is just nginx serving static assets + proxying — tiny. (The vite
@@ -161,6 +232,113 @@ services:
           cpus: '0.5'
         reservations:
           memory: 64M
+          cpus: '0.1'
+
+  mewbo-ide:
+    image: ghcr.io/bearlike/mewbo-ide:latest
+    pull_policy: build
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ide
+    restart: unless-stopped
+    user: "${MEWBO_HOST_UID:-1000}:${MEWBO_HOST_GID:-1000}"
+    env_file: ${MEWBO_ENV_FILE:-.env}
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+    # Loopback-only, same reasoning as ide-proxy below: this is the ONLY
+    # service in the stack holding /var/run/docker.sock, so it is also the
+    # one that must never be reachable off-host — anyone who can reach it can
+    # ask the daemon to run an arbitrary container as root. `api` reaches it
+    # at 127.0.0.1:5128 either way: on the tracked default, `api` itself runs
+    # with network_mode: host, so 127.0.0.1 is the host's own loopback; if an
+    # override instead joins `api` to this compose project's `default`
+    # bridge network (as it must to reach mongo, and as it does here), the
+    # two share that network and can resolve each other by service name —
+    # `http://mewbo-ide:5128` — instead. Same trade-off `WebIdeConfig.proxy_url`
+    # documents for the ide-proxy readiness probe; see the MEWBO_IDE_BROKER_URL
+    # comment on the api service and docker-compose.override.example.yml.
+    ports:
+      - "127.0.0.1:5128:5128"
+    # Supplementary group so the broker can reach /var/run/docker.sock — MOVED
+    # here from the api service, which no longer touches the daemon at all.
+    # Set MEWBO_DOCKER_GID in .env to your host's docker group GID
+    # (`stat -c '%g' /var/run/docker.sock`).
+    group_add:
+      - "${MEWBO_DOCKER_GID:-999}"
+    volumes:
+      # The only Docker socket mount left in this stack — see the ports
+      # comment above for why that co-location mattered.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Deadline files the container watchdog polls — MOVED here from api.
+      - /tmp/mewbo-ide:/tmp/mewbo-ide
+      # Workspaces the api can resolve but that live in NAMED VOLUMES rather
+      # than on the host: a wiki project's checkout and an app's staged
+      # source. Mounted at the SAME paths the api uses, because the broker
+      # realpath-resolves a requested workspace in its own mount namespace and
+      # a root it cannot see is refused.
+      #
+      # These are also why the workspace mount for such a path must be a
+      # VOLUME mount with a subpath rather than a bind. A bind source is
+      # resolved by the daemon against the HOST, where /tmp/mewbo/wiki/clones
+      # is a different directory holding unrelated leftovers — so a bind would
+      # mount the wrong files and the IDE would open successfully on them.
+      # The broker's MEWBO_IDE_VOLUME_ROOTS maps each path below to its volume.
+      - wiki-clones:/tmp/mewbo/wiki/clones
+      - apps-staging:/tmp/mewbo/apps
+      # Every path named in MEWBO_IDE_ALLOWED_ROOTS must ALSO be bind-mounted
+      # here, read-only, at the IDENTICAL host path — add each one in
+      # docker-compose.override.yml (see docker-compose.override.example.yml
+      # for the pattern). The broker realpath-resolves a requested
+      # workspace_path in its OWN mount namespace to catch a symlink escape,
+      # so a path it cannot see cannot be validated; without the mount, every
+      # launch request 403s even though the path is correctly allowlisted.
+    environment:
+      - MEWBO_IDE_STATE_DIR=/tmp/mewbo-ide
+      # Which of the paths above are named volumes, and which volume each one
+      # is. A workspace under one of these is mounted into the code-server
+      # container as a VOLUME with a subpath, never as a bind — see the
+      # volumes block above for why a bind would silently mount the wrong
+      # directory.
+      #
+      # These are also ALLOWED roots by construction. Unlike a caller-supplied
+      # path, a volume root is operator-declared broker configuration, so
+      # trusting it adds no reachable surface — and requiring it to be
+      # restated in MEWBO_IDE_ALLOWED_ROOTS would make a first-party feature
+      # depend on an operator remembering an env edit. The realpath and
+      # containment checks still run against it unchanged.
+      #
+      # Volume names are project-qualified by compose, so they carry the
+      # project prefix the daemon actually knows them by.
+      - MEWBO_IDE_VOLUME_ROOTS=/tmp/mewbo/wiki/clones=${COMPOSE_PROJECT_NAME:-assistant}_wiki-clones,/tmp/mewbo/apps=${COMPOSE_PROJECT_NAME:-assistant}_apps-staging
+      # MEWBO_IDE_ALLOWED_ROOTS is intentionally NOT listed here — it comes
+      # from `env_file: .env` above. An `environment:` entry takes
+      # precedence over env_file, and `${VAR:-}` interpolates only from the
+      # shell, never from an env_file, so restating it here as
+      # `${MEWBO_IDE_ALLOWED_ROOTS:-}` would silently override the real value
+      # from .env with an empty string. REQUIRED — the broker refuses
+      # to start when it is unset, by design (root CLAUDE.md → Performance
+      # rule 4: a filter with no safe default scope must not default to
+      # "everything"). Colon-separated absolute paths, matching the read-only
+      # mounts above. Set it in .env.
+    healthcheck:
+      test:
+        - "CMD"
+        - "node"
+        - "-e"
+        - "require('http').get('http://127.0.0.1:5128/healthz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # A thin controller: it validates a request, then asks the daemon to do
+    # the actual work — no LLM traffic, no indexing, no session state.
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
           cpus: '0.1'
 
   ide-proxy:
@@ -195,6 +373,11 @@ volumes:
   mongo-data:
   plans-data:
   wiki-clones:
+  # Mewbo Apps staging, shared by api and the IDE broker. Both mount it at
+  # /tmp/mewbo/apps so a workspace the api resolves is a subpath the broker
+  # can address. Safe to drop — an app's source of truth is the store, so
+  # `docker compose down -v` costs a restage, not an app.
+  apps-staging:
   # Runtime CLI toolbox (gh, tea) provisioned by docker/init.d/12-agent-clis.sh.
   # Persisting it is the point: the binaries are fetched once, not on every
   # container start, so a cold start needs no network once warm. Safe to drop —

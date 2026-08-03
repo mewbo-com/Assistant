@@ -190,10 +190,8 @@ def cache_monitor(func: Callable[Concatenate[SelfT, P], R]) -> Callable[Concaten
         ]
         forbidden_substrings = ["example_camera_motion"]
         self.cache["sensor"] = []
-        # Clean entities
         self.cache = clean_entities(self, forbidden_prefixes, forbidden_substrings)
 
-        # Clean services
         self.cache["services"] = [
             service
             for service in self.cache["services"]
@@ -540,7 +538,6 @@ class HomeAssistant(AbstractTool):
             '"': "",
         }
 
-        # Replace using the dictionary
         for old, new in replacements.items():
             answer = answer.replace(old, new)
 

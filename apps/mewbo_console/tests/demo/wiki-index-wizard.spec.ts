@@ -54,10 +54,13 @@ test("wikiIndexWizard — source, generation, scope steps", async ({ page, demo 
   // toast, no retry). Assert the <select>'s VALUE, not an <option>'s text
   // visibility — a closed native <select>'s <option> children aren't
   // independently laid out, so `getByText(...).toBeVisible()` on one is
-  // unreliable across engines. Branch is the second <select> on this step
-  // (language, then branch — the Model field is a Command popover, not a
-  // native select).
-  const branchSelect = page.locator("select").nth(1);
+  // unreliable across engines. A positional `.nth(1)` (language, then
+  // branch) silently retargets the moment a third <select> lands earlier on
+  // the step — and if THAT control also happened to compute an empty
+  // string, this assertion would stay green while the real branch picker
+  // went unchecked. The `<select>` now carries its own `aria-label`
+  // (`StepGeneration.tsx`) so the locator is immune to ordering.
+  const branchSelect = page.getByLabel("Branch");
   await expect(branchSelect).toHaveValue("");
 
   await demo.capturePage("wikiIndexGeneration");

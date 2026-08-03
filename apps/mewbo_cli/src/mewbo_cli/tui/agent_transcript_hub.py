@@ -39,6 +39,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol
 
+from mewbo_cli.cli_icons import ICONS
 from mewbo_cli.cli_notices import derive_task_outcome
 from mewbo_cli.tui.seams import TranscriptItem
 from mewbo_cli.tui.status.throughput_meter import ThroughputMeter, ThroughputState
@@ -114,6 +115,37 @@ class Spawn:
     depth: int
     agent_type: str | None = None
     status: str = "running"
+
+
+@dataclass
+class SafetyNotice:
+    """A safety-plane disclosure or deny verdict, recorded as a settled entry.
+
+    Mirrors :class:`Spawn`'s minimal shape — plain text + depth, no separate
+    projection helper needed since ``items_for`` and the live sink each build
+    the same one-line ``TranscriptItem("notice", ...)`` directly.
+    """
+
+    kind: ClassVar[str] = "safety_notice"
+    text: str
+    depth: int = 0
+
+
+@dataclass
+class UiPanel:
+    """A model-authored UI panel, recorded as its own settled log entry.
+
+    Carries only the panel's ``alt_text`` — the server-side prose rendering of
+    the component tree. The tree itself is deliberately never read here: a
+    terminal has no renderer for it, and ``alt_text`` exists precisely so a
+    surface can show the panel without learning the component vocabulary.
+    """
+
+    kind: ClassVar[str] = "ui_panel"
+    ui_id: str
+    alt_text: str
+    summary: str
+    depth: int = 0
 
 
 @dataclass
@@ -226,6 +258,10 @@ class RootSink(Protocol):
         """Append a sub-agent spawn marker."""
         ...
 
+    def append_panel(self, item: TranscriptItem) -> None:
+        """Append a settled UI panel (a ``generative_ui`` event's alt text)."""
+        ...
+
     def set_status(self, label: str) -> None:
         """Update the foot activity label to reflect the live step."""
         ...
@@ -245,6 +281,9 @@ class _NullSink:
 
     def spawn(self, item: TranscriptItem) -> None:
         """Discard the spawn marker."""
+
+    def append_panel(self, item: TranscriptItem) -> None:
+        """Discard the UI panel."""
 
     def set_status(self, label: str) -> None:
         """Discard the status label."""
@@ -434,6 +473,12 @@ class AgentTranscriptHub:
                             {"text": f"⇣ spawned agent {label}", "depth": entry.depth + 1},
                         )
                     )
+                elif isinstance(entry, UiPanel):
+                    items.append(self._ui_panel_item(entry))
+                elif isinstance(entry, SafetyNotice):
+                    items.append(
+                        TranscriptItem("notice", {"text": entry.text, "depth": entry.depth})
+                    )
             return items
 
     # -- bus observer -----------------------------------------------------
@@ -474,8 +519,12 @@ class AgentTranscriptHub:
             self._on_sub_agent(payload)
         elif etype == "todos":
             self._on_todos(payload)
+        elif etype == "generative_ui":
+            self._on_generative_ui(payload)
         elif etype == "completion":
             self._on_completion(payload)
+        elif etype == "safety_plane":
+            self._on_safety_plane(payload)
 
     # -- pre_tool_use hook (the FleetBridge seam) -------------------------
 
@@ -718,6 +767,74 @@ class AgentTranscriptHub:
                 if target.depth == 0:
                     self._sink_spawn(marker)
 
+    def _on_generative_ui(self, payload: dict[str, Any]) -> None:
+        """Fold a ``generative_ui`` event into the emitting agent's log.
+
+        The payload carries NO ``agent_id``/``depth`` (the event's frozen wire
+        shape is ``{ui_id, session_id, spec, alt_text, summary}``), so the panel
+        is attributed to the CURRENT agent — the same fallback ``tool_started``
+        uses for the equally attribution-free ``pre_tool_use`` hook. An empty
+        ``alt_text`` is dropped rather than rendered as a blank block: a panel
+        that degrades to nothing is worse than no panel, because it reads as a
+        rendering failure.
+        """
+        alt_text = payload.get("alt_text")
+        if not isinstance(alt_text, str) or not alt_text.strip():
+            return
+        target = self._agents.get(self._current_agent_id) if self._current_agent_id else None
+        if target is None:
+            target = self._get("root", 0)
+        panel = UiPanel(
+            ui_id=str(payload.get("ui_id") or ""),
+            alt_text=alt_text,
+            summary=str(payload.get("summary") or ""),
+            depth=target.depth,
+        )
+        # A panel is settled content, so it closes the open narration span the
+        # same way a spawn marker does — otherwise it would land INSIDE the
+        # streaming markdown slot and be overwritten by the next delta.
+        self._close_span(target)
+        target.entries.append(panel)
+        if target.depth == 0:
+            self._sink_ui_panel(panel)
+
+    def _on_safety_plane(self, payload: dict[str, Any]) -> None:
+        """Fold a ``safety_plane`` disclosure/deny event into the current agent's log.
+
+        Carries no ``agent_id``/``depth`` (same frozen wire shape as
+        ``generative_ui``), so it is attributed to the CURRENT agent with the
+        same root fallback. Disclosure lists what is active BEFORE anything
+        runs; a deny names the rule and reason that stopped a call or the run —
+        this is the one surface a user reading the terminal actually sees it.
+        """
+        phase = payload.get("phase")
+        target = self._agents.get(self._current_agent_id) if self._current_agent_id else None
+        if target is None:
+            target = self._get("root", 0)
+        if phase == "disclosed":
+            rules = payload.get("rules")
+            if not isinstance(rules, list) or not rules:
+                return
+            lines = [
+                f"  - {r.get('name')}: {r.get('inspects')}"
+                for r in rules
+                if isinstance(r, dict)
+            ]
+            text = "🛡 Safety plane active — inspects tool calls before they run:\n" + "\n".join(
+                lines
+            )
+        elif phase == "deny":
+            rule = payload.get("rule") or "unknown"
+            reason = payload.get("reason") or ""
+            text = f"🛡 Blocked by safety policy '{rule}': {reason}".rstrip()
+        else:
+            return
+        notice = SafetyNotice(text=text, depth=target.depth)
+        self._close_span(target)
+        target.entries.append(notice)
+        if target.depth == 0:
+            self._sink_safety_notice(notice)
+
     def _on_todos(self, payload: dict[str, Any]) -> None:
         # The authoritative live todo list (``update_todos`` → ``todos`` event).
         # Re-emitted in FULL each call, so the latest event fully replaces the
@@ -757,7 +874,7 @@ class AgentTranscriptHub:
             # (including a park like ``awaiting_approval``), so it always
             # marks this stamp — not just when the result happens to land in
             # the hypervisor's 4-state vocabulary (``_TERMINAL_STATES``),
-            # which ``root.status`` no longer speaks now that it carries the
+            # which ``root.status`` does not speak — it carries the
             # session-status vocabulary instead.
             if root.stopped_at is None:
                 root.stopped_at = self._clock()
@@ -845,6 +962,21 @@ class AgentTranscriptHub:
         return TranscriptItem("tool", payload)
 
     @staticmethod
+    def _ui_panel_item(entry: UiPanel) -> TranscriptItem:
+        """Project a :class:`UiPanel` to its renderable item.
+
+        ONE projection shared by the live root sink and the drill-in view, so a
+        panel reads identically in both — the same reason ``_tool_item`` exists.
+        Rendered as a ``notice``: the panel is settled, non-prose content, which
+        is exactly what that kind already carries (the spawn marker's precedent),
+        so this needs no new renderer, kind or widget.
+        """
+        heading = f"{ICONS.panel} {entry.summary or 'panel'}"
+        return TranscriptItem(
+            "notice", {"text": f"{heading}\n{entry.alt_text}", "depth": entry.depth}
+        )
+
+    @staticmethod
     def _card_id(entry: ToolCall) -> str:
         return f"c{id(entry)}"
 
@@ -875,6 +1007,14 @@ class AgentTranscriptHub:
             "notice", {"text": f"⇣ spawned agent {label}", "depth": marker.depth + 1}
         )
         self._enqueue_sink(lambda: self._sink.spawn(item))
+
+    def _sink_ui_panel(self, panel: UiPanel) -> None:
+        item = self._ui_panel_item(panel)
+        self._enqueue_sink(lambda: self._sink.append_panel(item))
+
+    def _sink_safety_notice(self, notice: SafetyNotice) -> None:
+        item = TranscriptItem("notice", {"text": notice.text, "depth": notice.depth})
+        self._enqueue_sink(lambda: self._sink.append_panel(item))
 
     def _sink_set_status(self, label: str) -> None:
         self._enqueue_sink(lambda: self._sink.set_status(label))

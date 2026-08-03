@@ -35,9 +35,9 @@ def client_and_key(tmp_path):
 
 def test_list_reaches_the_controller(client_and_key):
     client, key = client_and_key
-    # A 200 (not 500) proves the controller IS injected into the Resource — the
-    # regression guard for the `@ns.route` + `add_resource` double-registration
-    # that left the controller un-injected and 500'd every apps request.
+    # A 200 (not 500) proves the controller IS injected into the Resource. A
+    # `@ns.route` + `add_resource` double-registration leaves it un-injected and
+    # 500s every apps request.
     resp = client.get("/api/apps", headers={"X-API-Key": key})
     assert resp.status_code == 200
     assert resp.get_json() == {"apps": []}
@@ -82,10 +82,31 @@ def test_sdk_loaded_into_controller_at_startup():
 
 
 def test_pipeline_runner_wired_at_startup():
-    # Phase 2: init_apps hands the SAME AppPipelineRunner the fire seam
-    # and the run_pipeline tool use to the controller, so GET/POST
-    # .../pipelines/<name> executes for real instead of degrading to the
-    # unwired 503 — a regression guard mirroring test_submitter_wired_at_startup.
+    # init_apps must hand the SAME AppPipelineRunner the fire seam and the
+    # run_pipeline tool use to the controller, or GET/POST .../pipelines/<name>
+    # degrades to the unwired 503. Mirrors test_submitter_wired_at_startup.
     from mewbo_api.apps.pipeline_runner import AppPipelineRunner
 
     assert isinstance(apps_routes._controller.runner, AppPipelineRunner)
+
+
+def test_pipeline_ledger_wired_and_PAIRED_with_the_registered_runner():
+    """An unregistered or unpaired ledger silently reverts ``run_pipeline`` to the
+    no-ledger path and re-opens the defect: the run writes no ``PipelineRun`` row, so
+    ``last_run_status`` never advances and the model reads an earlier run as its own.
+
+    The pairing half is the assertion that matters, and it is the one a warning cannot
+    replace. ``RunPipelineTool._paired_ledger`` uses the registered ledger ONLY when
+    ``ledger.pipeline_runner is`` the runner the call resolved — a ledger executes
+    through the runner IT holds, so an unpaired one would run a different executor.
+    Its refusal is a log line and an unledgered run, i.e. a failure indistinguishable
+    from the bug. ``init_apps`` registers the runner and then builds the tracker around
+    that same instance; this pins that the composition root actually does so.
+    """
+    from mewbo_api.apps.plugin.runtime import current_pipeline_ledger, current_pipeline_runner
+
+    ledger = current_pipeline_ledger()
+    assert ledger is not None, "init_apps must register the pipeline-run ledger"
+    # Identity, matching the predicate — an equal-but-distinct runner is still inert.
+    assert ledger.pipeline_runner is current_pipeline_runner()
+    assert ledger.pipeline_runner is apps_routes._controller.runner

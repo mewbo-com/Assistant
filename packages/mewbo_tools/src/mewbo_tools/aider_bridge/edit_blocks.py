@@ -116,7 +116,7 @@ def apply_search_replace_blocks(
 
     for edit in edits:
         try:
-            target_path = resolve_safe_path(edit.path, root=str(root_path))
+            target_path = resolve_safe_path(edit.path, root=str(root_path), write=write)
         except ValueError as exc:
             raise EditBlockApplyError(str(exc)) from exc
         exists = file_exists.get(target_path)

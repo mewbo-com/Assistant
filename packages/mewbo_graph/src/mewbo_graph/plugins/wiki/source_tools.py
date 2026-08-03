@@ -135,7 +135,11 @@ class WikiSourceAccess:
         ctx = resolve_qa_ctx(session_id, runtime) if runtime else None
         if ctx is None:
             return _err_result("internal", "wiki QA ctx not found for this session")
-        clone_dir = resolve_qa_clone_dir(ctx.slug, ctx.store)
+        # ``session_id`` is what lets a session bound to a LIVE indexing job
+        # read its own checkout rather than the last completed index's — see
+        # ``resolve_qa_clone_dir``. A genuine QA session has no job, so it
+        # falls through to the completed-job rule unchanged.
+        clone_dir = resolve_qa_clone_dir(ctx.slug, ctx.store, session_id=ctx.session_id)
         if clone_dir is None:
             return _err_result(
                 "not_found",

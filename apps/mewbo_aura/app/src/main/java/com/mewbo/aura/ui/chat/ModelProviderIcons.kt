@@ -16,7 +16,7 @@ import com.mewbo.aura.R
  * gradient variants: DESIGN.md's theme discipline wants a themed tint, not a baked brand hex.
  * There is deliberately no bespoke "generic" drawable in this set - an unrecognized model id
  * returns `null` from [iconFor] and the caller falls back to a `material-icons-extended` glyph
- * (orchestrator directive 2026-07-14: no hand-rolled icon when an off-the-shelf one covers the
+ * (orchestrator directive: no hand-rolled icon when an off-the-shelf one covers the
  * case - a brand LOGO still has to be hand-converted since Material has no such thing, but a
  * plain "this is some model" glyph does not).
  */

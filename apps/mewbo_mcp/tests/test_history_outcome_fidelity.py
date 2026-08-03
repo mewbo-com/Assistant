@@ -80,7 +80,7 @@ def test_failed_turn_no_longer_reads_as_a_clean_turn(fake_rest):
 
 
 def test_failure_beside_real_prose_is_reported_without_destroying_the_answer(fake_rest):
-    """The failure row carries no turn metadata, so it used to be skipped whole."""
+    """The failure row carries no turn metadata, so it is easy to skip whole."""
     rows = _turns(
         fake_rest,
         _events(

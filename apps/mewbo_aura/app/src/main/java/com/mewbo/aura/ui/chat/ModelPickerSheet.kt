@@ -1,6 +1,5 @@
 package com.mewbo.aura.ui.chat
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -11,15 +10,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -29,8 +25,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import com.mewbo.aura.data.model.ModelCatalog
+import com.mewbo.aura.ui.common.AuraListBottomSheet
 import com.mewbo.aura.ui.theme.AuraColors
-import com.mewbo.aura.ui.theme.AuraShape
 import com.mewbo.aura.ui.theme.AuraSpacing
 import com.mewbo.aura.ui.theme.AuraType
 
@@ -43,8 +39,18 @@ import com.mewbo.aura.ui.theme.AuraType
  * `models == null` (offline/error - [ChatScreen] already fired the "Couldn't load models" notice
  * via [ChatViewModel.loadModelsIfNeeded] before this ever opens) degrades to a single
  * current-selection row instead of a list; never crashes.
+ *
+ * Rides [AuraListBottomSheet], not a bare `Column`: [ModelCatalog.more] carries whatever
+ * `GET api/models` returned, with no client-side ceiling, so this is the app's canonical
+ * unbounded sheet. The expanded list is the case that used to render past the display with every
+ * row below the fold unreachable — and, with no scroll container to claim the drag past touch
+ * slop, a scroll ATTEMPT would land on a row and silently switch the user's model.
+ *
+ * The expand/collapse `AnimatedVisibility` that used to wrap the extra rows is gone rather than
+ * ported: inside a lazy list it would animate each row independently on expand, and the
+ * per-item alternative introduces motion that would then have to be reduced-motion-gated. The
+ * rows appear directly.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ModelPickerSheet(
     models: ModelCatalog?,
@@ -53,28 +59,21 @@ fun ModelPickerSheet(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(),
-        containerColor = AuraColors.surfaceInput,
-        shape = SheetShape,
-        modifier = modifier,
-    ) {
+    var moreExpanded by remember { mutableStateOf(false) }
+    val more = models?.more().orEmpty()
+
+    AuraListBottomSheet(onDismiss = onDismiss, modifier = modifier) {
         if (models == null) {
-            ModelRow(
-                id = selectedModel ?: "Core",
-                label = selectedModel?.let(ModelCatalog::normalize) ?: "Core",
-                selected = true,
-                onClick = onDismiss,
-            )
-            return@ModalBottomSheet
-        }
-
-        var moreExpanded by remember { mutableStateOf(false) }
-        val more = models.more()
-
-        Column(modifier = Modifier.fillMaxWidth()) {
-            models.popular().forEach { id ->
+            item {
+                ModelRow(
+                    id = selectedModel ?: "Core",
+                    label = selectedModel?.let(ModelCatalog::normalize) ?: "Core",
+                    selected = true,
+                    onClick = onDismiss,
+                )
+            }
+        } else {
+            items(models.popular(), key = { it }) { id ->
                 ModelRow(
                     id = id,
                     label = models.displayName(id),
@@ -84,23 +83,27 @@ fun ModelPickerSheet(
             }
 
             if (more.isNotEmpty()) {
-                MoreModelsRow(expanded = moreExpanded, onClick = { moreExpanded = !moreExpanded })
-                AnimatedVisibility(visible = moreExpanded) {
-                    Column {
-                        more.forEach { id ->
-                            ModelRow(
-                                id = id,
-                                label = models.displayName(id),
-                                selected = models.isSelected(id, selectedModel),
-                                onClick = { onSelect(id) },
-                            )
-                        }
+                item(key = MoreModelsRowKey) {
+                    MoreModelsRow(expanded = moreExpanded, onClick = { moreExpanded = !moreExpanded })
+                }
+                if (moreExpanded) {
+                    items(more, key = { it }) { id ->
+                        ModelRow(
+                            id = id,
+                            label = models.displayName(id),
+                            selected = models.isSelected(id, selectedModel),
+                            onClick = { onSelect(id) },
+                        )
                     }
                 }
             }
         }
     }
 }
+
+/** Stable key for the More/Fewer toggle so it keeps its slot as the list below it grows and
+ * shrinks — a model id can never collide with it. */
+private const val MoreModelsRowKey = "more-models-toggle"
 
 @Composable
 private fun ModelRow(id: String, label: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
@@ -123,7 +126,7 @@ private fun ModelRow(id: String, label: String, selected: Boolean, onClick: () -
             )
         } else {
             // No brand match (unrecognized/self-hosted model id) - material-icons-extended's
-            // generic "spark" glyph, not a hand-drawn fallback (orchestrator directive 2026-07-14).
+            // generic "spark" glyph, not a hand-drawn fallback (orchestrator directive).
             Icon(
                 imageVector = Icons.Filled.AutoAwesome,
                 contentDescription = providerLabel,
@@ -160,8 +163,3 @@ private fun MoreModelsRow(expanded: Boolean, onClick: () -> Unit, modifier: Modi
         Text(text = if (expanded) "Fewer models" else "More models", style = AuraType.sectionHeader)
     }
 }
-
-/** Top corners only, at [AuraShape.radiusBubble] (task brief) - `AuraShape` has no
- * stadium-minus-bottom-corners token, so this composes the existing radius directly rather than
- * adding a one-call-site shape to the shared theme object. */
-private val SheetShape = RoundedCornerShape(topStart = AuraShape.radiusBubble, topEnd = AuraShape.radiusBubble)

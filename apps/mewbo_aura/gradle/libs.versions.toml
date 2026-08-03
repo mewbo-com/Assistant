@@ -25,7 +25,7 @@ turbine = "1.2.1"
 compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
 material3 = { group = "androidx.compose.material3", name = "material3" }
 material-icons-core = { group = "androidx.compose.material", name = "material-icons-core" }
-# Full Material icon set (BOM-managed, frozen 1.7.x line). Added 2026-07-14: the 49-icon core set
+# Full Material icon set (BOM-managed, frozen 1.7.x line). Added because the 49-icon core set
 # lacks funnel/folder/tool glyphs and the design directive is off-the-shelf icons only, never
 # hand-rolled paths. R8 strips unused icons from release; debug carries the full aar.
 material-icons-extended = { group = "androidx.compose.material", name = "material-icons-extended" }

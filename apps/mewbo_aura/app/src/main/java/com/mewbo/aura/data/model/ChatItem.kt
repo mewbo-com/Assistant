@@ -30,7 +30,7 @@ sealed interface ChatItem {
         val text: String,
         val ts: String,
         val pending: Boolean = false,
-        /** Metadata-only files riding this send (attachments wire-up, 2026-07-03) - rendered
+        /** Metadata-only files riding this send (attachments wire-up) - rendered
          * as a right-aligned tile row above the bubble by [com.mewbo.aura.ui.chat.UserBubbleRow].
          * Populated both from the optimistic local echo ([com.mewbo.aura.ui.chat.ChatViewModel.send]'s
          * staged attachments) and from the backend's persisted `user`/`user_steer` event payload on
@@ -114,14 +114,20 @@ sealed interface ChatItem {
      * [callId], upserted in place: created PENDING by a `user_question` event and settled by the
      * matching `user_question_answered` ([TranscriptReducer.foldUserQuestionAnswered]) — even when a
      * DIFFERENT surface answered. [callToken] is presented by the answer POST
-     * ([com.mewbo.aura.data.api.AuraApi.answerQuestion]). [resolution] is `null` while awaiting an
-     * answer (card interactive) and non-null once settled (card read-only, no error residue).
+     * ([com.mewbo.aura.data.api.AuraApi.answerQuestion]). [resolution] is `null` while awaiting the
+     * FIRST answer event (card interactive); it only becomes read-only once
+     * [QuestionResolution.Answered] — [QuestionResolution.RunMovedOn] stays interactive too, since the
+     * run merely stopped waiting, not that the question was resolved. [timeoutSeconds]/
+     * [notesPlaceholder] are the card-level chrome (understated timeout hint, optional group notes
+     * field) carried verbatim off the originating `user_question` payload.
      */
     data class Question(
         val callId: String,
         val callToken: String,
         val questions: List<UiQuestion>,
         val resolution: QuestionResolution?,
+        val timeoutSeconds: Int?,
+        val notesPlaceholder: String?,
         val ts: String,
         override val key: String,
     ) : ChatItem
@@ -176,15 +182,25 @@ data class UiQuestion(
 data class UiQuestionOption(val label: String, val description: String?)
 
 /**
- * How a [ChatItem.Question] settled. [Answered] renders the chosen answers read-only (and, when
- * [answeredVia] names another surface, "answered on <surface>"); [Dismissed]
- * (declined/interrupted/cancelled, or any unknown future outcome) dims the card to "no longer
- * awaiting an answer" with NO error residue (DESIGN.md §6).
+ * How a [ChatItem.Question] card has responded to a `user_question_answered` event. Only [Answered]
+ * is a true settle: it renders the chosen answers read-only (and, when [answeredVia] names another
+ * surface, "answered on <surface>"; when [delivery] is `"message"`, the answer landed as a new chat
+ * message rather than resolving the still-blocked call, so the card says so instead). [RunMovedOn]
+ * (`timed_out`/`declined`/`interrupted`/`cancelled`, or any unknown future outcome) means the RUN
+ * stopped waiting for an answer, NOT that the question was resolved — the card stays exactly as
+ * tappable as the pending state, with honest copy that a submission now arrives as a new message
+ * (DESIGN.md §6: no error residue either way).
  */
 @Immutable
 sealed interface QuestionResolution {
-    data class Answered(val answers: List<UiAnswer>, val answeredVia: String?) : QuestionResolution
-    data class Dismissed(val outcome: String) : QuestionResolution
+    data class Answered(
+        val answers: List<UiAnswer>,
+        val answeredVia: String?,
+        val notes: String? = null,
+        val delivery: String? = null,
+    ) : QuestionResolution
+
+    data class RunMovedOn(val outcome: String) : QuestionResolution
 }
 
 /** One question's chosen answer in a settled [QuestionResolution.Answered] — [selectedIndexes] XOR

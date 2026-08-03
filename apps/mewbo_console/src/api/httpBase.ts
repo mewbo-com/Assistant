@@ -90,11 +90,37 @@ async function parseBody(response: Response): Promise<{ text: string; data: unkn
   return { text, data };
 }
 
+/**
+ * Fold a pydantic-style `errors` array (`[{loc, msg, ...}]`, e.g. a 422
+ * `{"message": "Validation failed", "errors": [...]}` body) into one
+ * `"field: reason"`-joined string. Returns `undefined` when `errors` isn't
+ * shaped like that, so a caller can fall back to whatever else the body has.
+ */
+function validationDetails(errors: unknown): string | undefined {
+  if (!Array.isArray(errors) || errors.length === 0) return undefined;
+  const parts = errors
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") return undefined;
+      const { loc, msg } = entry as Record<string, unknown>;
+      const location = Array.isArray(loc) ? loc.join(".") : undefined;
+      const reason = typeof msg === "string" ? msg : undefined;
+      if (location && reason) return `${location}: ${reason}`;
+      return reason ?? location;
+    })
+    .filter((part): part is string => Boolean(part));
+  return parts.length ? parts.join("; ") : undefined;
+}
+
 function messageFrom(text: string, data: unknown, status: number): string {
   if (data && typeof data === "object") {
     const obj = data as Record<string, unknown>;
-    if (typeof obj.message === "string" && obj.message) return obj.message;
-    if (typeof obj.detail === "string" && obj.detail) return obj.detail;
+    const base =
+      (typeof obj.message === "string" && obj.message) ||
+      (typeof obj.detail === "string" && obj.detail) ||
+      undefined;
+    const details = validationDetails(obj.errors);
+    if (base) return details ? `${base}: ${details}` : base;
+    if (details) return details;
   }
   if (data !== undefined) {
     try {
@@ -110,6 +136,30 @@ function messageFrom(text: string, data: unknown, status: number): string {
 export async function readError(response: Response): Promise<Error> {
   const { text, data } = await parseBody(response);
   return new Error(messageFrom(text, data, response.status));
+}
+
+/**
+ * Extract the human-readable `reason` from the API's structured refusal
+ * envelope (`{"error": {code, reason, retryable}}` — see `apps/mewbo_api/CLAUDE.md`,
+ * "Access control" → "A refusal is a typed exception"). A body in this shape
+ * carries no top-level `message`/`detail`, so `messageFrom` above falls back to
+ * `JSON.stringify(data)` — deliberately, since that is what lets a guard like
+ * `isSessionTerminatedError` re-parse the original shape out of `Error.message`.
+ * A caller that wants the plain string back for DISPLAY re-parses it here
+ * rather than teaching every error path a second, structured code path.
+ */
+export function reasonFrom(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err ?? "");
+  if (!message) return message;
+  try {
+    const parsed = JSON.parse(message) as { error?: { reason?: unknown } };
+    if (typeof parsed?.error?.reason === "string" && parsed.error.reason) {
+      return parsed.error.reason;
+    }
+  } catch {
+    /* not JSON — the message is already the human-readable string */
+  }
+  return message;
 }
 
 /** Read a `Response` as JSON; throws (via `readError`'s message logic) on non-2xx. */

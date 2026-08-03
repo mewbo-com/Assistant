@@ -35,7 +35,7 @@ from mewbo_iam.principal import ADMIN_ROLE
 
 
 class DisabledUserError(Exception):
-    """A previously provisioned user has been disabled — login is refused.
+    """A provisioned user is disabled — login is refused.
 
     Raised, never swallowed: JIT upsert would otherwise re-activate a
     deliberately disabled account on its owner's next login.

@@ -9,16 +9,20 @@ import { useRef, useState } from "react";
 import { composerInputCls, ComposerSendButton, ComposerShell } from "@/components/ui/composer-shell";
 import { cn } from "@/lib/utils";
 
+import type { QaMode } from "./api/types";
 import { ModelPicker } from "./ModelPicker";
+import { QaModeControl } from "./QaModeControl";
 
 interface QADockProps {
   placeholder: string;
   model: string;
   onModelChange: (m: string) => void;
+  mode: QaMode;
+  onModeChange: (mode: QaMode) => void;
   onAsk: (question: string) => void;
 }
 
-export function QADock({ placeholder, model, onModelChange, onAsk }: QADockProps) {
+export function QADock({ placeholder, model, onModelChange, mode, onModeChange, onAsk }: QADockProps) {
   const [value, setValue] = useState("");
   const taRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -67,7 +71,12 @@ export function QADock({ placeholder, model, onModelChange, onAsk }: QADockProps
           )}
         />
       }
-      toolbarLeft={<ModelPicker variant="compact" value={model} onChange={onModelChange} />}
+      toolbarLeft={
+        <div className="inline-flex items-center gap-1">
+          <ModelPicker variant="compact" value={model} onChange={onModelChange} />
+          <QaModeControl value={mode} onChange={onModeChange} />
+        </div>
+      }
       toolbarRight={
         <ComposerSendButton
           onClick={submit}

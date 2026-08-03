@@ -207,16 +207,15 @@ private const val QueuedSendAlpha = 0.7f
 
 /**
  * Assistant reply (spec §6.3/§6.4): bare full-width text, no bubble/surface. Both streaming AND
- * finalized text render through [MarkdownMessage] now (user directive 2026-07-04: streaming shows
- * real markdown as it arrives, retiring the old [com.mewbo.aura.ui.common.WordFadeText] word-fade
- * comet-tail) - the buffer always passes through [MarkdownBuffer.sanitize] first, which exists
- * precisely for half-open mid-stream markdown (an unclosed fence/bracket that would otherwise
- * explode layout) as much as for the case where streaming closed before the authoritative
+ * finalized text render through [MarkdownMessage] - streaming shows real markdown as it arrives.
+ * The buffer always passes through [MarkdownBuffer.sanitize] first, which exists precisely for
+ * half-open mid-stream markdown (an unclosed fence/bracket that would otherwise explode layout) as
+ * much as for the case where streaming closed before the authoritative
  * `assistant` finalize event did (ui/CLAUDE.md). [ChatItem.AssistantMessage.isStreaming] still
  * flows through unchanged for every other consumer (e.g. [ChatTranscript]'s `isRunLive`/
  * `hasSettledReply`) - it just no longer selects between two different renderers here.
  * [showActionRow] is true for every SETTLED (non-streaming) assistant message: the footer renders
- * under every completed response now, not just the last (user directive 2026-07-04 round 3), so
+ * under every completed response, not just the last, so
  * [ChatTranscript] derives it per row from the item's own `isStreaming`, not a chosen-row scan. The
  * "Mewbo is an AI tool and can make mistakes" disclaimer is NOT this row's concern - it's anchored to a turn's LAST
  * item (which may not be an AssistantMessage at all, e.g. a turn that ends on a tool call), so
@@ -232,7 +231,7 @@ fun AssistantMessageRow(
     // dispatch can pass this reference straight through unchanged instead of allocating a fresh
     // `{ onReadAloudToggle(item) }` closure every time that call site runs - a fresh lambda there
     // broke this row's parameter stability and forced it to recompose on every unrelated sibling
-    // update, not just its own deltas (fix-round item 2 measurement caught this: 16 hits observed
+    // update, not just its own deltas (a recomposition-count measurement caught this: 16 hits observed
     // for 12 deltas + 1 mount, the extra 3 lining up with 3 unrelated chip arrivals).
     onReadAloudToggle: (ChatItem.AssistantMessage) -> Unit,
     modifier: Modifier = Modifier,
@@ -281,11 +280,11 @@ private fun ActionRow(
     var overflowExpanded by remember { mutableStateOf(false) }
     var selectTextOpen by remember { mutableStateOf(false) }
 
-    // Rev F measured (c3c1011): touching 48dp cellSize touch-cells, zero extra inter-icon gap -
-    // the old iconSize(24dp)+gap(28dp) math predicted a 52dp pitch but rendered at 76dp on device,
-    // because minimumInteractiveComponentSize() below ALSO pads each icon out to 48dp on its own;
-    // stacking that with an explicit spacedBy gap double-counted the padding. No horizontalArrangement
-    // here now (default Arrangement.Start already has zero gap - no dp literal needed to say "none").
+    // Touching 48dp cellSize touch-cells, zero extra inter-icon gap: minimumInteractiveComponentSize()
+    // below already pads each icon out to 48dp on its own, so an explicit spacedBy gap on top of that
+    // would double-count the padding and inflate the pitch past its intended 48dp. No
+    // horizontalArrangement here (default Arrangement.Start already has zero gap - no dp literal
+    // needed to say "none").
     Row(verticalAlignment = Alignment.CenterVertically, modifier = modifier.fillMaxWidth()) {
         Row {
             ActionGlyphButton(
@@ -406,7 +405,7 @@ private fun SelectTextDialog(text: String, onDismiss: () -> Unit) {
 private val SelectTextDialogMaxHeight = 480.dp
 
 /**
- * Minimal, cardless fold group for one turn's `tool_result`s (restyled 2026-07-03
+ * Minimal, cardless fold group for one turn's `tool_result`s (restyled
  * per the "no fat tool cards" brief) - a plain row, never a filled Surface/card. Collapsed header
  * always shows the tool count ("Using N tools…" while [isRunActive], "Used N tools" once the run
  * settles) so the count stays visible without expanding; tapping it reveals one [ToolCallRow] per
@@ -417,7 +416,7 @@ private val SelectTextDialogMaxHeight = 480.dp
 @Composable
 fun ToolCallGroupCard(item: ChatItem.ToolCallGroup, isRunActive: Boolean, modifier: Modifier = Modifier) {
     // null = "no explicit choice yet" -> always starts COLLAPSED regardless of isRunActive; a tap
-    // pins the user's own choice from then on. (2026-07-03: auto-expanding on every live run was
+    // pins the user's own choice from then on. (Auto-expanding on every live run was
     // the "why is this open every time" complaint - live progress now reads through the header's
     // own count label + pulse instead of forcing the whole group open.)
     var userExpanded by remember(item.key) { mutableStateOf<Boolean?>(null) }
@@ -625,7 +624,7 @@ private object ActivityToolGlyphs {
 }
 
 /**
- * Plan card (Rev D §D-5, replaces the old `TodoListRow` visuals). Collapsed = a chip-family pill
+ * Plan card. Collapsed = a chip-family pill
  * ("Plan · {done}/{total} ✓"); expanded = the per-step checklist. Fixed `"todos"` key ([item]'s
  * own) means the reducer's replace-in-place semantics keep this ONE card updating, never appending
  * a duplicate (data/CLAUDE.md).
@@ -635,8 +634,8 @@ fun PlanCard(item: ChatItem.TodoList, modifier: Modifier = Modifier) {
     var expanded by remember { mutableStateOf(false) }
     val done = item.items.count { it.status.equals("completed", ignoreCase = true) || it.status.equals("done", ignoreCase = true) }
 
-    // Same 24dp assistant gutter as ToolCallGroupCard/AssistantMessageRow
-    // (alignment fix) - previously edge-to-edge, unlike every other chip-family row.
+    // Same 24dp assistant gutter as ToolCallGroupCard/AssistantMessageRow, matching every other
+    // chip-family row rather than sitting edge-to-edge.
     Column(modifier = modifier.fillMaxWidth().padding(horizontal = AuraSpacing.AssistantText.gutter)) {
         Surface(
             color = AuraColors.surfaceInput,

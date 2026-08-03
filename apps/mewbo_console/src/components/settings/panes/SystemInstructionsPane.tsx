@@ -78,9 +78,9 @@ export function SystemInstructionsPane() {
   }, [doc, seeded]);
 
   // The surfaces a template can branch on are whatever the backend reports for
-  // the `surface` variable, so the preview tabs ARE that list. The pane used to
-  // hardcode six of them, which silently went stale the moment a new client
-  // started stamping sessions.
+  // the `surface` variable, so the preview tabs ARE that list — hardcoding
+  // them instead would silently go stale the moment a new client starts
+  // stamping sessions.
   const surfaces = useMemo(
     () => variables.find((v) => v.name === "surface")?.values ?? [],
     [variables]

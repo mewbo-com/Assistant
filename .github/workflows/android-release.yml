@@ -107,12 +107,12 @@ jobs:
             mkdir -p "$ANDROID_HOME/cmdline-tools"
             cd "$ANDROID_HOME/cmdline-tools"
             rm -rf latest cmdline-tools.zip
-            # Pinned cmdline-tools build; bump this if Google retires the archive. 13114758 (v16)
-            # replaces 11076708 (v11): the old build's repository schema predates platform 37 and
-            # sdkmanager reported "Failed to find package". ALSO: the platform package id is
+            # Pinned cmdline-tools build; bump this if Google retires the archive. v16 or
+            # later is required — an older build's repository schema predates platform 37, and
+            # sdkmanager then reports "Failed to find package". ALSO: the platform package id is
             # "platforms;android-37.0" — Android 17 uses the minor-versioned SDK naming (the
             # working host SDK's directory is platforms/android-37.0); plain "android-37" does
-            # not exist in any channel, which was the real "Failed to find package" cause.
+            # not exist in any channel, and is the other source of that same error.
             curl -fsSL -o cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip
             unzip -q cmdline-tools.zip
             mv cmdline-tools latest

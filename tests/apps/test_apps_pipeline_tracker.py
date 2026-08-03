@@ -331,8 +331,8 @@ class TestPipelineScope:
         assert strict is True
 
     def test_empty_allowlist_is_least_privilege_app_data_only(self, tmp_path):
-        # Phase 1 security flip: an empty allowlist is no longer permissive —
-        # an undeclared unattended fire is scoped to app_data ONLY (must declare more).
+        # An empty allowlist is least-privilege, not permissive: an undeclared
+        # unattended fire is scoped to app_data ONLY (declare more to widen it).
         tracker, app_store, _ = _make(tmp_path)
         app_store.save(_app(pipelines=[_pipeline(allowlist=[])]))
         assert tracker.pipeline_scope(TRIGGER) == (["app_data"], True)

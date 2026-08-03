@@ -6,7 +6,7 @@ from __future__ import annotations
 import time
 
 import pytest
-from mewbo_core.skills import (
+from mewbo_core.tooling.skills import (
     ACTIVATE_SKILL_SCHEMA,
     SkillRegistry,
     SkillSpec,
@@ -483,7 +483,7 @@ class TestActivateSkill:
         assert specs is None
 
     def test_tool_scoping_filters_specs(self):
-        from mewbo_core.tool_registry import ToolSpec
+        from mewbo_core.tooling.tool_registry import ToolSpec
 
         specs = [
             ToolSpec(tool_id="read", name="read", description="", factory=lambda: None),

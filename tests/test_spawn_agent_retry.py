@@ -26,14 +26,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage
-from mewbo_core.agent_context import AgentContext
+from mewbo_core.agents.agent_context import AgentContext
+from mewbo_core.agents.hypervisor import AgentHandle, AgentHypervisor
+from mewbo_core.agents.spawn_agent import SPAWN_AGENT_SCHEMA, RetryPolicy, SpawnAgentTool
 from mewbo_core.classes import ActionStep
 from mewbo_core.hooks import HookManager
-from mewbo_core.hypervisor import AgentHandle, AgentHypervisor
-from mewbo_core.llm_resilience import LlmResilienceExhausted
+from mewbo_core.llm.llm_resilience import LlmResilienceExhausted
 from mewbo_core.permissions import PermissionDecision, PermissionPolicy
-from mewbo_core.spawn_agent import SPAWN_AGENT_SCHEMA, RetryPolicy, SpawnAgentTool
-from mewbo_core.tool_registry import ToolRegistry, ToolSpec
+from mewbo_core.tooling.tool_registry import ToolRegistry, ToolSpec
 
 # ---------------------------------------------------------------------------
 # Helpers (mirror tests/test_spawn_agent_flow.py — stub only the model boundary)
@@ -93,7 +93,7 @@ def _bound_with(side_effect) -> MagicMock:
 
 def _patch_model(bound: MagicMock):
     """Patch build_chat_model so every attempt's ToolUseLoop binds *bound*."""
-    cm = patch("mewbo_core.tool_use_loop.build_chat_model")
+    cm = patch("mewbo_core.loop.tool_use_loop.build_chat_model")
     mock_build = cm.start()
     mock_build.return_value = MagicMock()
     mock_build.return_value.bind_tools.return_value = bound

@@ -11,7 +11,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { CollapseModel } from "./collapseModel";
+import { CollapseModel, EXTERNAL_BUCKET_ID } from "./collapseModel";
 import type { CollapsedEdge } from "./collapseModel";
 import type {
   GraphEdgeKind,
@@ -101,6 +101,26 @@ describe("CollapseModel.initialExpanded", () => {
     expect(init.has("folder:src")).toBe(true);
     expect(init.has("folder:lib")).toBe(true);
     expect(init.has("folder:src/a")).toBe(false);
+  });
+
+  it("excludes the synthetic External bucket even though it sits at depth 1", () => {
+    const g = makeGraph();
+    // Mirrors the backend's synthetic bucket: a top-level (parentId: null)
+    // Folder node with the reserved id + an empty folderPath.
+    g.nodes.push({
+      data: {
+        id: EXTERNAL_BUCKET_ID,
+        label: "External",
+        kind: "Folder",
+        layer: "ast",
+        folderPath: "",
+        parentId: null,
+      },
+    });
+    const init = CollapseModel.initialExpanded(g);
+    expect(init.has("folder:src")).toBe(true);
+    expect(init.has("folder:lib")).toBe(true);
+    expect(init.has(EXTERNAL_BUCKET_ID)).toBe(false);
   });
 
   it("shows depth-1 contents + collapsed depth-2 folder as a supernode", () => {

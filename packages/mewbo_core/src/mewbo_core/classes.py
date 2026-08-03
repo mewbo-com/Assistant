@@ -8,7 +8,7 @@ import json
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import cast
+from typing import Literal, cast
 
 from langchain_community.document_loaders import JSONLoader
 from langchain_core.documents import Document
@@ -17,8 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from mewbo_core.common import MockSpeaker, get_logger, get_mock_speaker, get_unique_timestamp
 from mewbo_core.components import build_langfuse_handler
 from mewbo_core.config import get_config_value, get_version
-from mewbo_core.llm import build_chat_model
-from mewbo_core.types import ActionStepPayload, ToolInput
+from mewbo_core.contracts.types import ActionStepPayload, ToolInput
 
 logging = get_logger(name="core.classes")
 AVAILABLE_TOOLS: list[str] = ["home_assistant_tool"]
@@ -28,7 +27,7 @@ AVAILABLE_TOOLS: list[str] = ["home_assistant_tool"]
 # ``ToolRegistry`` — so they never reach ``set_available_tools``. Every
 # executed tool call is converted to an ``ActionStep`` for ``TaskQueue``
 # compatibility (``tool_use_loop.py:_tool_call_to_action_step``), so these
-# ids must count as valid here or every historical step logs a
+# ids must count as valid here or every such step logs a
 # false-positive "not a valid Assistant tool" error. Defined here (classes.py
 # is the base of the module, imported by all of them) rather than imported,
 # to avoid a circular import. Kept in lockstep with where each is defined:
@@ -187,7 +186,7 @@ class OrchestrationState(BaseModel):
     plan_approved: bool = False
     plan_path: str | None = None
     # Verifier-gated completion outcome. ``None`` = the gate never ran (no
-    # spec, or inactive — the historical path); ``True``/``False`` = a
+    # spec, or inactive); ``True``/``False`` = a
     # ground-truth check passed/exhausted its retries. ``verify_attempts``
     # counts how many verifier runs this task drove (0 when the gate was
     # never active). Both survive to the ``AgentResult`` so a spawner sees an
@@ -204,13 +203,58 @@ class OrchestrationState(BaseModel):
     # the completion event, mapped to a status downstream.
     blocked_code: str | None = None
 
+    def terminal_status(self) -> Literal["completed", "failed", "cancelled"]:
+        """Project this settled state onto the terminal a spawner is told.
+
+        ``done`` answers "did the loop stop", never "did the task succeed", and
+        reading it as the latter is what let a doom-looped or budget-spent child
+        report ``completed`` to its parent. A run that stopped short is
+        ``failed``; only a genuine natural completion whose ground-truth check
+        did not fail is ``completed``.
+
+        ``verified is False`` is checked in its own right rather than trusted to
+        the reason: it is the authoritative record that a ground-truth check ran
+        and did not pass, and a claim contradicted by ground truth must not
+        depend on a second field spelling it the same way. It is checked BEFORE
+        cancellation because a contradicted claim is a substantive failure,
+        whereas a stop is only a stop.
+
+        A cancelled run is neither: nobody claimed the goal was reached and
+        nothing contradicted a claim, so folding it into ``failed`` would report
+        an error that never happened while ``completed`` reports a success that
+        never happened. It gets the ``AgentStatus`` member that means what
+        occurred. A ``completed``/``failed`` projection cannot express the one
+        terminal a user causes directly, which is why there is a third member.
+
+        The returned values are members of the hypervisor's ``AgentStatus``
+        vocabulary — this is a NARROWING of that authority, not a vocabulary of
+        its own, and it is exactly ``SettledStatus``. A halt reports as
+        ``failed`` because ``AgentStatus`` has no "stopped short" arm; the
+        precise reason is not lost — it rides the ``stop`` event's ``detail``
+        and the attestation's ``done_reason``.
+
+        Lives on the model rather than on whichever service happens to settle a
+        run: the projection reads nothing but this state's own fields, so a
+        second copy at another call site could only ever drift from this one.
+        """
+        if not self.done:
+            return "failed"
+        if self.verified is False:
+            return "failed"
+        reason = self.done_reason
+        if isinstance(reason, str) and reason in CANCELLED_DONE_REASONS:
+            return "cancelled"
+        if isinstance(reason, str) and reason in UNACHIEVED_DONE_REASONS:
+            return "failed"
+        return "completed"
+
 
 # ``OrchestrationState.done_reason`` values meaning the run STOPPED WITHOUT
 # REACHING ITS GOAL. Every one of them sets ``done=True``, so none of them
 # raises and none leaves a sticky error string of its own. Shared by the
 # orchestrator's own completion path (attaching a structured diagnostic to a
 # completion that would otherwise reach the store bare) and by
-# ``spawn_agent``'s child-status projection (a halted/budget-spent/
+# :meth:`OrchestrationState.terminal_status` (a halted/budget-spent/
 # ground-truth-failed child must report ``failed`` to its parent, never
 # ``completed``) — a reason added to one consumer's vocabulary must reach the
 # other, so it lives in ONE place rather than two independently-maintained
@@ -224,8 +268,22 @@ UNACHIEVED_DONE_REASONS: frozenset[str] = frozenset(
         "max_iterations_reached",
         "budget_exhausted",
         "halted_agent_budget",
+        "safety_blocked",
     }
 )
+
+# ``done_reason`` values meaning the run was STOPPED BY SOMEONE — deliberately
+# NOT members of ``UNACHIEVED_DONE_REASONS`` above, because the two answer
+# different questions and one consumer reads each: a cancelled run did not fall
+# short of its goal, it was never allowed to pursue it. Kept beside that set for
+# the same reason that one has a single home — a reason added to either
+# vocabulary must be visible to whoever reads the other.
+#
+# Both spellings are accepted because both exist in the tree: the loop mints the
+# one-L American ``canceled`` while the lifecycle vocabulary spells the status
+# ``cancelled``, and a projection that recognised only one spelling would report
+# a clean success the first time the other was minted.
+CANCELLED_DONE_REASONS: frozenset[str] = frozenset({"canceled", "cancelled"})
 
 
 class AbstractTool(abc.ABC):
@@ -260,6 +318,21 @@ class AbstractTool(abc.ABC):
         )
         self.model = None
         if self.use_llm:
+            # Imported at the call site, not at module top: this module sits
+            # below `llm` in the layering everywhere else, and a module-top
+            # import here is the edge that pins the whole LLM stack to the
+            # package root.
+            #
+            # Safe HERE specifically, and the argument is per-site rather than
+            # general (a lazy import is only safe when the imported module's
+            # import-time side effects cannot re-enter the caller). `llm` pulls
+            # in LiteLLM, whose module body reads a `.env` and populates
+            # `os.environ`; this line runs long after import, and the config
+            # this constructor depends on is already built by the time control
+            # reaches it — `get_config_value` above and `get_logger` at module
+            # scope both force it.
+            from mewbo_core.llm.llm import build_chat_model
+
             self.model = build_chat_model(model_name=self.model_name)
         root_cache_dir = get_config_value("runtime", "cache_dir", default=".cache")
         if not root_cache_dir:

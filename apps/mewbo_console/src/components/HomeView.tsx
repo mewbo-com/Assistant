@@ -1,11 +1,11 @@
 import { useState, useMemo, useCallback, useRef, useEffect, type CSSProperties } from 'react';
-import { AlertCircle, Search, Archive, RotateCcw, Loader2, ListFilter } from 'lucide-react';
+import { AlertCircle, Search, Archive, FolderGit2, RotateCcw, Loader2, ListFilter, Pin, PinOff } from 'lucide-react';
 import { SessionItem } from './SessionItem';
 import { SessionOriginBadge } from './SessionOriginBadge';
 import { InputBar } from './InputBar';
 import { ProductHero } from './ProductHero';
 import { TypewriterGreeting } from './TypewriterGreeting';
-import { QueryMode, SessionContext, SessionOrigin, SessionSummary } from '../types';
+import { QueryMode, SessionContext, SessionOrigin, SessionSummary, SessionTarget } from '../types';
 import { Alert, AlertDescription, AlertTitle } from './ui/alert';
 import { Button } from './ui/button';
 import { FOCUS_RING } from './ui/focus-ring';
@@ -39,15 +39,26 @@ interface HomeViewProps {
   archivedError?: string | null;
   actionError?: string | null;
   onSelectSession: (sessionId: string) => void;
+  /**
+   * Forwarded verbatim to the home composer's `onSubmit`. `target` is declared
+   * here even though this component never reads it: structural assignability
+   * would happily accept the narrower four-param signature, so an
+   * under-declaration compiles, runs, and silently stops carrying the target
+   * the moment someone rewrites this as a wrapper instead of a passthrough.
+   * Declare what actually flows through.
+   */
   onCreateAndRun: (
     query: string,
     context?: SessionContext,
     mode?: QueryMode,
-    attachments?: File[]
+    attachments?: File[],
+    target?: SessionTarget | null
   ) => void;
   onLoadArchived: () => void;
   onArchive: (sessionId: string) => void;
   onUnarchive: (sessionId: string) => void;
+  onPin: (sessionId: string) => void;
+  onUnpin: (sessionId: string) => void;
   isCreating?: boolean;
   onRetry?: () => void;
 }
@@ -64,6 +75,8 @@ export function HomeView({
   onLoadArchived,
   onArchive,
   onUnarchive,
+  onPin,
+  onUnpin,
   isCreating = false,
   onRetry
 }: HomeViewProps) {
@@ -72,6 +85,11 @@ export function HomeView({
   const [visibleOrigins, setVisibleOrigins] = useState<Set<SessionOrigin>>(
     () => new Set(DEFAULT_VISIBLE_ORIGINS)
   );
+  // `null` = every project visible (the default) — distinct from an empty
+  // `Set`, which would mean "no project selected" and hide every row. Only
+  // entering the filter narrows it; there is no equivalent to
+  // `DEFAULT_VISIBLE_ORIGINS` here because there is no default-hidden project.
+  const [visibleProjects, setVisibleProjects] = useState<Set<string> | null>(null);
   const { projects } = useProjects();
   const projectLabel = useMemo(() => new ProjectLabel(projects), [projects]);
   const toggleOrigin = useCallback((origin: SessionOrigin) => {
@@ -85,6 +103,43 @@ export function HomeView({
   const isDefaultOriginFilter =
     visibleOrigins.size === DEFAULT_VISIBLE_ORIGINS.length &&
     DEFAULT_VISIBLE_ORIGINS.every((origin) => visibleOrigins.has(origin));
+  // The filter's OWN options: every project identity any fetched session has
+  // ever bound to (`session.projects`, the accumulated set — never just the
+  // current `context.project`, which would miss a project an auto-select
+  // session already moved out of). A session with no `projects` key is
+  // simply absent from every project's membership rather than crashing the
+  // filter.
+  const projectOptions = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const session of sessions) {
+      for (const identity of session.projects ?? []) {
+        if (!seen.has(identity)) seen.set(identity, projectLabel.resolveIdentity(identity));
+      }
+    }
+    return Array.from(seen.entries())
+      .map(([identity, label]) => ({ identity, label }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [sessions, projectLabel]);
+  const toggleProject = useCallback((identity: string) => {
+    setVisibleProjects((prev) => {
+      // First toggle starts from "everything except this one" — narrowing
+      // FROM the implicit all-visible default, not from an empty set (which
+      // would make the very first click hide every other project at once).
+      const base = prev ?? new Set(projectOptions.map((p) => p.identity));
+      const next = new Set(base);
+      if (next.has(identity)) next.delete(identity);
+      else next.add(identity);
+      return next;
+    });
+  }, [projectOptions]);
+  // Content equality, not reference equality — matches `isDefaultOriginFilter`
+  // below. A user who toggles every project off and back on again ends up
+  // with a non-null Set that happens to equal "everything", and the filter
+  // indicator dot must clear for that case exactly as it does when the Set
+  // was never touched at all: both mean "nothing is actually excluded".
+  const isDefaultProjectFilter =
+    visibleProjects === null ||
+    projectOptions.every((p) => visibleProjects.has(p.identity));
   const sessionsRef = useRef<HTMLDivElement | null>(null);
 
   // Tab switch resets the scroll to the top of the sessions area so the two
@@ -99,12 +154,20 @@ export function HomeView({
   const listLoading = activeTab === 'archive' ? archivedLoading : loading;
   const scopedSessions = activeTab === 'archive' ? archivedSessions : sessions;
   const apiUnavailable = !listLoading && !!listError && scopedSessions.length === 0;
-  // Single source of truth for the visible list: scope (tab) → origin filter.
-  // Everything below (recent/older split, search) derives from this so the
-  // filter applies uniformly.
-  const displayedSessions = scopedSessions.filter((session) =>
-    visibleOrigins.has(session.origin ?? 'user')
-  );
+  // Single source of truth for the visible list: scope (tab) → origin filter
+  // → project filter. Everything below (pinned/recent/older split, search)
+  // derives from this so both filters apply uniformly. Pinning composes with
+  // both for free precisely because it is never consulted here — pinning is
+  // an ORDERING applied AFTER this list is built, never a way around a filter,
+  // so a pinned session hidden by either filter simply isn't in this array to
+  // begin with.
+  const displayedSessions = scopedSessions
+    .filter((session) => visibleOrigins.has(session.origin ?? 'user'))
+    .filter((session) => {
+      if (visibleProjects === null) return true;
+      const activeProjects = visibleProjects;
+      return (session.projects ?? []).some((p) => activeProjects.has(p));
+    });
 
   // Single page-level IntersectionObserver for .fade-in-row reveal. Observes
   // anything not yet visible whenever the row list itself could have changed
@@ -131,12 +194,21 @@ export function HomeView({
   }, [activeTab, displayedSessions]);
 
   const now = useMemo(() => new Date(), []);
-  const recentSessions = displayedSessions.filter((session) => {
+  // Pinned rows get their OWN section, ahead of the date buckets, and are
+  // EXCLUDED from them — never both, or a pinned row renders twice and reads
+  // as a duplicate rather than emphasis. Without this, a session pinned weeks
+  // ago would sort into "Older", exactly where a pin exists to prevent it
+  // from hiding. Most-recently-pinned first within the section.
+  const pinnedSessions = [...displayedSessions]
+    .filter((session) => session.pinned)
+    .sort((a, b) => (b.pinned_at ?? '').localeCompare(a.pinned_at ?? ''));
+  const unpinnedSessions = displayedSessions.filter((session) => !session.pinned);
+  const recentSessions = unpinnedSessions.filter((session) => {
     if (!session.created_at) return true;
     const created = new Date(session.created_at);
     return (now.getTime() - created.getTime()) / (1000 * 60 * 60 * 24) <= 7;
   });
-  const olderSessions = displayedSessions.filter(
+  const olderSessions = unpinnedSessions.filter(
     (session) => !recentSessions.includes(session)
   );
   return (
@@ -261,6 +333,43 @@ export function HomeView({
                   })}
                 </DropdownMenuContent>
               </DropdownMenu>
+              {projectOptions.length > 0 && (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      aria-label="Filter sessions by project"
+                      title="Filter sessions by project"
+                      className={`relative p-1.5 rounded-md text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))] transition-colors ${FOCUS_RING}`}>
+                      <FolderGit2 className="w-4 h-4" />
+                      {!isDefaultProjectFilter && (
+                        <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-[hsl(var(--primary))]" />
+                      )}
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-52">
+                    <DropdownMenuLabel className="text-xs text-[hsl(var(--muted-foreground))]">
+                      Show project
+                    </DropdownMenuLabel>
+                    {projectOptions.map(({ identity, label }) => {
+                      const isOn = visibleProjects === null || visibleProjects.has(identity);
+                      return (
+                        <DropdownMenuCheckboxItem
+                          key={identity}
+                          checked={isOn}
+                          onSelect={(e) => e.preventDefault()}
+                          onCheckedChange={() => toggleProject(identity)}
+                          className={
+                            isOn
+                              ? 'font-medium text-[hsl(var(--foreground))]'
+                              : 'font-normal text-[hsl(var(--muted-foreground))]'
+                          }>
+                          <span className="truncate">{label}</span>
+                        </DropdownMenuCheckboxItem>
+                      );
+                    })}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
               <button
                 onClick={() => setIsSearchOpen(true)}
                 aria-label="Search sessions"
@@ -281,11 +390,26 @@ export function HomeView({
               projectLabel={projectLabel}
               onSelectSession={onSelectSession}
               onArchive={onArchive}
-              onUnarchive={onUnarchive} />
+              onUnarchive={onUnarchive}
+              onPin={onPin}
+              onUnpin={onUnpin} />
 
             </div> :
 
           <div className="space-y-6 mt-6">
+              {pinnedSessions.length > 0 && (
+                <SessionSection
+                title="Pinned"
+                loading={false}
+                sessions={pinnedSessions}
+                projectLabel={projectLabel}
+                onSelectSession={onSelectSession}
+                onArchive={onArchive}
+                onUnarchive={onUnarchive}
+                onPin={onPin}
+                onUnpin={onUnpin} />
+              )}
+
               <SessionSection
               title="Last 7 Days"
               loading={listLoading}
@@ -293,7 +417,9 @@ export function HomeView({
               projectLabel={projectLabel}
               onSelectSession={onSelectSession}
               onArchive={onArchive}
-              onUnarchive={onUnarchive} />
+              onUnarchive={onUnarchive}
+              onPin={onPin}
+              onUnpin={onUnpin} />
 
               <SessionSection
               title="Older"
@@ -302,7 +428,9 @@ export function HomeView({
               projectLabel={projectLabel}
               onSelectSession={onSelectSession}
               onArchive={onArchive}
-              onUnarchive={onUnarchive} />
+              onUnarchive={onUnarchive}
+              onPin={onPin}
+              onUnpin={onUnpin} />
 
             </div>
           }
@@ -356,30 +484,54 @@ export function HomeView({
                       )}
                     </div>
                   </div>
-                  {(onArchive != null || onUnarchive != null) && (
-                    <button
-                      type="button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        if (session.archived) {
-                          onUnarchive?.(session.session_id);
-                        } else {
-                          onArchive?.(session.session_id);
-                        }
-                      }}
-                      aria-label={session.archived ? 'Unarchive session' : 'Archive session'}
-                      title={session.archived ? 'Unarchive session' : 'Archive session'}
-                      // Hover-revealed, so it must also reveal on keyboard
-                      // focus — otherwise the control is unreachable by tab.
-                      className={`shrink-0 p-1 rounded text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))] opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 ${FOCUS_RING} transition-all`}
-                    >
-                      {session.archived ? (
-                        <RotateCcw className="w-4 h-4" />
-                      ) : (
-                        <Archive className="w-4 h-4" />
-                      )}
-                    </button>
-                  )}
+                  <div className="flex items-center gap-1 shrink-0">
+                    {(onPin != null || onUnpin != null) && (
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          if (session.pinned) {
+                            onUnpin?.(session.session_id);
+                          } else {
+                            onPin?.(session.session_id);
+                          }
+                        }}
+                        aria-label={session.pinned ? 'Unpin session' : 'Pin session'}
+                        title={session.pinned ? 'Unpin session' : 'Pin session'}
+                        className={`p-1 rounded text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))] transition-all ${FOCUS_RING} ${session.pinned ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100'}`}
+                      >
+                        {session.pinned ? (
+                          <PinOff className="w-4 h-4" />
+                        ) : (
+                          <Pin className="w-4 h-4" />
+                        )}
+                      </button>
+                    )}
+                    {(onArchive != null || onUnarchive != null) && (
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          if (session.archived) {
+                            onUnarchive?.(session.session_id);
+                          } else {
+                            onArchive?.(session.session_id);
+                          }
+                        }}
+                        aria-label={session.archived ? 'Unarchive session' : 'Archive session'}
+                        title={session.archived ? 'Unarchive session' : 'Archive session'}
+                        // Hover-revealed, so it must also reveal on keyboard
+                        // focus — otherwise the control is unreachable by tab.
+                        className={`p-1 rounded text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))] opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 ${FOCUS_RING} transition-all`}
+                      >
+                        {session.archived ? (
+                          <RotateCcw className="w-4 h-4" />
+                        ) : (
+                          <Archive className="w-4 h-4" />
+                        )}
+                      </button>
+                    )}
+                  </div>
                 </CommandItem>
               );
             })}
@@ -396,15 +548,10 @@ function SessionSection({
   projectLabel,
   onSelectSession,
   onArchive,
-  onUnarchive
-
-
-
-
-
-
-
-}: {title: string;loading: boolean;sessions: SessionSummary[];projectLabel: ProjectLabel;onSelectSession: (sessionId: string) => void;onArchive?: (sessionId: string) => void;onUnarchive?: (sessionId: string) => void;}) {
+  onUnarchive,
+  onPin,
+  onUnpin
+}: {title: string;loading: boolean;sessions: SessionSummary[];projectLabel: ProjectLabel;onSelectSession: (sessionId: string) => void;onArchive?: (sessionId: string) => void;onUnarchive?: (sessionId: string) => void;onPin?: (sessionId: string) => void;onUnpin?: (sessionId: string) => void;}) {
   return (
     <div>
       <h3 className="text-2xs font-medium text-[hsl(var(--muted-foreground))] mb-3 uppercase tracking-wider pl-2">
@@ -431,7 +578,9 @@ function SessionSection({
               projectLabel={projectLabel}
               onClick={onSelectSession}
               onArchive={onArchive}
-              onUnarchive={onUnarchive} />
+              onUnarchive={onUnarchive}
+              onPin={onPin}
+              onUnpin={onUnpin} />
           </div>
         )}
       </div>

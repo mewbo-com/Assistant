@@ -34,7 +34,7 @@ def _plugin_root() -> Path:
 
 class TestManifest:
     def test_manifest_parses_with_stlite_capability(self):
-        from mewbo_core.plugins import parse_plugin_manifest
+        from mewbo_core.tooling.plugins import parse_plugin_manifest
 
         manifest = parse_plugin_manifest(_plugin_root())
         assert manifest is not None
@@ -63,7 +63,7 @@ class TestAgentAndSkill:
         # ``_parse_skill_file`` is intentionally module-private; tests use it
         # because the plugin teaches LLMs to delegate to the agent — verifying
         # frontmatter round-trips end-to-end is the single source of truth.
-        from mewbo_core.skills import _parse_skill_file
+        from mewbo_core.tooling.skills import _parse_skill_file
 
         skill_md = _plugin_root() / "skills" / "st-widget-builder" / "SKILL.md"
         spec = _parse_skill_file(skill_md, source="built-in:widget-builder")
@@ -74,7 +74,7 @@ class TestAgentAndSkill:
         assert spec.agent == "st-widget-builder"
 
     def test_agent_parses_with_submit_widget_and_capability(self):
-        from mewbo_core.agent_registry import parse_agent_file
+        from mewbo_core.agents.agent_registry import parse_agent_file
 
         agent_md = _plugin_root() / "agents" / "st-widget-builder.md"
         agent_def = parse_agent_file(agent_md, source="built-in:widget-builder")
@@ -93,10 +93,10 @@ class TestAgentAndSkill:
 class TestAgentPromptResolvesPluginPath:
     """The agent's example paths must resolve through the REAL substitution seam.
 
-    Regression: the prompt used the unbraced ``$CLAUDE_PLUGIN_ROOT``, which
-    ``substitute_agent_body`` pass 1 (``${KEY}`` from ``subs``) never matches —
-    it fell through to pass 3 (plain ``$VAR`` from the process env), where the
-    var is unset, so the shell later expanded ``ls "$CLAUDE_PLUGIN_ROOT/…"`` to
+    An unbraced ``$CLAUDE_PLUGIN_ROOT`` is never matched by
+    ``substitute_agent_body`` pass 1 (``${KEY}`` from ``subs``) — it falls
+    through to pass 3 (plain ``$VAR`` from the process env), where the var is
+    unset, so the shell expands ``ls "$CLAUDE_PLUGIN_ROOT/…"`` to
     ``ls "/examples/components/"`` and the sub-agent thrashed hunting for a
     directory that never existed. Braced ``${CLAUDE_PLUGIN_ROOT}`` resolves
     deterministically from the spawn's ``plugin_root``, independent of any
@@ -104,8 +104,8 @@ class TestAgentPromptResolvesPluginPath:
     """
 
     def test_example_paths_resolve_to_the_real_plugin_root(self):
-        from mewbo_core.agent_registry import parse_agent_file
-        from mewbo_core.spawn_agent import substitute_agent_body
+        from mewbo_core.agents.agent_registry import parse_agent_file
+        from mewbo_core.agents.spawn_agent import substitute_agent_body
 
         agent_md = _plugin_root() / "agents" / "st-widget-builder.md"
         agent_def = parse_agent_file(agent_md, source="built-in:widget-builder")
@@ -130,7 +130,7 @@ class TestAgentPromptResolvesPluginPath:
 
 class TestSessionToolLoad:
     def test_load_entry_imports_submit_widget_class(self):
-        from mewbo_core.session_tools import SessionToolRegistry
+        from mewbo_core.tooling.session_tools import SessionToolRegistry
 
         raw = json.loads(
             (_plugin_root() / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
@@ -299,17 +299,16 @@ class TestWidgetReadyPayload:
 def test_successful_submit_does_not_force_loop_termination(tmp_path, monkeypatch):
     """A successful submit must NOT force the run to terminate.
 
-    Regression for Aura session ``e58f7cf7…``: ``submit_widget`` set a
-    terminate flag, so the loop's terminal poll
+    Setting a terminate flag on ``submit_widget`` makes the loop's terminal poll
     (``tool_use_loop.py``: ``should_terminate_run()`` then
-    ``terminal_reason()``) read ``terminal_reason()`` — which this tool never
-    defined — and crashed the run with ``AttributeError`` *after* the widget
-    was already built and ``widget_ready`` emitted. The widget renders off the
+    ``terminal_reason()``) call ``terminal_reason()``, which this tool does not
+    define — an ``AttributeError`` that kills the run *after* the widget is
+    already built and ``widget_ready`` emitted. The widget renders off the
     event, not off termination, so the tool is terminal-free like
     ``update_todos``: the agent stops naturally on its next (text) turn.
 
-    This replicates the loop's poll verbatim against the real tool so it fails
-    the exact way production did if the termination behaviour ever returns.
+    This replicates the loop's poll verbatim against the real tool, so it fails
+    the same way the loop would if the termination behaviour ever returns.
     """
     import asyncio
 
@@ -387,7 +386,7 @@ def test_handle_runtime_traversal_guard_rejects_symlink_escape(tmp_path, monkeyp
 
 
 def test_capability_gating_hides_agent_without_stlite():
-    from mewbo_core.agent_registry import (
+    from mewbo_core.agents.agent_registry import (
         AgentRegistry,
         parse_agent_file,
     )

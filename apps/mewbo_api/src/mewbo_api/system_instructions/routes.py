@@ -370,11 +370,10 @@ class SystemInstructionsRoutesController:
         wire DTO.
 
         The controller deliberately re-derives NOTHING about
-        ``InstructionContext``'s own semantics. Four classmethods here used to
-        walk its JSON schema resolving ``$ref``s and enums — an HTTP adapter
-        re-implementing the model's meaning, which drifts the moment a field
-        changes shape. That knowledge belongs to the model; the controller
-        keeps only its wire ownership.
+        ``InstructionContext``'s own semantics — no walking its JSON schema to
+        resolve ``$ref``s and enums here. An HTTP adapter re-implementing the
+        model's meaning drifts the moment a field changes shape. That knowledge
+        belongs to the model; the controller keeps only its wire ownership.
         """
         variables = InstructionContext.describe(self.value_sources.catalog())
         rows = [InstructionVariableDto.from_variable(var).to_wire() for var in variables]

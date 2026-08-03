@@ -18,7 +18,7 @@ assignment leak does not cross-contaminate (see tests/CLAUDE.md pitfall).
 
 import pytest
 from mewbo_api import backend
-from mewbo_core.session_store import SessionStore
+from mewbo_core.session.session_store import SessionStore
 
 # ---------------------------------------------------------------------------
 # Helpers

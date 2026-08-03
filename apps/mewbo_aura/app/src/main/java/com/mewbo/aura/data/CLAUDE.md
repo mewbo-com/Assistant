@@ -33,13 +33,13 @@ toggle), and `RunRepository.live()` builds `DeviceToolDispatch` INTO the flow it
 path that FOLLOWS a run (chat, the assist overlay, the notification watcher) ANSWERS a
 `device_tool_call` by construction. Advertising in `sendQuery` while wiring the answer into a ViewModel
 cost a 66.8s overlay turn (two 30s server timeouts) once. Mechanics + the pipeline-not-subscriber and
-subscriber-is-not-executor postmortems: [`repo/CLAUDE.md`](repo/CLAUDE.md) + [`device/CLAUDE.md`](device/CLAUDE.md);
-the AOSP importance chain: [`voice/CLAUDE.md`](../voice/CLAUDE.md) § "Device tools from the overlay".
+subscriber-is-not-executor rules: [`repo/CLAUDE.md`](repo/CLAUDE.md) +
+[`device/CLAUDE.md`](device/CLAUDE.md); the AOSP importance chain:
+[`voice/CLAUDE.md`](../voice/CLAUDE.md) § "Device tools from the overlay".
 
-**The same `live()` seam carries the turn-completion notification watch** ([`notify/`](../notify/CLAUDE.md)):
-a third passive follower, which is why `RunRepository` is `@Singleton` (all three share the one multicast
-SSE connection). The notifier never advertises or answers device tools — it's a passive collector; the
-singleton executor's ledger dedupes regardless.
+**The same `live()` seam carries the turn-completion notification watch**
+([`notify/`](../notify/CLAUDE.md)) as a third, passive follower — which is why `RunRepository` is
+`@Singleton`. The notifier never advertises or answers device tools.
 
 **Ask-user questions are the DELIBERATE exception to auto-answer-in-`live()` — do not "fix" them into
 it.** The `ask_user` capability is advertised unconditionally on the `X-Mewbo-Capabilities` header

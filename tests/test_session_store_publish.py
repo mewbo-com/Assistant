@@ -7,12 +7,12 @@ same event read back from the backlog.
 
 from __future__ import annotations
 
-from mewbo_core.session_event_bus import (
+from mewbo_core.session.session_event_bus import (
     SessionEventBus,
     reset_session_event_bus_for_tests,
     set_session_event_bus,
 )
-from mewbo_core.session_store import SessionStore
+from mewbo_core.session.session_store import SessionStore
 
 
 def test_append_event_publishes_record(tmp_path):

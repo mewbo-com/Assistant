@@ -31,6 +31,7 @@ export type FacetId =
   | "server"
   | "security"
   | "access"
+  | "repositories"
   | "workspace"
   | "other";
 
@@ -122,7 +123,7 @@ export const FACETS: readonly FacetMeta[] = [
     id: "security",
     title: "Security & Access",
     blurb:
-      "Manage what can call Mewbo and what Mewbo can reach: API keys, git credentials, and the secrets it already holds.",
+      "Manage what can call Mewbo: the API keys it accepts and the secrets it already holds.",
     iconName: "Shield",
     order: 9,
   },
@@ -135,12 +136,24 @@ export const FACETS: readonly FacetMeta[] = [
     order: 10,
   },
   {
+    id: "repositories",
+    title: "Repositories",
+    // "Register", not "import": adding a repository here records it and does
+    // nothing else, and the verb is the first thing a reader sees. Kept under
+    // 140 chars so `FieldHelp` renders it inline instead of collapsing the
+    // heading's blurb into a popover.
+    blurb:
+      "Register the git repositories Mewbo works with, and the credentials it uses to reach them.",
+    iconName: "GitBranch",
+    order: 11,
+  },
+  {
     id: "workspace",
     title: "Workspace",
     blurb:
       "Point Mewbo at the directories it works in, both the ones you register and the ones it creates itself, and set how it indexes them.",
     iconName: "FolderGit2",
-    order: 11,
+    order: 12,
   },
   {
     id: "other",

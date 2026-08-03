@@ -9,7 +9,7 @@ import pytest
 from mewbo_graph.plugins.wiki import build_graph as build_graph_mod
 from mewbo_graph.plugins.wiki.build_graph import WikiBuildGraphTool
 from mewbo_graph.wiki.store import JsonWikiStore
-from mewbo_graph.wiki.types import IndexingJob
+from mewbo_graph.wiki.types import CommitScope, IndexingJob
 
 FIXTURE = Path(__file__).parent / "fixtures" / "tiny_python_repo"
 
@@ -51,7 +51,7 @@ def test_build_graph_persists_nodes_edges_and_embeddings(setup):
         import asyncio
         result = asyncio.run(tool.handle(fake_step))
     # nodes/edges persisted
-    nodes = store.query_graph("x/y")
+    nodes = store.query_graph("x/y", scope=CommitScope.every())
     assert len(nodes) > 0
     # result content includes counts and language list
     body = str(result.content)
@@ -108,7 +108,7 @@ def test_build_graph_handles_embedding_disabled(setup, monkeypatch):
         import asyncio
         result = asyncio.run(tool.handle(fake_step))
     # nodes/edges persisted
-    nodes = store.query_graph("x/y")
+    nodes = store.query_graph("x/y", scope=CommitScope.every())
     assert len(nodes) > 0
     body = str(result.content)
     assert "embeddedCount\": 0" in body or "'embeddedCount': 0" in body

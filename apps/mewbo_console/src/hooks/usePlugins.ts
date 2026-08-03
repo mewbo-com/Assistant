@@ -19,10 +19,8 @@ const MARKETPLACE_KEY = [...PLUGINS_ROOT, "marketplace"] as const;
 
 /**
  * Installed + marketplace plugin data for the Plugins pane (Agent & Tools
- * facet). Replaces the old `PluginsView`'s hand-rolled `useState`/`useEffect`
- * `loadData()` + a `pendingAction`/`actionError`/`actionSuccess` state machine
- * with `window.setTimeout` as a fake toast — install/uninstall feedback now
- * rides `sonner` (already mounted at the app root via `NotificationBalloon`).
+ * facet). Install/uninstall feedback rides `sonner` (already mounted at the
+ * app root via `NotificationBalloon`).
  */
 export function usePlugins() {
   const qc = useQueryClient();

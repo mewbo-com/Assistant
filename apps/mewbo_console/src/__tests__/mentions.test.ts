@@ -28,9 +28,9 @@ describe("parseMentionInput", () => {
   });
 
   it("ignores email-style @ (preceded by a word char)", () => {
-    const text = "ping me at krishna@gmail.com please";
-    // caret right after "gmail.com"
-    expect(parseMentionInput(text, "ping me at krishna@gmail.com".length)).toBeNull();
+    const text = "ping me at ada@example.com please";
+    // caret right after "example.com"
+    expect(parseMentionInput(text, "ping me at ada@example.com".length)).toBeNull();
   });
 
   it("returns null once whitespace separates the @ from the caret", () => {

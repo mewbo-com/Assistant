@@ -140,9 +140,10 @@ def test_list_heads_private_host_skips_tls() -> None:
 
 
 def test_list_heads_hardened_argv_and_env() -> None:
-    """C2 regression: the branch lister disables the credential helper (argv) and
-    forces ``GIT_TERMINAL_PROMPT=0`` (env), so it can never wedge on the
-    read-only mounted credential file — the original EBUSY-masks-auth incident."""
+    """The branch lister disables the credential helper (argv) and forces
+    ``GIT_TERMINAL_PROMPT=0`` (env), so it can never wedge on a read-only
+    mounted credential file — a wedge there surfaces as EBUSY and masks the
+    real auth error."""
     from mewbo_graph.plugins.wiki.branches import RemoteBranchLister
 
     captured: dict = {}

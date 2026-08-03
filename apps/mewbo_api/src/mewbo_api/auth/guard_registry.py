@@ -160,9 +160,9 @@ class GuardRegistry:
     def bind(self, kit: AuthKit) -> None:
         """Bind the live ``AuthKit``, activating enforcement for every binding.
 
-        Call once at app composition. Bindings recorded before this — i.e. all of
-        them, since decoration runs at import — start enforcing against *kit*
-        from the next request, with no re-import and no re-decoration.
+        Call once at app composition. Every binding — all of them, since
+        decoration runs at import — starts enforcing against *kit* from the next
+        request, with no re-import and no re-decoration.
         """
         self._late_kit.bind(kit)
 

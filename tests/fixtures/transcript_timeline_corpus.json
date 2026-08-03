@@ -6,7 +6,7 @@
     "packages/mewbo_core/src/mewbo_core/transcript_timeline.py (canonical) and",
     "apps/mewbo_console/src/utils/timeline.ts (buildTimeline). Their own unit",
     "tests only ever checked each side against itself, so a rule added to one and",
-    "missed by the other shipped silently — which is how the Python port came to",
+    "missed by the other shipped silently \u2014 which is how the Python port came to",
     "render no plan, todos, widget, run_failure or question rows at all.",
     "",
     "This file is the contract between them. Each case is an event log plus the",
@@ -27,150 +27,857 @@
       "name": "single_turn",
       "why": "A user event opens a turn; the next assistant event closes it.",
       "events": [
-        { "type": "user", "ts": "t0", "payload": { "text": "hi" } },
-        { "type": "assistant", "ts": "t9", "payload": { "text": "hello" } }
+        {
+          "type": "user",
+          "ts": "t0",
+          "payload": {
+            "text": "hi"
+          }
+        },
+        {
+          "type": "assistant",
+          "ts": "t9",
+          "payload": {
+            "text": "hello"
+          }
+        }
       ],
       "expected": [
-        { "id": "user-1", "role": "user", "turnId": "turn-1", "content": "hi", "ts": "t0" },
-        { "id": "assistant-1", "role": "assistant", "turnId": "turn-1", "content": "hello", "ts": null }
+        {
+          "id": "user-1",
+          "role": "user",
+          "turnId": "turn-1",
+          "content": "hi",
+          "ts": "t0"
+        },
+        {
+          "id": "assistant-1",
+          "role": "assistant",
+          "turnId": "turn-1",
+          "content": "hello",
+          "ts": null
+        }
       ]
     },
     {
       "name": "completion_closes_an_unclosed_turn",
       "why": "Defensive fallback: a completion closes a turn no assistant event did.",
       "events": [
-        { "type": "user", "ts": "t0", "payload": { "text": "go" } },
-        { "type": "completion", "ts": "t9", "payload": { "done_reason": "stop" } }
+        {
+          "type": "user",
+          "ts": "t0",
+          "payload": {
+            "text": "go"
+          }
+        },
+        {
+          "type": "completion",
+          "ts": "t9",
+          "payload": {
+            "done_reason": "stop"
+          }
+        }
       ],
       "expected": [
-        { "id": "user-1", "role": "user", "turnId": "turn-1", "content": "go", "ts": "t0" },
-        { "id": "completion-1", "role": "assistant", "turnId": "turn-1", "content": "(run ended)", "ts": "t9" }
+        {
+          "id": "user-1",
+          "role": "user",
+          "turnId": "turn-1",
+          "content": "go",
+          "ts": "t0"
+        },
+        {
+          "id": "completion-1",
+          "role": "assistant",
+          "turnId": "turn-1",
+          "content": "(run ended)",
+          "ts": "t9"
+        }
       ]
     },
     {
       "name": "interrupted_turn_is_materialised",
       "why": "A turn the next prompt superseded keeps its body instead of vanishing. Its ts is the LAST body event, since no closure ever arrived.",
       "events": [
-        { "type": "user", "ts": "t0", "payload": { "text": "one" } },
-        { "type": "tool_result", "ts": "t1", "payload": { "tool_id": "shell" } },
-        { "type": "user", "ts": "t2", "payload": { "text": "two" } },
-        { "type": "assistant", "ts": "t3", "payload": { "text": "done" } }
+        {
+          "type": "user",
+          "ts": "t0",
+          "payload": {
+            "text": "one"
+          }
+        },
+        {
+          "type": "tool_result",
+          "ts": "t1",
+          "payload": {
+            "tool_id": "shell"
+          }
+        },
+        {
+          "type": "user",
+          "ts": "t2",
+          "payload": {
+            "text": "two"
+          }
+        },
+        {
+          "type": "assistant",
+          "ts": "t3",
+          "payload": {
+            "text": "done"
+          }
+        }
       ],
       "expected": [
-        { "id": "user-1", "role": "user", "turnId": "turn-1", "content": "one", "ts": "t0" },
-        { "id": "interrupted-1", "role": "run_failed", "turnId": "turn-1", "content": "", "ts": "t1" },
-        { "id": "user-2", "role": "user", "turnId": "turn-2", "content": "two", "ts": "t2" },
-        { "id": "assistant-2", "role": "assistant", "turnId": "turn-2", "content": "done", "ts": null }
+        {
+          "id": "user-1",
+          "role": "user",
+          "turnId": "turn-1",
+          "content": "one",
+          "ts": "t0"
+        },
+        {
+          "id": "interrupted-1",
+          "role": "run_failed",
+          "turnId": "turn-1",
+          "content": "",
+          "ts": "t1"
+        },
+        {
+          "id": "user-2",
+          "role": "user",
+          "turnId": "turn-2",
+          "content": "two",
+          "ts": "t2"
+        },
+        {
+          "id": "assistant-2",
+          "role": "assistant",
+          "turnId": "turn-2",
+          "content": "done",
+          "ts": null
+        }
       ]
     },
     {
       "name": "synthetic_closure_is_upgraded_in_place",
       "why": "The orchestrator's placeholder carries nothing the failure record lacks, so the failure replaces it and the row keeps its id.",
       "events": [
-        { "type": "user", "ts": "t0", "payload": { "text": "go" } },
-        { "type": "assistant", "ts": "t8", "payload": { "text": "(Run stopped: upstream died)" } },
-        { "type": "completion", "ts": "t9", "payload": { "done_reason": "error", "error": "upstream died" } }
+        {
+          "type": "user",
+          "ts": "t0",
+          "payload": {
+            "text": "go"
+          }
+        },
+        {
+          "type": "assistant",
+          "ts": "t8",
+          "payload": {
+            "text": "(Run stopped: upstream died)"
+          }
+        },
+        {
+          "type": "completion",
+          "ts": "t9",
+          "payload": {
+            "done_reason": "error",
+            "error": "upstream died"
+          }
+        }
       ],
       "expected": [
-        { "id": "user-1", "role": "user", "turnId": "turn-1", "content": "go", "ts": "t0" },
-        { "id": "assistant-1", "role": "run_failed", "turnId": "turn-1", "content": "", "ts": "t9" }
+        {
+          "id": "user-1",
+          "role": "user",
+          "turnId": "turn-1",
+          "content": "go",
+          "ts": "t0"
+        },
+        {
+          "id": "assistant-1",
+          "role": "run_failed",
+          "turnId": "turn-1",
+          "content": "",
+          "ts": "t9"
+        }
       ]
     },
     {
       "name": "failure_on_real_prose_keeps_the_answer",
       "why": "A boot sweep can append a completion to an orphaned run; the prose is the only copy of what it produced, so the failure lands beside it.",
       "events": [
-        { "type": "user", "ts": "t0", "payload": { "text": "go" } },
-        { "type": "assistant", "ts": "t8", "payload": { "text": "Here is the real answer." } },
-        { "type": "completion", "ts": "t9", "payload": { "done_reason": "error", "error": "run died" } }
+        {
+          "type": "user",
+          "ts": "t0",
+          "payload": {
+            "text": "go"
+          }
+        },
+        {
+          "type": "assistant",
+          "ts": "t8",
+          "payload": {
+            "text": "Here is the real answer."
+          }
+        },
+        {
+          "type": "completion",
+          "ts": "t9",
+          "payload": {
+            "done_reason": "error",
+            "error": "run died"
+          }
+        }
       ],
       "expected": [
-        { "id": "user-1", "role": "user", "turnId": "turn-1", "content": "go", "ts": "t0" },
-        { "id": "assistant-1", "role": "assistant", "turnId": "turn-1", "content": "Here is the real answer.", "ts": null },
-        { "id": "run-failed-t9", "role": "run_failed", "turnId": "turn-1", "content": "", "ts": "t9" }
+        {
+          "id": "user-1",
+          "role": "user",
+          "turnId": "turn-1",
+          "content": "go",
+          "ts": "t0"
+        },
+        {
+          "id": "assistant-1",
+          "role": "assistant",
+          "turnId": "turn-1",
+          "content": "Here is the real answer.",
+          "ts": null
+        },
+        {
+          "id": "run-failed-t9",
+          "role": "run_failed",
+          "turnId": "turn-1",
+          "content": "",
+          "ts": "t9"
+        }
       ]
     },
     {
       "name": "markers_between_turns_survive_the_gate",
       "why": "Trigger, recovery, compaction and termination all legitimately arrive with no turn open; gating them would discard every one.",
       "events": [
-        { "type": "user", "ts": "t0", "payload": { "text": "q1" } },
-        { "type": "assistant", "ts": "t1", "payload": { "text": "a1" } },
-        { "type": "trigger_fired", "ts": "t2", "payload": { "trigger_id": "tr1", "kind": "time.at", "payload_summary": "woke" } },
-        { "type": "recovery", "ts": "t3", "payload": { "action": "continue" } },
-        { "type": "context_compacted", "ts": "t4", "payload": { "depth": 0, "mode": "auto", "tokens_saved": 4200 } },
-        { "type": "session_terminated", "ts": "t5", "payload": {} }
+        {
+          "type": "user",
+          "ts": "t0",
+          "payload": {
+            "text": "q1"
+          }
+        },
+        {
+          "type": "assistant",
+          "ts": "t1",
+          "payload": {
+            "text": "a1"
+          }
+        },
+        {
+          "type": "trigger_fired",
+          "ts": "t2",
+          "payload": {
+            "trigger_id": "tr1",
+            "kind": "time.at",
+            "payload_summary": "woke"
+          }
+        },
+        {
+          "type": "recovery",
+          "ts": "t3",
+          "payload": {
+            "action": "continue"
+          }
+        },
+        {
+          "type": "context_compacted",
+          "ts": "t4",
+          "payload": {
+            "depth": 0,
+            "mode": "auto",
+            "tokens_saved": 4200
+          }
+        },
+        {
+          "type": "session_terminated",
+          "ts": "t5",
+          "payload": {}
+        }
       ],
       "expected": [
-        { "id": "user-1", "role": "user", "turnId": "turn-1", "content": "q1", "ts": "t0" },
-        { "id": "assistant-1", "role": "assistant", "turnId": "turn-1", "content": "a1", "ts": null },
-        { "id": "trigger-fired-t2", "role": "trigger", "turnId": "triggers", "content": "", "ts": "t2" },
-        { "id": "recovery-t3", "role": "recovery", "turnId": "recovery", "content": "", "ts": "t3" },
-        { "id": "compaction-t4", "role": "compaction", "turnId": "compaction", "content": "", "ts": "t4" },
-        { "id": "session-terminated-t5", "role": "session_terminated", "turnId": "session-terminated", "content": "", "ts": "t5" }
+        {
+          "id": "user-1",
+          "role": "user",
+          "turnId": "turn-1",
+          "content": "q1",
+          "ts": "t0"
+        },
+        {
+          "id": "assistant-1",
+          "role": "assistant",
+          "turnId": "turn-1",
+          "content": "a1",
+          "ts": null
+        },
+        {
+          "id": "trigger-fired-t2",
+          "role": "trigger",
+          "turnId": "triggers",
+          "content": "",
+          "ts": "t2"
+        },
+        {
+          "id": "recovery-t3",
+          "role": "recovery",
+          "turnId": "recovery",
+          "content": "",
+          "ts": "t3"
+        },
+        {
+          "id": "compaction-t4",
+          "role": "compaction",
+          "turnId": "compaction",
+          "content": "",
+          "ts": "t4"
+        },
+        {
+          "id": "session-terminated-t5",
+          "role": "session_terminated",
+          "turnId": "session-terminated",
+          "content": "",
+          "ts": "t5"
+        }
       ]
     },
     {
       "name": "in_turn_cards",
       "why": "Plan, todos, widget and question rows fold inside an open turn. The plan row deliberately carries no ts of its own.",
       "events": [
-        { "type": "user", "ts": "t0", "payload": { "text": "go" } },
-        { "type": "plan_proposed", "ts": "t1", "payload": { "revision": 1, "content": "# Plan", "summary": "do it" } },
-        { "type": "todos", "ts": "t2", "payload": { "items": [{ "label": "step one", "status": "pending" }] } },
-        { "type": "widget_ready", "ts": "t3", "payload": { "widget_id": "w1", "kind": "chart" } },
-        { "type": "user_question", "ts": "t4", "payload": { "call_id": "c1", "call_token": "secret-token", "questions": [] } },
-        { "type": "user_question_answered", "ts": "t5", "payload": { "call_id": "c1", "outcome": "answered", "answers": [] } },
-        { "type": "assistant", "ts": "t6", "payload": { "text": "done" } }
+        {
+          "type": "user",
+          "ts": "t0",
+          "payload": {
+            "text": "go"
+          }
+        },
+        {
+          "type": "plan_proposed",
+          "ts": "t1",
+          "payload": {
+            "revision": 1,
+            "content": "# Plan",
+            "summary": "do it"
+          }
+        },
+        {
+          "type": "todos",
+          "ts": "t2",
+          "payload": {
+            "items": [
+              {
+                "label": "step one",
+                "status": "pending"
+              }
+            ]
+          }
+        },
+        {
+          "type": "widget_ready",
+          "ts": "t3",
+          "payload": {
+            "widget_id": "w1",
+            "kind": "chart"
+          }
+        },
+        {
+          "type": "user_question",
+          "ts": "t4",
+          "payload": {
+            "call_id": "c1",
+            "call_token": "secret-token",
+            "questions": []
+          }
+        },
+        {
+          "type": "user_question_answered",
+          "ts": "t5",
+          "payload": {
+            "call_id": "c1",
+            "outcome": "answered",
+            "answers": []
+          }
+        },
+        {
+          "type": "assistant",
+          "ts": "t6",
+          "payload": {
+            "text": "done"
+          }
+        }
       ],
       "expected": [
-        { "id": "user-1", "role": "user", "turnId": "turn-1", "content": "go", "ts": "t0" },
-        { "id": "plan-1", "role": "plan", "turnId": "turn-1", "content": "", "ts": null },
-        { "id": "todos-turn-1", "role": "todos", "turnId": "turn-1", "content": "", "ts": "t2" },
-        { "id": "widget-t3", "role": "widget", "turnId": "turn-1", "content": "", "ts": "t3" },
-        { "id": "question-c1", "role": "question", "turnId": "turn-1", "content": "", "ts": "t4" },
-        { "id": "assistant-1", "role": "assistant", "turnId": "turn-1", "content": "done", "ts": null }
+        {
+          "id": "user-1",
+          "role": "user",
+          "turnId": "turn-1",
+          "content": "go",
+          "ts": "t0"
+        },
+        {
+          "id": "plan-1",
+          "role": "plan",
+          "turnId": "turn-1",
+          "content": "",
+          "ts": null
+        },
+        {
+          "id": "todos-turn-1",
+          "role": "todos",
+          "turnId": "turn-1",
+          "content": "",
+          "ts": "t2"
+        },
+        {
+          "id": "widget-t3",
+          "role": "widget",
+          "turnId": "turn-1",
+          "content": "",
+          "ts": "t3"
+        },
+        {
+          "id": "question-c1",
+          "role": "question",
+          "turnId": "turn-1",
+          "content": "",
+          "ts": "t4"
+        },
+        {
+          "id": "assistant-1",
+          "role": "assistant",
+          "turnId": "turn-1",
+          "content": "done",
+          "ts": null
+        }
       ]
     },
     {
       "name": "reactive_compaction_renders_inside_the_open_turn",
       "why": "Unlike recovery, compaction is not restricted to arriving between turns; a mid-loop one renders where the horizon moved.",
       "events": [
-        { "type": "user", "ts": "t0", "payload": { "text": "go" } },
-        { "type": "context_compacted", "ts": "t1", "payload": { "depth": 0, "mode": "reactive" } },
-        { "type": "assistant", "ts": "t2", "payload": { "text": "ok" } }
+        {
+          "type": "user",
+          "ts": "t0",
+          "payload": {
+            "text": "go"
+          }
+        },
+        {
+          "type": "context_compacted",
+          "ts": "t1",
+          "payload": {
+            "depth": 0,
+            "mode": "reactive"
+          }
+        },
+        {
+          "type": "assistant",
+          "ts": "t2",
+          "payload": {
+            "text": "ok"
+          }
+        }
       ],
       "expected": [
-        { "id": "user-1", "role": "user", "turnId": "turn-1", "content": "go", "ts": "t0" },
-        { "id": "compaction-t1", "role": "compaction", "turnId": "turn-1", "content": "", "ts": "t1" },
-        { "id": "assistant-1", "role": "assistant", "turnId": "turn-1", "content": "ok", "ts": null }
+        {
+          "id": "user-1",
+          "role": "user",
+          "turnId": "turn-1",
+          "content": "go",
+          "ts": "t0"
+        },
+        {
+          "id": "compaction-t1",
+          "role": "compaction",
+          "turnId": "turn-1",
+          "content": "",
+          "ts": "t1"
+        },
+        {
+          "id": "assistant-1",
+          "role": "assistant",
+          "turnId": "turn-1",
+          "content": "ok",
+          "ts": null
+        }
       ]
     },
     {
       "name": "engine_only_events_are_not_conversation",
       "why": "A halt_no_progress recovery is engine trace, and a sub-agent compaction narrows only its own isolated context. Neither is a row.",
       "events": [
-        { "type": "user", "ts": "t0", "payload": { "text": "go" } },
-        { "type": "recovery", "ts": "t1", "payload": { "action": "halt_no_progress" } },
-        { "type": "context_compacted", "ts": "t2", "payload": { "depth": 1, "mode": "reactive" } },
-        { "type": "assistant", "ts": "t3", "payload": { "text": "done" } }
+        {
+          "type": "user",
+          "ts": "t0",
+          "payload": {
+            "text": "go"
+          }
+        },
+        {
+          "type": "recovery",
+          "ts": "t1",
+          "payload": {
+            "action": "halt_no_progress"
+          }
+        },
+        {
+          "type": "context_compacted",
+          "ts": "t2",
+          "payload": {
+            "depth": 1,
+            "mode": "reactive"
+          }
+        },
+        {
+          "type": "assistant",
+          "ts": "t3",
+          "payload": {
+            "text": "done"
+          }
+        }
       ],
       "expected": [
-        { "id": "user-1", "role": "user", "turnId": "turn-1", "content": "go", "ts": "t0" },
-        { "id": "assistant-1", "role": "assistant", "turnId": "turn-1", "content": "done", "ts": null }
+        {
+          "id": "user-1",
+          "role": "user",
+          "turnId": "turn-1",
+          "content": "go",
+          "ts": "t0"
+        },
+        {
+          "id": "assistant-1",
+          "role": "assistant",
+          "turnId": "turn-1",
+          "content": "done",
+          "ts": null
+        }
       ]
     },
     {
       "name": "events_outside_a_turn_are_gated_out",
       "why": "Body events before the first prompt, or after a turn closed, belong to no conversation.",
       "events": [
-        { "type": "tool_result", "ts": "t0", "payload": { "tool_id": "shell" } },
-        { "type": "user", "ts": "t1", "payload": { "text": "hi" } },
-        { "type": "assistant", "ts": "t2", "payload": { "text": "yo" } },
-        { "type": "tool_result", "ts": "t3", "payload": { "tool_id": "orphan" } }
+        {
+          "type": "tool_result",
+          "ts": "t0",
+          "payload": {
+            "tool_id": "shell"
+          }
+        },
+        {
+          "type": "user",
+          "ts": "t1",
+          "payload": {
+            "text": "hi"
+          }
+        },
+        {
+          "type": "assistant",
+          "ts": "t2",
+          "payload": {
+            "text": "yo"
+          }
+        },
+        {
+          "type": "tool_result",
+          "ts": "t3",
+          "payload": {
+            "tool_id": "orphan"
+          }
+        }
       ],
       "expected": [
-        { "id": "user-1", "role": "user", "turnId": "turn-1", "content": "hi", "ts": "t1" },
-        { "id": "assistant-1", "role": "assistant", "turnId": "turn-1", "content": "yo", "ts": null }
+        {
+          "id": "user-1",
+          "role": "user",
+          "turnId": "turn-1",
+          "content": "hi",
+          "ts": "t1"
+        },
+        {
+          "id": "assistant-1",
+          "role": "assistant",
+          "turnId": "turn-1",
+          "content": "yo",
+          "ts": null
+        }
+      ]
+    },
+    {
+      "name": "generative_ui_upserts_on_ui_id",
+      "why": "A model-authored UI panel folds inside an open turn like a widget, but unlike a widget it UPSERTS: ui_id is the wire's declared replace key, so a run refining a panel it already showed replaces that row in place and the row keeps the ts of its first appearance. A second, distinct ui_id gets its own row. A payload carrying no ui_id has nothing to key on and is dropped rather than given a synthetic id.",
+      "events": [
+        {
+          "type": "user",
+          "ts": "t0",
+          "payload": {
+            "text": "how's the build"
+          }
+        },
+        {
+          "type": "generative_ui",
+          "ts": "t1",
+          "payload": {
+            "ui_id": "gui-0123abcd",
+            "session_id": "s1",
+            "spec": {
+              "root": [
+                {
+                  "component": "Divider",
+                  "props": {}
+                }
+              ]
+            },
+            "alt_text": "first",
+            "summary": "CI status"
+          }
+        },
+        {
+          "type": "generative_ui",
+          "ts": "t2",
+          "payload": {
+            "ui_id": "gui-0123abcd",
+            "session_id": "s1",
+            "spec": {
+              "root": [
+                {
+                  "component": "Divider",
+                  "props": {}
+                }
+              ]
+            },
+            "alt_text": "second",
+            "summary": "CI status"
+          }
+        },
+        {
+          "type": "generative_ui",
+          "ts": "t3",
+          "payload": {
+            "ui_id": "gui-99887766",
+            "session_id": "s1",
+            "spec": {
+              "root": [
+                {
+                  "component": "Divider",
+                  "props": {}
+                }
+              ]
+            },
+            "alt_text": "other",
+            "summary": "coverage"
+          }
+        },
+        {
+          "type": "generative_ui",
+          "ts": "t4",
+          "payload": {
+            "alt_text": "unkeyed"
+          }
+        },
+        {
+          "type": "assistant",
+          "ts": "t5",
+          "payload": {
+            "text": "green"
+          }
+        }
+      ],
+      "expected": [
+        {
+          "id": "user-1",
+          "role": "user",
+          "turnId": "turn-1",
+          "content": "how's the build",
+          "ts": "t0"
+        },
+        {
+          "id": "genui-gui-0123abcd",
+          "role": "generative_ui",
+          "turnId": "turn-1",
+          "content": "",
+          "ts": "t1"
+        },
+        {
+          "id": "genui-gui-99887766",
+          "role": "generative_ui",
+          "turnId": "turn-1",
+          "content": "",
+          "ts": "t3"
+        },
+        {
+          "id": "assistant-1",
+          "role": "assistant",
+          "turnId": "turn-1",
+          "content": "green",
+          "ts": null
+        }
+      ]
+    },
+    {
+      "name": "project_switch_is_conversation_not_trace",
+      "why": "A completed switch_project is CONVERSATION: every tool call and sub-agent after it ran in a different directory, so a reader without the row silently attributes the rest of the turn to the first project. A REFUSED switch (success=false, the shared error envelope) must produce nothing \u2014 nothing moved \u2014 and a result naming no project is unreadable and must also produce nothing. Every other tool_result stays trace-only.",
+      "events": [
+        {
+          "type": "user",
+          "ts": "t0",
+          "payload": {
+            "text": "fix the failing test in beacon"
+          }
+        },
+        {
+          "type": "tool_result",
+          "ts": "t1",
+          "payload": {
+            "tool_id": "read_file",
+            "success": true,
+            "result": "x = 1"
+          }
+        },
+        {
+          "type": "tool_result",
+          "ts": "t2",
+          "payload": {
+            "tool_id": "switch_project",
+            "success": false,
+            "result": "{'error': {'code': 'unavailable', 'message': \"Project 'ghost' points at '/srv/ghost', which does not exist on this host.\"}}"
+          }
+        },
+        {
+          "type": "tool_result",
+          "ts": "t3",
+          "payload": {
+            "tool_id": "switch_project",
+            "success": true,
+            "result": "{\"project\": \"beacon\", \"name\": \"beacon\", \"kind\": \"configured\", \"cwd\": \"/srv/beacon\", \"repo\": \"git.example.com/acme/beacon\", \"branch\": null, \"description\": \"Second project\", \"previous_project\": null, \"previous_cwd\": \"/srv/alpha\", \"project_instructions_found\": true, \"bound_tools\": 42, \"skills\": 7, \"summary\": \"Switched to project 'beacon' (configured).\"}"
+          }
+        },
+        {
+          "type": "tool_result",
+          "ts": "t4",
+          "payload": {
+            "tool_id": "switch_project",
+            "success": true,
+            "result": "{\"cwd\": \"/srv/nowhere\"}"
+          }
+        },
+        {
+          "type": "assistant",
+          "ts": "t5",
+          "payload": {
+            "text": "fixed"
+          }
+        }
+      ],
+      "expected": [
+        {
+          "id": "user-1",
+          "role": "user",
+          "turnId": "turn-1",
+          "content": "fix the failing test in beacon",
+          "ts": "t0"
+        },
+        {
+          "id": "project-switch-t3",
+          "role": "project_switch",
+          "turnId": "turn-1",
+          "content": "",
+          "ts": "t3"
+        },
+        {
+          "id": "assistant-1",
+          "role": "assistant",
+          "turnId": "turn-1",
+          "content": "fixed",
+          "ts": null
+        }
+      ]
+    },
+    {
+      "name": "safety_plane_disclosure_and_deny",
+      "why": "Disclosure fires before the plane evaluates anything (inside the first open turn, before any tool call); a deny can land between turns exactly like a fired trigger, so both are hoisted above the open-turn gate rather than dropped.",
+      "events": [
+        {
+          "type": "user",
+          "ts": "t0",
+          "payload": {
+            "text": "q1"
+          }
+        },
+        {
+          "type": "safety_plane",
+          "ts": "t0.5",
+          "payload": {
+            "phase": "disclosed",
+            "documents": [
+              ".mewbo/policy/house-rules.md"
+            ],
+            "rules": [
+              {
+                "name": "no-payments",
+                "kind": "tool.match",
+                "decision": "deny",
+                "inspects": "tool ids matching mcp__payments__.*"
+              }
+            ],
+            "inspects_tool_calls": true,
+            "inspects_turns": true
+          }
+        },
+        {
+          "type": "assistant",
+          "ts": "t1",
+          "payload": {
+            "text": "a1"
+          }
+        },
+        {
+          "type": "safety_plane",
+          "ts": "t2",
+          "payload": {
+            "phase": "deny",
+            "rule": "turn-ceiling",
+            "reason": "Run exceeded its turn ceiling."
+          }
+        }
+      ],
+      "expected": [
+        {
+          "id": "user-1",
+          "role": "user",
+          "turnId": "turn-1",
+          "content": "q1",
+          "ts": "t0"
+        },
+        {
+          "id": "safety-plane-disclosed-t0.5",
+          "role": "safety_plane",
+          "turnId": "turn-1",
+          "content": "",
+          "ts": "t0.5"
+        },
+        {
+          "id": "assistant-1",
+          "role": "assistant",
+          "turnId": "turn-1",
+          "content": "a1",
+          "ts": null
+        },
+        {
+          "id": "safety-plane-deny-t2",
+          "role": "safety_plane",
+          "turnId": "safety-plane",
+          "content": "",
+          "ts": "t2"
+        }
       ]
     }
   ]

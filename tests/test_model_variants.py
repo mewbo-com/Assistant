@@ -9,7 +9,7 @@ migrated built-in defaults being byte-for-byte preserved through
 from __future__ import annotations
 
 import pytest
-from mewbo_core.model_variants import (
+from mewbo_core.llm.model_variants import (
     ModelProfile,
     ModelVariantDefaults,
     ModelVariantMap,
@@ -90,7 +90,7 @@ def test_validate_all_catches_duplicate_match():
 
 def test_bad_file_degrades_to_conservative_default(monkeypatch):
     # A broken document must not crash the loop — empty map, conservative default.
-    import mewbo_core.model_variants as mv
+    import mewbo_core.llm.model_variants as mv
 
     def _boom(*_a, **_k):
         raise RuntimeError("corrupt yaml")
@@ -135,7 +135,7 @@ def test_shipped_defaults_match_legacy_builtin(model, expected):
 
 def test_model_prefers_structured_patch_reads_the_file():
     # The public selector now routes through the data file for its defaults.
-    from mewbo_core.llm import model_prefers_structured_patch
+    from mewbo_core.llm.llm import model_prefers_structured_patch
 
     reset_model_variant_registry()
     assert model_prefers_structured_patch("openai/gpt-5") is True

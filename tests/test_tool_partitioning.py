@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+from mewbo_core.agents.spawn_agent import AgentError
 from mewbo_core.classes import ToolResult
-from mewbo_core.spawn_agent import AgentError
-from mewbo_core.tool_registry import ToolSpec
-from mewbo_core.tool_use_loop import ToolBatch, ToolUseLoop
+from mewbo_core.loop.tool_use_loop import ToolBatch, ToolUseLoop
+from mewbo_core.tooling.tool_registry import ToolSpec
 
 # -- Helpers ----------------------------------------------------------------
 
@@ -27,11 +28,43 @@ def _tc(name: str) -> dict:
     return {"name": name, "id": f"call_{name}", "args": {}}
 
 
-def _loop() -> ToolUseLoop:
+def _loop(session_tools: list | None = None) -> ToolUseLoop:
     loop = object.__new__(ToolUseLoop)
     loop._tool_registry = MagicMock()
     loop._tool_registry.get_spec = MagicMock(return_value=None)
+    loop._session_tools = session_tools or []
     return loop
+
+
+class _FakeSessionTool:
+    """A session tool with no ``execution_timeout`` hook at all — the
+    byte-identical control (undeclared tools are untouched)."""
+
+    def __init__(self, tool_id: str):
+        self.tool_id = tool_id
+
+
+class _DeclaringSessionTool:
+    """A session tool that declares its own execution ceiling via the
+    ``getattr`` convention ``_declared_execution_timeout`` reads."""
+
+    def __init__(self, tool_id: str, value):
+        self.tool_id = tool_id
+        self._value = value
+
+    def execution_timeout(self, tool_input):
+        return self._value
+
+
+class _RaisingSessionTool:
+    """A session tool whose ``execution_timeout`` hook raises — must not
+    propagate; the call falls back to the flat ceiling instead."""
+
+    def __init__(self, tool_id: str):
+        self.tool_id = tool_id
+
+    def execution_timeout(self, tool_input):
+        raise RuntimeError("ceiling hook exploded")
 
 
 # -- ToolBatch --------------------------------------------------------------
@@ -106,6 +139,82 @@ class TestGetToolTimeout:
         loop = _loop()
         loop._tool_registry = None
         assert loop._get_tool_timeout("t") == 120.0
+
+
+# -- _declared_execution_timeout ---------------------------------------------
+
+
+class TestDeclaredExecutionTimeout:
+    """(declared?, seconds) for one call — the boolean is what lets ``None``
+    mean "no ceiling at all" while still distinguishing that from a tool
+    that declined to declare anything."""
+
+    def test_unknown_tool_reports_not_declared(self):
+        loop = _loop()
+        assert loop._declared_execution_timeout("nope", {}) == (False, None)
+
+    def test_tool_with_no_hook_reports_not_declared(self):
+        loop = _loop([_FakeSessionTool("plain")])
+        assert loop._declared_execution_timeout("plain", {}) == (False, None)
+
+    def test_hook_returning_none_is_a_declared_unbounded_ceiling(self):
+        loop = _loop([_DeclaringSessionTool("ask", None)])
+        assert loop._declared_execution_timeout("ask", {}) == (True, None)
+
+    def test_hook_returning_a_number_is_declared(self):
+        loop = _loop([_DeclaringSessionTool("ask", 45)])
+        assert loop._declared_execution_timeout("ask", {}) == (True, 45.0)
+
+    @pytest.mark.parametrize("garbage", ["soon", True, False, object()])
+    def test_hook_returning_non_numeric_falls_back_to_not_declared(self, garbage):
+        loop = _loop([_DeclaringSessionTool("ask", garbage)])
+        assert loop._declared_execution_timeout("ask", {}) == (False, None)
+
+    def test_raising_hook_falls_back_to_not_declared(self):
+        loop = _loop([_RaisingSessionTool("ask")])
+        assert loop._declared_execution_timeout("ask", {}) == (False, None)
+
+
+# -- _tool_execution_timeout --------------------------------------------------
+
+
+class TestToolExecutionTimeout:
+    """A session tool's own declaration wins outright; failing that, the
+    check_agents wait/timeout arm still wins over the flat ceiling; failing
+    that, the flat ceiling is unchanged — the same three-rung order as
+    before this tool learned to declare anything.
+    """
+
+    def test_undeclared_non_wait_tool_is_byte_identical_to_before(self):
+        loop = _loop()
+        loop._tool_registry.get_spec.return_value = _spec("t", timeout=45.0)
+        assert loop._tool_execution_timeout("t", _tc("t")) == 45.0
+
+    def test_undeclared_check_agents_wait_arm_still_wins(self):
+        loop = _loop()
+        tc = {"name": "check_agents", "args": {"wait": True, "timeout": 300}, "id": "c1"}
+        assert loop._tool_execution_timeout("check_agents", tc) == 330.0
+
+    def test_declared_none_removes_the_ceiling_entirely(self):
+        loop = _loop([_DeclaringSessionTool("ask", None)])
+        assert loop._tool_execution_timeout("ask", _tc("ask")) is None
+
+    def test_declared_number_wins_over_a_larger_registry_ceiling(self):
+        loop = _loop([_DeclaringSessionTool("ask", 45)])
+        loop._tool_registry.get_spec.return_value = _spec("ask", timeout=300.0)
+        assert loop._tool_execution_timeout("ask", _tc("ask")) == 45.0
+
+    def test_declared_garbage_falls_back_to_the_flat_ceiling(self):
+        loop = _loop([_DeclaringSessionTool("ask", "soon")])
+        assert loop._tool_execution_timeout("ask", _tc("ask")) == 120.0
+
+    def test_declared_bool_falls_back_to_the_flat_ceiling(self):
+        loop = _loop([_DeclaringSessionTool("ask", True)])
+        assert loop._tool_execution_timeout("ask", _tc("ask")) == 120.0
+
+    def test_raising_hook_falls_back_and_does_not_propagate(self):
+        loop = _loop([_RaisingSessionTool("ask")])
+        assert loop._tool_execution_timeout("ask", _tc("ask")) == 120.0
 
 
 # -- ToolSpec typed fields --------------------------------------------------

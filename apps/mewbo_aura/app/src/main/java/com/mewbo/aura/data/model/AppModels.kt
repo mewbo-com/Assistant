@@ -1,8 +1,8 @@
 package com.mewbo.aura.data.model
 
 /**
- * Domain models for the Mewbo Apps sub-product (design spec
- * `docs/superpowers/specs/2026-07-17-mewbo-apps-design.md` §3), mapped from their `data/api`
+ * Domain models for the Mewbo Apps sub-product (design:
+ * `apps/mewbo_api/src/mewbo_api/apps/CLAUDE.md`), mapped from their `data/api`
  * DTO counterparts ([com.mewbo.aura.data.api.AppSummaryDto] etc.) the same way [SessionSummary] is
  * mapped from [com.mewbo.aura.data.api.SessionSummaryDto] — UI-facing shapes with no wire
  * annotations.

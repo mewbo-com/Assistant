@@ -39,7 +39,7 @@ object AuraColors {
     val surfaceBubbleOnWash = Color(0xEB141518)
     val surfaceSelected = Color(0xFF26282C)
 
-    /** Side-rail (nav drawer) canvas — side-rail visual-polish task, 2026-07-14: "the drawer surface
+    /** Side-rail (nav drawer) canvas — side-rail visual-polish task: "the drawer surface
      * is currently pure black — make it slightly gray... so the open rail reads as a distinct layer."
      * Deliberately its OWN token rather than reusing [surfaceSelected] (that IS the same rail's
      * selected-row/pill fill — painting the whole canvas that color would erase the selected-row
@@ -63,7 +63,7 @@ object AuraColors {
     val accentError = Color(0xFFE46962)
 
     /**
-     * Composer scope-row provenance accents (user directive 2026-07-14): the project scope and the
+     * Composer scope-row provenance accents (user directive): the project scope and the
      * tool scope each carry their OWN glyph tint so a glance separates "where this chat runs" from
      * "what it can do". Deliberately distinct from each other AND from [accentPrimary] (selection)
      * and [accentError] (failure), and kept clear of the yellow/brown/green the user rejected for the
@@ -141,7 +141,7 @@ object AuraColors {
      * (bright→lighter stop, faint→darker stop) rather than by angle — this also removes the
      * periodic wrong-dominant-hue bug the old angular wheel had.
      *
-     * VALUES are user-directed dark-blend tuning (2026-07-03), not the raw capture samples: the
+     * VALUES are user-directed dark-blend tuning, not the raw capture samples: the
      * scanline-sampled stops (#6D85B9/#4562A0) were composited over the overlay SCRIM and read
      * far too bright over the app's pure-black canvas and under foreground content. The directive:
      * shades very close to the black background so the glow blends smoothly and never competes
@@ -152,7 +152,7 @@ object AuraColors {
         GradientStop(Color(0xFF131C36), 1f), // fade stop — near-black navy, melts into the canvas
     )
 
-    /** Invocation ignition stops [R4 2026-07-10]: the phase-1 perimeter bloom runs brighter,
+    /** Invocation ignition stops [R4]: the phase-1 perimeter bloom runs brighter,
      * blue-forward hues derived from [accentPrimary] (#4C6EF5) so the moment is ownable brand
      * light, decaying into the caller's own `colors` pair as the bloom settles — the overlay's
      * [auroraOverlayLiveBloom]; the chat surface never blooms (the CPU-side pair-lerp lives in
@@ -163,8 +163,8 @@ object AuraColors {
         GradientStop(Color(0xFF23336B), 1f), // deep stop — navy bridge toward the resting pair
     )
 
-    /** Overlay LIVE bloom stops [R4 2026-07-10]: the RAW reference-capture scanline values
-     * (#6D85B9/#4562A0) that the 2026-07-03 dark-blend directive darkened into
+    /** Overlay LIVE bloom stops [R4]: the RAW reference-capture scanline values
+     * (#6D85B9/#4562A0) that the dark-blend directive darkened into
      * [auroraOverlayBloom]. That directive is CHAT-scoped atmosphere ("never competes with
      * content on top"); the overlay inherited the darkened pair and rendered a mathematically
      * present but perceptually invisible glow (debug-verified: peak pixel (47,61,100) matched
@@ -176,7 +176,7 @@ object AuraColors {
         GradientStop(Color(0xFF4562A0), 1f), // fade stop — raw ref2 mid-falloff sample
     )
 
-    /** [R5 2026-07-11] Aurora hue family B — violet. The overlay's multi-hue aurora drifts the
+    /** [R5] Aurora hue family B — violet. The overlay's multi-hue aurora drifts the
      * two-stop pair through three families (A = [auroraOverlayLiveBloom] blue, B = this violet,
      * C = [auroraOverlayEmberBloom]); violet sits BETWEEN blue and ember so the drift path never
      * crosses muddy gray. Chat never drifts (iHueDrift 0) and never renders these. */
@@ -185,15 +185,15 @@ object AuraColors {
         GradientStop(Color(0xFF5B3E96), 1f), // deep stop — deep violet over navy
     )
 
-    /** [R5 2026-07-11] Aurora hue family C — ember. Warm accent for the aurora drift: ember/
-     * burnt-sienna, deliberately NOT yellow/gold/green (the 2026-07-04 chat rejection informs
+    /** [R5] Aurora hue family C — ember. Warm accent for the aurora drift: ember/
+     * burnt-sienna, deliberately NOT yellow/gold/green (the chat rejection informs
      * taste). Overlay-only, same scoping as family B above. */
     val auroraOverlayEmberBloom: List<GradientStop> = listOf(
         GradientStop(Color(0xFFE8956B), 0f), // light stop — warm ember
         GradientStop(Color(0xFFA34E2E), 1f), // deep stop — burnt sienna
     )
 
-    /** Overlay scrim vertical gradient [R4 2026-07-10]: supersedes the flat 60%-black fill (Rev E
+    /** Overlay scrim vertical gradient [R4]: supersedes the flat 60%-black fill (Rev E
      * §E-2) AND the 40% `scrimOverlay` token it overrode — a screen-aware assistant must not dim
      * the screen it claims to understand. Near-transparent over the user's app (top→60%), one
      * bottom-concentrated ramp guaranteeing pill/glow contrast over arbitrary bright content.

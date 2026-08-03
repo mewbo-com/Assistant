@@ -237,7 +237,7 @@ def test_nl_context_seeds_user_query_not_system_prompt(tmp_path, _scg_enabled):
 
 
 def test_no_nl_context_keeps_user_query_free_of_enrich_block(tmp_path, _scg_enabled):
-    """A map with no NL context renders no WORKSPACE NL CONTEXT block (legacy parity)."""
+    """A map with no NL context renders no WORKSPACE NL CONTEXT block."""
     store = JsonAgenticSearchStore(root_dir=tmp_path)
     runtime = _FakeRuntime()
     MapSourceJob.start(
@@ -338,8 +338,8 @@ def test_fake_parse_populates_node_and_edge_counts(tmp_path, _scg_enabled):
 def test_driven_session_settles_completed(tmp_path, _scg_enabled):
     """A clean session end settles the job ``completed`` + a terminal event.
 
-    Regression: nothing ever moved the status off ``queued`` and the map SSE
-    log never received a terminal event, so streams only died by idle timeout.
+    Without both, the status stays ``queued`` and the map SSE log never gets a
+    terminal event, so streams die only by idle timeout.
     """
     store = JsonAgenticSearchStore(root_dir=tmp_path)
     runtime = _FakeRuntime()

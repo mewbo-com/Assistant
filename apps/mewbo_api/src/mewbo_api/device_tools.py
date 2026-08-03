@@ -1,6 +1,6 @@
-"""Client-declared device tools — api-side dispatch glue (Phase 1).
+"""Client-declared device tools — api-side dispatch glue.
 
-The generic bridge lives split across two layers: ``mewbo_core.client_tools``
+The generic bridge lives split across two layers: ``mewbo_core.tooling.client_tools``
 owns the ``SessionTool`` (``ClientDeclaredTool``) and the down-only DI seam
 (``DeviceToolDispatcher``) it dispatches through; this module owns the
 CONCRETE dispatcher — the transport/persistence half that can't live in core
@@ -21,8 +21,7 @@ prevents replay (single-use, consumed-once) — it does NOT prove the response
 came from the physical device the call was dispatched to. Any concurrent
 viewer of the same session's SSE stream (e.g. a read-only console tab)
 receives the identical token and could answer on the device's behalf; that
-is the accepted Phase 1 threat model. Verified per-device identity is a
-future phase.
+is the accepted threat model.
 """
 
 from __future__ import annotations
@@ -37,8 +36,8 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from mewbo_core.common import get_logger
-from mewbo_core.session_event_bus import get_session_event_bus
-from mewbo_core.session_runtime import SessionRuntime
+from mewbo_core.loop.session_runtime import SessionRuntime
+from mewbo_core.session.session_event_bus import get_session_event_bus
 
 logging = get_logger(name="api.device_tools")
 
@@ -194,7 +193,7 @@ class DevicePendingCalls:
 class ApiDeviceToolDispatcher:
     """Concrete ``DeviceToolDispatcherImpl`` — session-event delivery + bounded wait.
 
-    Registered into the core seam (``mewbo_core.client_tools.DeviceToolDispatcher``)
+    Registered into the core seam (``mewbo_core.tooling.client_tools.DeviceToolDispatcher``)
     at api startup, mirroring ``RunStoreSearchLauncher``. DI'd with the
     session runtime (to append the ``device_tool_call`` event through the
     SAME choke point the ``todos`` event uses) and the pending-call registry

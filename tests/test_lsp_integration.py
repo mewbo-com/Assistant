@@ -448,6 +448,18 @@ class TestLSPServerManagerFindRoot:
 
 
 class TestLSPToolRun:
+    @pytest.fixture(autouse=True)
+    def _tmp_path_is_in_scope(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """Every path here goes through the guard, so put ``tmp_path`` in scope.
+
+        ``LSPTool.run`` resolves EVERY ``file_path`` through ``resolve_safe_path``
+        — there is no unguarded branch — and with nothing published the allowed
+        roots are CWD ∪ the configured projects. These cases exercise the
+        dispatch and formatting, not the boundary; the scoping matrix itself is
+        pinned in ``tests/test_lsp_tool_path_guard.py``.
+        """
+        monkeypatch.chdir(tmp_path)
+
     def _make_tool(self) -> LSPTool:
         return LSPTool.__new__(LSPTool)
 
@@ -460,9 +472,9 @@ class TestLSPToolRun:
         result = tool.run(step)
         assert "file_path" in result.content.lower() or "required" in result.content.lower()
 
-    def test_unknown_operation_returns_error(self):
+    def test_unknown_operation_returns_error(self, tmp_path: Path):
         tool = self._make_tool()
-        step = self._step(operation="frobnicate", file_path="/tmp/foo.py")
+        step = self._step(operation="frobnicate", file_path=str(tmp_path / "foo.py"))
         with patch("mewbo_tools.integration.lsp.tool.get_lsp_manager") as mock_mgr:
             mock_mgr.return_value = _make_manager()
             result = tool.run(step)
@@ -766,9 +778,9 @@ class TestLSPToolFormatHover:
 
 
 class TestLSPToolContainmentGuard:
-    """The LSP tool otherwise bypasses ``resolve_safe_path``; under an ACTIVE
-    workspace containment it is jailed to the workspace, and is byte-identical
-    (unguarded) when no containment applies."""
+    """Under an ACTIVE workspace containment the LSP tool is jailed to the
+    workspace. The no-containment path is guarded too — see
+    ``tests/test_lsp_tool_path_guard.py`` for that half."""
 
     def _tool(self):
         return LSPTool.__new__(LSPTool)  # skip __init__ (no AbstractTool wiring)
@@ -782,7 +794,7 @@ class TestLSPToolContainmentGuard:
         )
 
     def test_denies_path_outside_workspace_under_containment(self, tmp_path: Path):
-        from mewbo_core.workspace import WorkspaceContainment, active_containment
+        from mewbo_core.workspaces.workspace import WorkspaceContainment, active_containment
 
         ws = tmp_path / "ws"
         ws.mkdir()
@@ -796,7 +808,7 @@ class TestLSPToolContainmentGuard:
         assert "Path not permitted" in result.content
 
     def test_allows_path_inside_workspace_under_containment(self, tmp_path: Path):
-        from mewbo_core.workspace import WorkspaceContainment, active_containment
+        from mewbo_core.workspaces.workspace import WorkspaceContainment, active_containment
 
         ws = tmp_path / "ws"
         ws.mkdir()
@@ -817,9 +829,12 @@ class TestLSPToolContainmentGuard:
         # Passed the guard: reaches the (stubbed) manager, no denial.
         assert "Path not permitted" not in result.content
 
-    def test_unguarded_when_no_active_containment(self, tmp_path: Path):
-        # No active containment → the historical unguarded resolve; even an
-        # out-of-tree path reaches the manager (never a containment denial).
+    def test_still_guarded_when_no_active_containment(self, tmp_path: Path):
+        # A containment is built only for an agent narrower than ``full_access``,
+        # and the ROOT agent an operator drives is always ``full_access`` — so a
+        # containment-only guard would leave the session that matters resolving
+        # unguarded. With no containment the tenant roots still apply, and an
+        # out-of-tree path is refused rather than read.
         outside = tmp_path / "elsewhere" / "x.py"
         outside.parent.mkdir()
         outside.write_text("y = 2\n")
@@ -833,4 +848,28 @@ class TestLSPToolContainmentGuard:
             patch("mewbo_tools.integration.lsp.tool.run_lsp_async", return_value=None),
         ):
             result = self._tool().run(self._step(str(outside)))
+        assert "Path not permitted" in result.content
+
+    def test_relative_path_resolves_against_workspace_root_not_cwd(self, tmp_path: Path):
+        # A RELATIVE file_path must resolve against the containment's OWN root,
+        # not the server process's cwd — the guard call must pass root=
+        # explicitly. Without it every relative LSP query under an active
+        # containment whose root differs from process cwd would be denied.
+        from mewbo_core.workspaces.workspace import WorkspaceContainment, active_containment
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "foo.py").write_text("z = 3\n")
+        cont = WorkspaceContainment(mode="read_only", root=str(ws))
+
+        mgr = MagicMock()
+        mgr.server_for_file.return_value = None
+        with (
+            active_containment(cont),
+            patch(
+                "mewbo_tools.integration.lsp.tool.get_lsp_manager", return_value=mgr
+            ),
+            patch("mewbo_tools.integration.lsp.tool.run_lsp_async", return_value=None),
+        ):
+            result = self._tool().run(self._step("foo.py"))
         assert "Path not permitted" not in result.content

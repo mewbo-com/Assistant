@@ -130,6 +130,14 @@
     (variable_declaration
       (simple_identifier) @property.name)) @property.def)
 
+; Enum entries — `enum class Mode { LOW, HIGH }`. Each entry is a named
+; constant instance of the enclosing class, the same relationship a property
+; has to its class, so it maps to Property + a subkind rather than a new node
+; kind.
+(enum_class_body
+  (enum_entry
+    (simple_identifier) @property.name) @property.def @property.subkind.enum_entry)
+
 ; Primary-constructor properties — `class Foo(val x: Int, var y: String)`, the
 ; single most idiomatic Kotlin property form. A `class_parameter` carries a
 ; `binding_pattern_kind` (val/var) child ONLY when it's promoted to a

@@ -61,14 +61,23 @@ scg_route(query=<sub_query>, k=<tier k>)
 
 `scg_route` seeds entry points; YOU navigate. Before committing probes, optionally `scg_observe(nodes=[<top candidate source_keys>])` to read their typed-edge neighborhood (SUPPORTS_QUERY / PRODUCES / CONSUMES / RESOLVES_TO + weights), 1-hop neighbors, recipes through the node, and anchored memory notes. Use what you observe to refine the sub-query→pathway assignment — a CONSUMES edge may reveal a better chained pathway, a RESOLVES_TO may widen to a second source. This is the observe-think-navigate loop: route seeds, observe informs, you decide. A high-degree node (>50 in-scope edges, no filter) returns a `kinds_only` survey — re-call with `edge_kinds=[…]` to drill into the relevant kind. Skip observe for a single obvious pathway.
 
-### Step 4 — Fan out one probe per recipe (non-blocking)
+### Step 4 — Fan out probes for every recipe (one spawn_agents call)
 
-You are at depth=0; spawns return `{agent_id, status: "submitted"}` immediately. For each ranked recipe (up to the tier's `k`), spawn one `scg-path-probe`:
+Route every sub-query first (Step 3), then build ONE `spawn_agents(tasks=[...])`
+call covering every ranked recipe across every sub-query (up to the tier's `k`
+recipes per sub-query) — the batch tool is the preferred path for fanning out
+N independent subtasks in a single turn, and both spawn tools are always
+available regardless of which one this agent's frontmatter names. Each
+accepted task returns `{agent_id, status: "submitted"}` immediately — accepted
+whether it starts running right away or a moment later, and either way
+tracked through `check_agents` to a terminal state. One task entry per
+(sub-query, recipe) pair:
 
 ```
-spawn_agent(
-  agent_type="scg-path-probe",
-  task="""
+spawn_agents(tasks=[
+  {
+    "agent_type": "scg-path-probe",
+    "task": """
 Probe ONE qualified pathway for evidence.
 
 SUB-QUERY: <sub_query>
@@ -80,16 +89,23 @@ YOUR TASK:
   2. The connector's real return IS the verification — if it returns matching data, the pathway holds; if it returns nothing/an access error, the pathway fails. Do NOT cross-check against other pathways.
   3. Return compressed evidence (the smallest set of cited facts that answers the sub-query) plus a 'gaps remaining' note.
 """,
-  allowed_tools=<recipe.allowed_tool_ids — COPY VERBATIM>,
-  acceptance_criteria="Returns either cited evidence for the sub-query or an explicit 'no data on this pathway' with a gaps note."
-)
+    "allowed_tools": <recipe.allowed_tool_ids — COPY VERBATIM>,
+    "acceptance_criteria": "Returns either cited evidence for the sub-query or an explicit 'no data on this pathway' with a gaps note."
+  },
+  # ... one entry per remaining (sub-query, recipe) pair, same shape ...
+])
 ```
 
-Scope `allowed_tools` from the route result, never by inference: each recipe
-carries `allowed_tool_ids` — the EXECUTABLE connector tool ids (`mcp_…`) for
-every capability of the pathway's sources. Copy that list verbatim. NEVER pass
-`source_key`s (`<source>#<Capability>`) or capability names as `allowed_tools`
-— those are graph addresses, they grant NOTHING. Issue every spawn before waiting.
+Scope each entry's `allowed_tools` from ITS OWN recipe result, never by
+inference: each recipe carries `allowed_tool_ids` — the EXECUTABLE connector
+tool ids (`mcp_…`) for every capability of the pathway's sources. Copy that
+list verbatim per entry. NEVER pass `source_key`s (`<source>#<Capability>`) or
+capability names as `allowed_tools` — those are graph addresses, they grant
+NOTHING. One `spawn_agents` call for the whole fan-out — do not split it
+across multiple calls, and do not fall back to per-recipe `spawn_agent` calls.
+At `Deep` tier this can total 15-25 tasks against a default concurrency pool,
+so some tasks may not start running the instant you submit them; that delay
+is expected, not a failure, and Step 5 accounts for it.
 
 ### Step 5 — Collect
 
@@ -97,7 +113,17 @@ every capability of the pathway's sources. Copy that list verbatim. NEVER pass
 check_agents(wait=true)
 ```
 
-Blocks until every probe reaches a terminal state. If a probe is stuck or clearly off-pathway, `steer_agent` it; otherwise let it finish. On a NO DATA miss, `scg_observe` the missed node's neighborhood for an alternative pathway and route/spawn that — navigate, don't blind-respawn the same dead end.
+Keep the count of tasks you submitted in Step 4 and confirm every one is
+accounted for before you synthesize. A `submitted` task that hasn't started
+running yet is not stuck, it just hasn't been scheduled — `check_agents(wait=true)`
+waits it through to a terminal state like any other. If a probe that IS
+running looks stuck or clearly off-pathway, `steer_agent` it; otherwise let it
+finish. A `rejected` task (a permanent refusal — unknown agent_type,
+unresolvable project, model unavailable, depth exceeded) will not resolve on
+its own — name it as a coverage gap for that pathway rather than letting the
+evidence base silently shrink. On a NO DATA miss, `scg_observe` the missed
+node's neighborhood for an alternative pathway and route/spawn that —
+navigate, don't blind-respawn the same dead end.
 
 ### Step 5.5 — Emit YOUR result cards (once, before you synthesize)
 

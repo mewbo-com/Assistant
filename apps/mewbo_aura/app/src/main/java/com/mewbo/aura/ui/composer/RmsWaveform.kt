@@ -30,7 +30,7 @@ import com.mewbo.aura.ui.theme.LocalAssistantExtras
  * component"), so this stays independent of [ComposerState]/[AuraComposer] - a caller only needs
  * an amplitude.
  *
- * [R5 2026-07-11] Fluid-synthesizer redesign: the old single `animateFloatAsState` envelope scaled
+ * [R5] Fluid-synthesizer redesign: the old single `animateFloatAsState` envelope scaled
  * one fixed taper shape uniformly ("a triangle moving," per user feedback on 0.0.30-debug). Each
  * bar is now its own critically-damped spring chasing a per-bar, time-flowing pseudo-spectrum
  * target ([RmsWaveformMath.barTarget]), with neighbor coupling so energy visibly travels across
@@ -110,7 +110,7 @@ object RmsWaveformMath {
      * spring simulation's initial/rest-floor value ([RmsWaveform], tests). */
     val MinBarFraction: Float = BarWidth.value / MaxBarHeight.value
 
-    // [R5 2026-07-11] Fluid-synthesizer dynamics - behavioral tuning constants (rates/ratios of
+    // [R5] Fluid-synthesizer dynamics - behavioral tuning constants (rates/ratios of
     // the simulation, the EdgeGlowUniformMath provenance convention), never design tokens.
     private const val FLOW_HZ = 0.9f // pseudo-spectrum travel rate across the row
     private const val PER_BAR_PHASE = 0.37f // per-bar noise phase offset (gives travel a direction)
@@ -119,7 +119,7 @@ object RmsWaveformMath {
     private const val NOISE_FLOOR = 0.55f // target = rms * (floor + (1-floor)*noise) * shape
     private const val MAX_STEP_SECONDS = 1f / 20f
 
-    // [R5 2026-07-11] The critically-damped spring (SPRING_HZ) is numerically stiff: a single
+    // [R5] The critically-damped spring (SPRING_HZ) is numerically stiff: a single
     // semi-implicit-Euler step at MAX_STEP_SECONDS overshoots the target and clamps every bar to
     // the ceiling instead of springing smoothly (verified: dt=1/20 from rest toward a mid target
     // overshoots to 1.59 before clamping) - the dt clamp alone does not make integration stable,

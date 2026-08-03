@@ -9,8 +9,8 @@ The memory multiplex layer is an additive overlay: with ``memory_expand``,
 ``MultiplexExpander`` seeds atomic memory notes by cosine, then follows each
 note's ``ANCHORS`` edges back to code entities (+ their 1-hop structural
 neighbours), additive-fusing a small ``w_ppr`` booster (GAAMA's
-``0.1·ppr + 1.0·sim``). Hubs are degree-damped. ``memory_expand=False`` is
-byte-for-byte the legacy behaviour.
+``0.1·ppr + 1.0·sim``). Hubs are degree-damped. ``memory_expand=False`` skips
+the overlay entirely, leaving the RRF ranking above untouched.
 """
 from __future__ import annotations
 
@@ -18,8 +18,11 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
+from mewbo_core.config import get_config_value
+
 from .memory_types import MemoryFilter
 from .store import WikiStoreBase
+from .types import CommitScope
 
 if TYPE_CHECKING:
     from .embedder import EmbedderProtocol
@@ -82,12 +85,19 @@ class HybridRetriever:
             memory_expand: When True, additive-fuse the memory multiplex layer.
             memory_filters: Optional ``MemoryFilter`` applied to memory seeding.
         """
+        # Resolve the commit scope ONCE per search and thread it down. The graph
+        # helpers below run inside per-hit loops, so resolving it there would
+        # turn one project read into one per candidate.
+        scope = self.store.live_scope(slug)
+
         # 1. Collect candidates.
         page_candidates = (
             self._page_candidates(slug) if sources in {"pages", "both"} else []
         )
         node_candidates = (
-            self._graph_candidates(slug, types) if sources in {"graph", "both"} else []
+            self._graph_candidates(slug, types, scope)
+            if sources in {"graph", "both"}
+            else []
         )
 
         corpus = page_candidates + node_candidates
@@ -118,7 +128,7 @@ class HybridRetriever:
 
             # 6. Optional 1-hop graph expansion over top-3 graph hits.
             if graph_expand:
-                hits = self._expand_neighbors(slug, hits, k=k)
+                hits = self._expand_neighbors(slug, hits, k=k, scope=scope)
         else:
             hits = []
 
@@ -140,7 +150,7 @@ class HybridRetriever:
         """Seed memory by cosine, expand to anchored code, additive-fuse into *base*."""
         expander = self._expander
         if expander is None:
-            expander = self._expander = MultiplexExpander(store=self.store)
+            expander = self._expander = MultiplexExpander.from_store(self.store)
         qvec = self.embedder.embed_query(query)
         extra = expander.expand(slug, qvec, k=k, filt=filt)
         return _merge_hits(base, extra, k=k)
@@ -161,13 +171,15 @@ class HybridRetriever:
             })
         return out
 
-    def _graph_candidates(self, slug: str, types: list[str] | None) -> list[dict]:
+    def _graph_candidates(
+        self, slug: str, types: list[str] | None, scope: CommitScope
+    ) -> list[dict]:
         if types:
             nodes = []
             for t in types:
-                nodes.extend(self.store.query_graph(slug, node_type=t))
+                nodes.extend(self.store.query_graph(slug, scope=scope, node_type=t))
         else:
-            nodes = self.store.query_graph(slug)
+            nodes = self.store.query_graph(slug, scope=scope)
         out = []
         for n in nodes:
             text = (n.name + " " + (n.docstring or "")).strip()
@@ -181,7 +193,7 @@ class HybridRetriever:
         return out
 
     def _expand_neighbors(
-        self, slug: str, hits: list[HybridHit], *, k: int
+        self, slug: str, hits: list[HybridHit], *, k: int, scope: CommitScope
     ) -> list[HybridHit]:
         """Add 1-hop graph neighbours for the top-3 node hits, with a score bonus."""
         seen: set[tuple[str, str]] = {(h.kind, h.id) for h in hits}
@@ -190,7 +202,7 @@ class HybridRetriever:
         for h in hits[:3]:  # budget: expand only top-3 to avoid fanout
             if h.kind != "node":
                 continue
-            for n in self.store.query_graph(slug, neighbors_of=h.id):
+            for n in self.store.query_graph(slug, scope=scope, neighbors_of=h.id):
                 key = ("node", n.node_id)
                 if key in seen:
                     continue
@@ -245,6 +257,56 @@ class MultiplexExpander:
         self.expansion_hops = expansion_hops
         self.rrf_k = rrf_k
 
+    @classmethod
+    def from_store(
+        cls,
+        store: WikiStoreBase,
+        *,
+        provider: StructureProvider | None = None,
+        w_ppr: float | None = None,
+        hub_degree: int | None = None,
+        expansion_hops: int | None = None,
+    ) -> MultiplexExpander:
+        """Build an expander with the ``wiki.memory.*`` fusion knobs applied.
+
+        The one composition root a production caller reaches (``HybridRetriever``
+        builds its default expander through it), so the knobs are read HERE and
+        passed down as arguments rather than inside the class. Each constructor
+        default already equals its config default, which is exactly what made
+        the gap invisible: an expander built with none of them behaves like a
+        correctly configured one on a default deployment, so an operator who
+        retunes ``hub_degree`` sees no error and no effect. Keeping the read out
+        of the class body also keeps it pure DI — a test constructs it directly
+        and is never at the mercy of a deployment setting it cannot see.
+
+        Config decides the DEFAULT, never "whether": an explicitly passed knob
+        (or an expander injected into ``HybridRetriever``) still wins.
+        """
+        return cls(
+            store=store,
+            provider=provider,
+            w_ppr=w_ppr if w_ppr is not None else float(cls._setting("fusion_w_ppr", 0.1)),
+            hub_degree=(
+                hub_degree if hub_degree is not None else int(cls._setting("hub_degree", 50))
+            ),
+            expansion_hops=(
+                expansion_hops
+                if expansion_hops is not None
+                else int(cls._setting("expansion_hops", 1))
+            ),
+        )
+
+    @staticmethod
+    def _setting(field: str, default: float) -> float:
+        """Read one ``wiki.memory.*`` knob, falling back to *default*.
+
+        The default at each call site is the constructor's own, so a
+        config-less caller lands on exactly the behaviour it had before these
+        knobs were wired.
+        """
+        value = get_config_value("wiki", "memory", field, default=default)
+        return default if value is None else value
+
     @property
     def provider(self) -> StructureProvider:
         """Lazily build the default code structure provider."""
@@ -262,6 +324,9 @@ class MultiplexExpander:
         filt: MemoryFilter | None = None,
     ) -> list[HybridHit]:
         """Return memory-seed hits + their anchored/expanded code hits."""
+        # One project read per expansion — ``_damp`` and ``_expand_neighbours``
+        # below run per anchored code node.
+        scope = self.store.live_scope(slug)
         seeds = self.store.memory_vector_search(
             slug, query_vec, k=k, filt=filt or MemoryFilter()
         )
@@ -302,16 +367,18 @@ class MultiplexExpander:
                 code = resolved.get(target)
                 if code is None:
                     continue
-                damp = self._damp(slug, code.node_id)
+                damp = self._damp(slug, code.node_id, scope)
                 base = self.w_ppr * seed_score * damp
                 hits.append(self._node_hit(code, base, via=node.node_id))
                 hits.extend(
-                    self._expand_neighbours(slug, code.node_id, base * 0.5, node.node_id)
+                    self._expand_neighbours(
+                        slug, code.node_id, base * 0.5, node.node_id, scope
+                    )
                 )
         return hits
 
     def _expand_neighbours(
-        self, slug: str, start_id: str, score: float, via: str
+        self, slug: str, start_id: str, score: float, via: str, scope: CommitScope
     ) -> list[HybridHit]:
         """Bounded BFS over ≤``expansion_hops`` structural neighbours."""
         out: list[HybridHit] = []
@@ -320,7 +387,7 @@ class MultiplexExpander:
         for _ in range(self.expansion_hops):
             nxt: list[str] = []
             for nid in frontier:
-                for nb in self.store.query_graph(slug, neighbors_of=nid):
+                for nb in self.store.query_graph(slug, scope=scope, neighbors_of=nid):
                     if nb.node_id in seen:
                         continue
                     seen.add(nb.node_id)
@@ -329,9 +396,9 @@ class MultiplexExpander:
             frontier = nxt
         return out
 
-    def _damp(self, slug: str, node_id: str) -> float:
+    def _damp(self, slug: str, node_id: str, scope: CommitScope) -> float:
         """Hub damping: 1.0 below threshold, else ``hub_degree / degree``."""
-        degree = len(self.store.query_graph(slug, neighbors_of=node_id))
+        degree = len(self.store.query_graph(slug, scope=scope, neighbors_of=node_id))
         if degree <= self.hub_degree:
             return 1.0
         return self.hub_degree / degree

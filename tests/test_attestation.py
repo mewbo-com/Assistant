@@ -14,7 +14,7 @@ Coverage
 - The privacy/exfil law: no task text or raw summary text ever rides a
   record; only a sha256 fingerprint.
 - The kill switch: no ``AttestationChain`` wired (``attestation=None``, the
-  historical default) -> zero attestation events, byte-identical spawn.
+  default) -> zero attestation events, byte-identical spawn.
 
 Patterns mirror ``tests/test_spawn_agent_flow.py`` / ``test_spawn_agent_retry.py``:
 stub only the model boundary (``build_chat_model`` -> ``bound.ainvoke``), drive
@@ -29,20 +29,20 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from langchain_core.messages import AIMessage
-from mewbo_core.agent_context import AgentContext
-from mewbo_core.attestation import (
+from mewbo_core.agents.agent_context import AgentContext
+from mewbo_core.agents.attestation import (
     GENESIS_HASH,
     AttestationChain,
     ContractSnapshot,
     SpawnAttestation,
     TerminalAttestation,
 )
+from mewbo_core.agents.hypervisor import AgentHypervisor
+from mewbo_core.agents.spawn_agent import SpawnAgentTool
 from mewbo_core.classes import ActionStep
 from mewbo_core.hooks import HookManager
-from mewbo_core.hypervisor import AgentHypervisor
 from mewbo_core.permissions import PermissionDecision, PermissionPolicy
-from mewbo_core.spawn_agent import SpawnAgentTool
-from mewbo_core.tool_registry import ToolRegistry, ToolSpec
+from mewbo_core.tooling.tool_registry import ToolRegistry, ToolSpec
 
 # ---------------------------------------------------------------------------
 # Shared helpers (mirror tests/test_spawn_agent_flow.py)
@@ -246,7 +246,7 @@ class TestNestedSpawnTree:
             bound = MagicMock()
             bound.ainvoke = AsyncMock(side_effect=_script)
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
                 outcome = await tool.run_async(_step("B task"))
@@ -311,7 +311,7 @@ class TestFailureIsolation:
 
             bound = MagicMock()
             bound.ainvoke = AsyncMock(return_value=_text_response("Done!"))
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
                 result = await tool.run_async(_step("do work"))
@@ -331,7 +331,7 @@ class TestFailureIsolation:
         def _boom(_event):
             raise RuntimeError("sink down")
 
-        with patch("mewbo_core.attestation.logging") as mock_logging:
+        with patch("mewbo_core.agents.attestation.logging") as mock_logging:
             result = chain.record_spawn(
                 _boom, agent_id="a", parent_id=None, depth=1, agent_type=None,
                 model="m", capability_mode="all", contract=None,
@@ -411,7 +411,7 @@ class TestKillSwitch:
 
             bound = MagicMock()
             bound.ainvoke = AsyncMock(return_value=_text_response("Done!"))
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
                 result = await tool.run_async(_step("do work"))

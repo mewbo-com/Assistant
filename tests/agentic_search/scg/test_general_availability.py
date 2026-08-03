@@ -36,8 +36,8 @@ from unittest.mock import patch
 
 import pytest
 from mewbo_core.classes import ActionStep
+from mewbo_core.loop.tool_use_loop import _infer_operation
 from mewbo_core.permissions import PermissionDecision, _default_policy
-from mewbo_core.tool_use_loop import _infer_operation
 from mewbo_graph.plugins.scg import _core
 from mewbo_graph.plugins.scg.memory import ScgMemoryTool
 from mewbo_graph.plugins.scg.observe import ScgObserveTool
@@ -197,7 +197,7 @@ def test_unscoped_write_lands_with_session_attribution_and_anchor(
     Exercises the REAL ``ScgMemoryBridge`` (only the wiki store factory is pointed
     at a tmp JSON store) so the kind-agnostic anchor resolution creates a
     live ``ANCHORS`` edge to a ``capability`` source_key — the exact shape that a
-    legacy ``entity_type``-only fixture would have silently dropped.
+    ``entity_type``-only fixture silently drops.
     """
     from mewbo_graph.scg.memory_bridge import CONNECTOR_SLUG
     from mewbo_graph.scg.scope import ScgScope

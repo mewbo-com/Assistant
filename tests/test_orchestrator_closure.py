@@ -12,9 +12,9 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from mewbo_core.classes import OrchestrationState, TaskQueue
-from mewbo_core.orchestrator import Orchestrator, _format_assistant_closure
-from mewbo_core.session_store import SessionStore
-from mewbo_core.tool_use_loop import ToolUseLoop
+from mewbo_core.loop.orchestrator import Orchestrator, _format_assistant_closure
+from mewbo_core.loop.tool_use_loop import ToolUseLoop
+from mewbo_core.session.session_store import SessionStore
 
 
 async def _failing_loop_run(*_args, **_kwargs):
@@ -132,14 +132,14 @@ class TestCompletionPayloadErrorGating:
     """A sticky ``last_error`` is now CARRIED, bounded, even on a clean run."""
 
     def test_successful_completion_still_reports_its_sticky_error(self, tmp_path) -> None:
-        """The emission is no longer gated on ``done_reason``.
+        """The emission is NOT gated on ``done_reason``.
 
-        Withholding the error keys on a "completed" run was meant to keep stale
-        residue off a successful wire, but the runs it silenced were
-        overwhelmingly the LAUNDERED ones — a halt or an unmet outcome
-        presenting as success — and dropping the one field that could contradict
-        the status is what made a wrong status unfalsifiable. The record is
-        carried; the status derivation stays the honesty layer above it.
+        Withholding the error keys on a "completed" run keeps stale residue off
+        a successful wire, but it silences overwhelmingly the LAUNDERED runs — a
+        halt or an unmet outcome presenting as success — and dropping the one
+        field that could contradict the status is what makes a wrong status
+        unfalsifiable. The record is carried; the status derivation stays the
+        honesty layer above it.
         """
         orch, store = _make_orchestrator(tmp_path)
         session_id = store.create_session()

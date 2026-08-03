@@ -7,8 +7,9 @@ Atomic class: it holds the URL + the credentials a single ``git ls-remote`` need
 URL injection, the SSH-key temp-file env, and the private-host TLS carve-out are
 identical to the actual clone — never duplicated.
 
-The wizard's branch-picker calls this BEFORE onboarding so the user can choose a
-ref; the resulting ``ref`` rides :class:`~mewbo_graph.wiki.types.WizardSubmission`.
+The wizard's branch-picker calls this BEFORE the index runs so the user can
+choose a ref; the resulting ``ref`` rides
+:class:`~mewbo_graph.wiki.types.WizardSubmission`.
 """
 from __future__ import annotations
 

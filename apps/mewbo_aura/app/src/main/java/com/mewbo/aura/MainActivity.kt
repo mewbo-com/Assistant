@@ -72,14 +72,14 @@ class MainActivity : ComponentActivity() {
      * [pendingHandoffSessionId] since both come off the SAME handoff intent. */
     private var pendingHandoffModality by mutableStateOf<String?>(null)
 
-    /** The composer draft carried by a pull-up handoff ([EXTRA_HANDOFF_DRAFT], user directive
-     * 2026-07-04) - the overlay's typed-but-unsent text, for the in-app composer to seed from. A RAW
+    /** The composer draft carried by a pull-up handoff ([EXTRA_HANDOFF_DRAFT], user directive)
+     * - the overlay's typed-but-unsent text, for the in-app composer to seed from. A RAW
      * string extra (never a nav-route arg - arbitrary text isn't URL-safe). Read/cleared in lockstep
      * with [pendingHandoffSessionId]. */
     private var pendingHandoffDraft by mutableStateOf<String?>(null)
 
-    /** Set by a pull-up handoff that had NO session yet ([EXTRA_HANDOFF_NEW_CHAT], user directive
-     * 2026-07-04): tells [AuraNavHost] to land on a fresh new chat rather than staying on whatever
+    /** Set by a pull-up handoff that had NO session yet ([EXTRA_HANDOFF_NEW_CHAT], user directive):
+     * tells [AuraNavHost] to land on a fresh new chat rather than staying on whatever
      * (possibly stale) session a warm `MainActivity` last showed. The session-present pull-up and
      * every ordinary handoff leave this false. */
     private var pendingHandoffNewChat by mutableStateOf(false)

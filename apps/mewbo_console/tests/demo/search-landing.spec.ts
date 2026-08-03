@@ -32,6 +32,18 @@ test("searchLanding — workspace gallery + stats band", async ({ page, demo }) 
   await expect(page.getByRole("heading", { name: "Knowledge graph" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Beacon Ops" })).toBeVisible();
 
+  // The gallery renders EXACTLY the seeded workspaces, and this count is the
+  // contamination guard rather than a restatement of the three anchors above.
+  // The api installs a six-workspace fixture set lazily on the first
+  // `/agentic_search` touch, skipped only while the store is already non-empty
+  // — so a re-seed onto an already-touched stack leaves those six in the
+  // ephemeral Mongo and the gallery renders fourteen. Every other assertion
+  // here still passes in that state, which is how an inflated gallery once
+  // shipped as a committed artifact. Counting off `WorkspaceCard`'s
+  // `aria-label="Open workspace <name>"` needs no testid; changing the seeded
+  // workspace count must change this number, which is the intended signal.
+  await expect(page.getByRole("button", { name: /^Open workspace / })).toHaveCount(8);
+
   // WorkspaceHealthBand — wait for the POPULATED stat numbers, not just the
   // labels (which render immediately over a pulsing number skeleton). All
   // three stats resolve together from the one `graph/summary` query, so

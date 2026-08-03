@@ -9,7 +9,7 @@
  * indexing/failed states. The supporting numbers (branch, commit, when it was
  * indexed) sit BELOW as quiet mono reference metadata, and the one real action
  * — re-index — is the only Button on the card, so it never blurs into the
- * static facts the way the old all-pills layout did.
+ * static facts.
  *
  * State-aware prominence: calm when the wiki is current (a success glyph, a
  * neutral re-index button), attention when it isn't (a tinted verdict, a
@@ -42,6 +42,7 @@ import { cardSurface } from "@/components/ui/card-surface";
 import { cn } from "@/lib/utils";
 
 import type { IndexedSnapshot } from "./indexedSnapshot";
+import { RefreshScopeSummary } from "./RefreshScopeSummary";
 import { buildHref } from "./router";
 import {
   useActiveIndexingJobs,
@@ -49,11 +50,47 @@ import {
   useRecoverableJobs,
   useRequestWikiRefresh,
 } from "./api/hooks";
+import type { RecoverableJob, RefreshMode } from "./api/types";
 import {
   deriveWikiStatus,
   type WikiStatusKind,
   type WikiStatusTone,
 } from "./wikiStatus";
+
+/**
+ * A slug can carry more than one recoverable job (repeated failed attempts),
+ * so picking "the" recoverable job means picking the NEWEST one explicitly —
+ * never trusting array position, which the server does not guarantee (see
+ * the sibling `list_jobs` fix this component must not silently depend on).
+ * `updatedAt` is this DTO's timestamp (server-side it's `job.phase_started_at`,
+ * the same field `list_jobs` now sorts by); a job with no stamp sorts as the
+ * OLDEST, mirroring the server's own `job.phase_started_at or ""` comparison.
+ *
+ * Plain string comparison, not `Date.parse` — safe ONLY because the field has
+ * exactly one writer in the whole codebase (`IndexingJob.format_stamp` /
+ * `emit_phase` in `mewbo_graph/plugins/wiki/_ctx.py`), which has used the
+ * identical `strftime("%Y-%m-%dT%H:%M:%SZ")` spelling (second precision,
+ * always UTC, always a literal `Z`, never a `+00:00` offset) since this
+ * field's introduction — verified against the full git history, not assumed.
+ * ISO-8601 in one uniform spelling sorts lexicographically == chronologically.
+ * If that ever stops being true (a second writer, an offset variant), this
+ * comparison silently misorders — `+` sorts below `Z`, so a `+00:00`-suffixed
+ * stamp would lose to a `Z`-suffixed one even at a later instant; switch to
+ * parsing (`Date.parse`, absent/unparseable treated as oldest, never `NaN`).
+ */
+function mostRecentRecoverableJob(
+  jobs: RecoverableJob[] | undefined,
+  slug: string,
+): RecoverableJob | null {
+  let latest: RecoverableJob | null = null;
+  for (const job of jobs ?? []) {
+    if (job.slug !== slug) continue;
+    if (!latest || (job.updatedAt ?? "") > (latest.updatedAt ?? "")) {
+      latest = job;
+    }
+  }
+  return latest;
+}
 
 interface RefreshThisWikiProps {
   slug: string;
@@ -118,7 +155,10 @@ export function RefreshThisWiki({
   const recoverableJobs = useRecoverableJobs();
 
   const activeJob = activeJobs.data?.find((j) => j.slug === slug) ?? null;
-  const recoverableJob = recoverableJobs.data?.find((j) => j.slug === slug) ?? null;
+  const recoverableJob = useMemo(
+    () => mostRecentRecoverableJob(recoverableJobs.data, slug),
+    [recoverableJobs.data, slug],
+  );
 
   const status = useMemo(
     () =>
@@ -144,13 +184,19 @@ export function RefreshThisWiki({
     return () => window.clearTimeout(t);
   }, [phase]);
 
-  const onConfirm = () => {
+  const onConfirm = (mode: RefreshMode) => {
     if (mutate.isPending) return;
-    mutate.mutate(slug, {
-      onSuccess: () => setPhase("queued"),
-      onError: () => setPhase("idle"),
-    });
+    mutate.mutate(
+      { slug, mode },
+      {
+        onSuccess: () => setPhase("queued"),
+        onError: () => setPhase("idle"),
+      },
+    );
   };
+
+  /** Which button is mid-flight, so only that one shows its pending label. */
+  const pendingMode = mutate.isPending ? mutate.variables?.mode : undefined;
 
   const Icon = KIND_ICON[status.kind];
   const spin = status.kind === "indexing" || status.kind === "checking";
@@ -216,37 +262,67 @@ export function RefreshThisWiki({
             </a>
           </Button>
         ) : phase === "queued" ? (
-          <div className="inline-flex items-center gap-1.5 px-1 text-2xs text-[hsl(var(--success))]">
-            <CheckCircle2 className="h-3 w-3" />
-            Queued — indexing will start shortly.
+          <div className="space-y-2">
+            <div className="inline-flex items-center gap-1.5 px-1 text-2xs text-[hsl(var(--success))]">
+              <CheckCircle2 className="h-3 w-3" />
+              Queued — indexing will start shortly.
+            </div>
+            {/* The POST response already carries the decision for THIS
+                refresh, so a full rebuild's reason is known before the
+                indexing screen's own snapshot poll would show it. A scoped
+                refresh's touched counts aren't known yet at this point — the
+                delta pass hasn't run — so nothing renders here for that
+                path; the indexing screen picks it up once it lands. */}
+            <RefreshScopeSummary refreshDecision={mutate.data?.refresh} />
           </div>
         ) : phase === "confirming" ? (
+          /* Two genuinely different actions, each stating what it will and
+             will not do. They are stacked rather than side by side so the
+             second reads as a deliberate choice with its own cost, not as a
+             retry of the first. */
           <div className="space-y-2">
-            <p className="text-2xs leading-snug text-[hsl(var(--muted-foreground))]">
-              Re-indexing can take several minutes. You can keep using the wiki
-              while it runs.
-            </p>
-            <div className="flex items-center gap-1.5">
+            <div className="space-y-1.5">
               <Button
                 type="button"
                 variant="primary"
                 size="sm"
-                className="flex-1"
+                className="w-full"
                 disabled={mutate.isPending}
-                onClick={onConfirm}
+                onClick={() => onConfirm("auto")}
               >
-                {mutate.isPending ? "Queueing…" : "Re-index"}
+                {pendingMode === "auto" ? "Queueing…" : "Refresh"}
               </Button>
+              <p className="px-0.5 text-2xs leading-snug text-[hsl(var(--muted-foreground))]">
+                Updates the code graph and search index. Usually under a minute,
+                and it rewrites no documentation.
+              </p>
+            </div>
+            <div className="space-y-1.5">
               <Button
                 type="button"
-                variant="ghost"
+                variant="neutral"
                 size="sm"
-                onClick={() => setPhase("idle")}
+                className="w-full"
                 disabled={mutate.isPending}
+                onClick={() => onConfirm("full")}
               >
-                Cancel
+                {pendingMode === "full" ? "Queueing…" : "Full rebuild"}
               </Button>
+              <p className="px-0.5 text-2xs leading-snug text-[hsl(var(--muted-foreground))]">
+                Regenerates every page from scratch. Takes several minutes and
+                spends model calls — choose it when the prose is out of date.
+              </p>
             </div>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="w-full"
+              onClick={() => setPhase("idle")}
+              disabled={mutate.isPending}
+            >
+              Cancel
+            </Button>
           </div>
         ) : (
           <Button

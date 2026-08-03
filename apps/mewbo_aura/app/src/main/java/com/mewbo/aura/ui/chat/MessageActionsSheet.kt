@@ -2,13 +2,9 @@ package com.mewbo.aura.ui.chat
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -20,12 +16,11 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.unit.dp
 import com.mewbo.aura.data.model.ChatItem
+import com.mewbo.aura.ui.common.AuraBottomSheet
 import com.mewbo.aura.ui.common.SheetActionRow
 import com.mewbo.aura.ui.common.SheetErrorCaption
 import com.mewbo.aura.ui.common.SheetHeader
-import com.mewbo.aura.ui.common.SheetShape
 import com.mewbo.aura.ui.theme.AuraColors
-import com.mewbo.aura.ui.theme.AuraSpacing
 import com.mewbo.aura.ui.theme.VectorGlyphFill
 
 /**
@@ -141,7 +136,6 @@ enum class MessageAction(val label: String, val icon: ImageVector, val failureMe
  * 410. Long-press already fired the row's one haptic ([UserBubbleRow]'s `combinedClickable`) —
  * nothing here fires a second.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MessageActionsSheet(
     message: ChatItem.UserBubble,
@@ -160,14 +154,8 @@ fun MessageActionsSheet(
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(),
-        containerColor = AuraColors.surfaceInput,
-        shape = SheetShape,
-        modifier = modifier,
-    ) {
-        Column(modifier = Modifier.fillMaxWidth().padding(bottom = AuraSpacing.Composer.internalPadding)) {
+    AuraBottomSheet(onDismiss = onDismiss, modifier = modifier) {
+        Column(modifier = Modifier.fillMaxWidth()) {
             // The message itself is the header — which turn these actions apply to is the one thing
             // the sheet must make unambiguous, and the transcript row behind it is now covered.
             SheetHeader(text = message.text)

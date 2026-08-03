@@ -1,8 +1,11 @@
 """Embedder tests — ``litellm.embedding`` mocked at the client boundary."""
 from __future__ import annotations
 
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
+import litellm
 import pytest
 from mewbo_graph.wiki.embedder import Embedder
 from mewbo_graph.wiki.types import Embedding
@@ -160,3 +163,122 @@ def test_search_k_larger_than_pool_returns_all():
 
 def test_search_empty_returns_empty():
     assert Embedder.search([1.0], [], k=5) == []
+
+
+# ── concurrency: order, bound, backoff, no-deadlock ───────────────────
+
+
+def test_embed_preserves_order_under_shuffled_completion(_patch_litellm_embedding):
+    """The critical contract: order is INPUT order, not completion order.
+
+    ``b`` finishes fastest, ``a`` slowest — a naive "collect as completed"
+    implementation would return b, c, a. ``_embed`` must not.
+    """
+    delays = {"a": 0.06, "b": 0.0, "c": 0.02}
+
+    def fake_embedding(*, model, input, api_base, api_key):
+        text = input[0]
+        time.sleep(delays[text])
+        return _embedding_response([[float(ord(text))]])
+
+    _patch_litellm_embedding.side_effect = fake_embedding
+    emb = _build(batch_size=1)  # one text per batch -> pool is exercised
+    out = emb.embed_nodes([("na", "a"), ("nb", "b"), ("nc", "c")])
+    assert [r.node_id for r in out] == ["na", "nb", "nc"]
+    assert [r.vector for r in out] == [[float(ord("a"))], [float(ord("b"))], [float(ord("c"))]]
+
+
+def test_embed_respects_concurrency_bound(_patch_litellm_embedding):
+    """Max observed in-flight embedding calls never exceeds ``concurrency``."""
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def fake_embedding(*, model, input, api_base, api_key):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        return _embedding_response([[0.0]])
+
+    _patch_litellm_embedding.side_effect = fake_embedding
+    emb = Embedder(model="openai/test", batch_size=1, concurrency=3)
+    items = [(f"n{i}", f"t{i}") for i in range(10)]
+    out = emb.embed_nodes(items)
+    assert len(out) == 10
+    assert max_active <= 3
+
+
+def test_embed_retries_429_and_completes(_patch_litellm_embedding, monkeypatch):
+    """A 429 is retried (honouring backoff) and the call still succeeds."""
+    monkeypatch.setattr("mewbo_graph.wiki.embedder.time.sleep", lambda _: None)
+    rate_limit_error = litellm.RateLimitError(
+        message="slow down", llm_provider="openai", model="openai/test"
+    )
+    _patch_litellm_embedding.side_effect = [
+        rate_limit_error,
+        rate_limit_error,
+        _embedding_response([[1.0, 2.0]]),
+    ]
+    emb = _build(batch_size=8, model="openai/test")
+    out = emb.embed_query("hello")
+    assert out == [1.0, 2.0]
+    assert _patch_litellm_embedding.call_count == 3
+
+
+def test_embed_gives_up_after_max_retries(_patch_litellm_embedding, monkeypatch):
+    monkeypatch.setattr("mewbo_graph.wiki.embedder.time.sleep", lambda _: None)
+    rate_limit_error = litellm.RateLimitError(
+        message="slow down", llm_provider="openai", model="openai/test"
+    )
+    _patch_litellm_embedding.side_effect = rate_limit_error
+    emb = Embedder(model="openai/test", batch_size=8, max_retries=2)
+    with pytest.raises(litellm.RateLimitError):
+        emb.embed_query("hello")
+    # 1 initial attempt + 2 retries
+    assert _patch_litellm_embedding.call_count == 3
+
+
+def test_embed_honours_retry_after_header(_patch_litellm_embedding, monkeypatch):
+    """``Retry-After`` wins over exponential backoff when present."""
+    slept: list[float] = []
+    monkeypatch.setattr(
+        "mewbo_graph.wiki.embedder.time.sleep", lambda s: slept.append(s)
+    )
+    response = MagicMock()
+    response.headers = {"retry-after": "7"}
+    rate_limit_error = litellm.RateLimitError(
+        message="slow down", llm_provider="openai", model="openai/test", response=response
+    )
+    _patch_litellm_embedding.side_effect = [
+        rate_limit_error,
+        _embedding_response([[1.0]]),
+    ]
+    emb = _build(batch_size=8)
+    emb.embed_query("hello")
+    assert slept == [7.0]
+
+
+def test_embed_pacing_does_not_deadlock_under_low_rpm(
+    _patch_litellm_embedding, monkeypatch
+):
+    """A tight per-minute ceiling paces work but must never hang forever."""
+    monkeypatch.setattr("mewbo_graph.wiki.embedder._WINDOW_SECONDS", 0.05)
+    _patch_litellm_embedding.side_effect = (
+        lambda **_: _embedding_response([[0.0]])
+    )
+    emb = Embedder(
+        model="openai/test", batch_size=1, concurrency=4, requests_per_minute=1
+    )
+    items = [(f"n{i}", f"t{i}") for i in range(4)]
+    out = emb.embed_nodes(items)
+    assert len(out) == 4
+
+
+def test_embed_empty_input_returns_empty_list_without_pacer(_patch_litellm_embedding):
+    emb = Embedder(model="openai/test", requests_per_minute=1, tokens_per_minute=1)
+    assert emb.embed_nodes([]) == []
+    _patch_litellm_embedding.assert_not_called()

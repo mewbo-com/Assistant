@@ -3,16 +3,16 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from mewbo_core.agent_context import AgentContext
+from mewbo_core.agents.agent_context import AgentContext
+from mewbo_core.agents.hypervisor import AgentHypervisor
 from mewbo_core.classes import ActionStep
 from mewbo_core.common import MockSpeaker
-from mewbo_core.hypervisor import AgentHypervisor
+from mewbo_core.loop.session_runtime import SessionRuntime
+from mewbo_core.loop.structured_response import EmitStructuredResponseTool
+from mewbo_core.loop.tool_use_loop import ToolUseLoop
 from mewbo_core.permissions import PermissionPolicy
-from mewbo_core.session_runtime import SessionRuntime
-from mewbo_core.session_store import SessionStore
-from mewbo_core.session_tools import SessionToolFactory, SessionToolRegistry
-from mewbo_core.structured_response import EmitStructuredResponseTool
-from mewbo_core.tool_use_loop import ToolUseLoop
+from mewbo_core.session.session_store import SessionStore
+from mewbo_core.tooling.session_tools import SessionToolFactory, SessionToolRegistry
 
 
 def test_run_sync_forwards_extra_session_tools_to_orchestrate(tmp_path):
@@ -21,7 +21,7 @@ def test_run_sync_forwards_extra_session_tools_to_orchestrate(tmp_path):
     emit = EmitStructuredResponseTool(
         session_id=sid, schema={"type": "object", "properties": {}}
     )
-    with patch("mewbo_core.session_runtime.orchestrate_session") as mock_orch:
+    with patch("mewbo_core.loop.session_runtime.orchestrate_session") as mock_orch:
         mock_orch.return_value = object()
         runtime.run_sync(
             user_query="hi",
@@ -194,9 +194,9 @@ def test_strict_scoped_agent_omitting_it_does_not_bind_it():
 
 
 # ---------------------------------------------------------------------------
-# Phase 1a: capability_mode gates SESSION tools at the loop seam too
-# (the two-surface fix). A read_only spawn's loop must bind no write-tier
-# session action tool; execute/all stay byte-identical.
+# capability_mode gates SESSION tools at the loop seam, not only the
+# registry: a read_only spawn's loop must bind no write-tier session action
+# tool, while execute/all bind the full set.
 # ---------------------------------------------------------------------------
 
 

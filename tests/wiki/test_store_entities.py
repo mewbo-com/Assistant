@@ -174,7 +174,7 @@ def test_recommendations_persist_and_read_back(store) -> None:
     assert recs[0].subjects == ["ada|person", "a lovelace|person"]
 
 
-def test_recommendations_append_not_overwrite(store) -> None:
+def test_distinct_recommendations_accumulate(store) -> None:
     store.save_entity_recommendation(
         SLUG, EntityRecommendation(action="merge", subjects=["a", "b"])
     )
@@ -184,6 +184,30 @@ def test_recommendations_append_not_overwrite(store) -> None:
     recs = store.get_entity_recommendations(SLUG)
     assert {r.action for r in recs} == {"merge", "distinct"}
     assert len(recs) == 2
+
+
+def test_replaying_a_recommendation_converges_onto_one_row(store) -> None:
+    """These rows are read back as resolution priors on the NEXT pass.
+
+    An unkeyed append meant a re-index restated every prior it had already
+    stated, so the set grew without bound with each attempt and every
+    resolution paid to read the whole of it.
+    """
+    for rationale in ("same person", "same person", "obviously the same person"):
+        store.save_entity_recommendation(
+            SLUG,
+            EntityRecommendation(
+                action="merge", subjects=["ada|person", "a lovelace|person"],
+                rationale=rationale,
+            ),
+        )
+    # And the pair stated the other way round is the same prior, not a second one.
+    store.save_entity_recommendation(
+        SLUG,
+        EntityRecommendation(action="merge", subjects=["a lovelace|person", "ada|person"]),
+    )
+    recs = store.get_entity_recommendations(SLUG)
+    assert len(recs) == 1
 
 
 # ── slug isolation (shared multiplex, scoped per project) ────────────────────

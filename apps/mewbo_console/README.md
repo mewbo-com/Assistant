@@ -32,7 +32,6 @@ npm run dev
 |----------|---------|-------------|
 | `VITE_API_BASE_URL` | *(empty — uses Vite proxy)* | API server URL |
 | `VITE_API_KEY` | *(empty)* | Value for `X-API-Key` header |
-| `VITE_API_MODE` | `auto` | `auto`, `live`, or `mock` |
 | `VITE_API_USE_PROXY` | *(empty)* | Set to `1` to proxy `/api/` via Vite dev server |
 
 ## Docker

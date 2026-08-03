@@ -34,8 +34,8 @@ import com.mewbo.aura.ui.theme.AuraType
  * ABOVE the narration (activity-precedes-narration, `data/CLAUDE.md`), never instead of it. The
  * reference app does suppress its prose; we deliberately do not, because a turn's narration is not
  * ours to delete - it may carry more than the tool's own result. Do not write copy here that assumes
- * the card is the whole answer. Anatomy is the reference's "action card" (GMS device capture,
- * 2026-07-12): a header that answers *which tool is this* (glyph + label), then a swappable content
+ * the card is the whole answer. Anatomy is the reference's "action card" (GMS device capture):
+ * a header that answers *which tool is this* (glyph + label), then a swappable content
  * slot carrying the tool's own payload. Every value is an Aura token; nothing here is measured off
  * the reference's pixels except the ANATOMY.
  *

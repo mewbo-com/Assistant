@@ -26,8 +26,20 @@ export interface SettingsSectionProps {
   advanced: boolean;
   /** Full dot-path → is-set map from `GET /api/config` (drives secret widgets). */
   secrets: Record<string, boolean>;
+  /**
+   * Whether the server can actually persist a PATCH right now (`storage.writable`
+   * from `useConfig`). Defaults to `true` so existing callers/tests that don't
+   * pass it are unaffected; the shell is the one place that computes `false`.
+   */
+  writable?: boolean;
   onChange: (next: Record<string, unknown>) => void;
-  onSave: () => Promise<void>;
+  /**
+   * Persist the section. Resolves `true` on success, `false` on a failed
+   * PATCH (the server's reason is already surfaced by the shell's
+   * `saveError` banner) — the caller MUST branch on this, since a rejected
+   * save must not announce "Saved" or clear the field the user just typed.
+   */
+  onSave: () => Promise<boolean>;
 }
 
 export function SettingsSection({
@@ -37,6 +49,7 @@ export function SettingsSection({
   original,
   advanced,
   secrets,
+  writable = true,
   onChange,
   onSave,
 }: SettingsSectionProps) {
@@ -58,8 +71,13 @@ export function SettingsSection({
   const handleSave = async () => {
     setSaving(true);
     try {
-      await onSave();
-      setSavedAt(Date.now());
+      // Only a genuine success re-stamps `savedAt` — a failed PATCH must
+      // neither announce "Saved" to the `aria-live` region below nor flip
+      // secret widgets (keyed off `savedAt`, see `uiSchema` above) into their
+      // post-save state, which would clear what the user just typed as if it
+      // had been persisted.
+      const succeeded = await onSave();
+      if (succeeded) setSavedAt(Date.now());
     } finally {
       setSaving(false);
     }
@@ -76,7 +94,7 @@ export function SettingsSection({
             type="button"
             variant="primary"
             size="md"
-            disabled={!dirty || saving}
+            disabled={!dirty || saving || !writable}
             onClick={handleSave}
             leadingIcon={
               saving ? (

@@ -32,7 +32,7 @@ module never changes what a route *returns* — it only documents it):
 - **envelope** ``{"error": {"code", "reason", "retryable"}}`` — the canonical
   shape (``@app.errorhandler(NotFound)``, the structured + agentic-search
   surfaces). Default for :meth:`ApiResponseKit.errors`.
-- **message** ``{"message": "..."}`` — the legacy auth/validation shape some
+- **message** ``{"message": "..."}`` — the auth/validation shape some
   ``/api`` routes still return. Pass ``shape="message"`` (or use
   :meth:`ApiResponseKit.auth_error`) where a route returns this.
 
@@ -46,6 +46,7 @@ from collections.abc import Callable
 from typing import Any
 
 from flask_restx import fields
+from mewbo_core.config import ConfigWriteError
 
 # code -> (default description, example ``reason``, example ``retryable``).
 # Descriptions are the generic meaning of the status on this API; pass a
@@ -129,6 +130,23 @@ class ApiResponseKit:
         """The ONE 410 Gone response for a permanently terminated session."""
         return {"error": cls.TERMINATED_ERROR_BODY}, 410
 
+    @classmethod
+    def config_write_error_response(cls, exc: ConfigWriteError) -> tuple[dict, int]:
+        """The ONE 500 body for a configuration write a client cannot retry past.
+
+        Sibling to :meth:`terminated_response`: ``PATCH /api/config`` is the
+        only caller today, but the shape lives here so it can never drift from
+        what ``ConfigResource.patch`` actually returns. Stays 500 rather than
+        503 — the request itself was valid and the failure isn't transient, it
+        needs an operator to fix the store (read-only mount, permission,
+        disk), so inviting a client retry/backoff would be wrong. ``code`` is
+        the machine-readable reason (``read_only`` / ``permission_denied`` /
+        ``no_space`` / ``io_error``, from ``mewbo_core.config.ConfigWriteError``);
+        ``message`` is the actionable reason text. The server-side path lives
+        on ``exc.path`` for the caller to log — it must never reach this body.
+        """
+        return {"message": exc.reason, "code": exc.code}, 500
+
     def __init__(self, registrar: Any, prefix: str = "") -> None:
         """Build the base error models on *registrar*, prefixed by *prefix*."""
         self.r = registrar
@@ -163,7 +181,7 @@ class ApiResponseKit:
             {
                 "message": fields.String(
                     example="API token is not provided.",
-                    description="Human-readable failure reason (legacy auth/validation shape).",
+                    description="Human-readable failure reason (auth/validation shape).",
                 )
             },
         )
@@ -196,7 +214,7 @@ class ApiResponseKit:
         return decorator
 
     def auth_error(self, *, code: int = 401) -> Callable:
-        """Document the legacy ``{"message": ...}`` auth failure on a route."""
+        """Document the ``{"message": ...}`` auth failure on a route."""
         return self.errors(code, shape="message")
 
     # ── internals ───────────────────────────────────────────────────────────

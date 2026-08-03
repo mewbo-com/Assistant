@@ -17,8 +17,8 @@ take, and what did it cost".
 
 The transcript items are rendered through the SAME
 :class:`~mewbo_cli.tui.seams.MessageRendererRegistry` the live root uses, and
-settled tool cards reuse Phase 1's ``.t-settled`` dimming — no duplicated
-rendering.
+settled tool cards reuse the transcript's ``.t-settled`` dimming — no
+duplicated rendering.
 """
 
 from __future__ import annotations

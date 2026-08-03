@@ -17,7 +17,7 @@ import os
 
 import pytest
 from mewbo_api import backend
-from mewbo_core.session_store import SessionStore
+from mewbo_core.session.session_store import SessionStore
 
 # ---------------------------------------------------------------------------
 # Reset helper
@@ -255,7 +255,7 @@ def _fake_fan_out(*, wiki_gated: bool = True, scg_gated: bool = True):
     unit test must not depend on which plugins happen to be installed/enabled
     in the environment it runs in.
     """
-    from mewbo_core.plugins import PluginComponents, PluginFanOut, PluginManifest
+    from mewbo_core.tooling.plugins import PluginComponents, PluginFanOut, PluginManifest
 
     components = []
     if wiki_gated:
@@ -303,7 +303,7 @@ class TestToolsProductCatalog:
     ):
         _reset_backend(tmp_path, monkeypatch)
         monkeypatch.setattr(
-            "mewbo_core.plugins.load_all_plugin_components", _fake_fan_out
+            "mewbo_core.tooling.plugins.load_all_plugin_components", _fake_fan_out
         )
         resp = client.get("/api/tools", headers=auth_headers)
         assert resp.status_code == 200
@@ -323,7 +323,7 @@ class TestToolsProductCatalog:
         """mint_entity is contributed by BOTH the wiki and scg manifests."""
         _reset_backend(tmp_path, monkeypatch)
         monkeypatch.setattr(
-            "mewbo_core.plugins.load_all_plugin_components", _fake_fan_out
+            "mewbo_core.tooling.plugins.load_all_plugin_components", _fake_fan_out
         )
         resp = client.get("/api/tools", headers=auth_headers)
         ids = [t["tool_id"] for t in resp.get_json()["tools"]]
@@ -338,7 +338,7 @@ class TestToolsProductCatalog:
         """A plugin with no requires_capabilities stays allowlist-only, invisible here."""
         _reset_backend(tmp_path, monkeypatch)
         monkeypatch.setattr(
-            "mewbo_core.plugins.load_all_plugin_components", _fake_fan_out
+            "mewbo_core.tooling.plugins.load_all_plugin_components", _fake_fan_out
         )
         resp = client.get("/api/tools", headers=auth_headers)
         ids = [t["tool_id"] for t in resp.get_json()["tools"]]
@@ -350,7 +350,7 @@ class TestToolsProductCatalog:
         """Additive field: existing (non-product) rows are unaffected."""
         _reset_backend(tmp_path, monkeypatch)
         monkeypatch.setattr(
-            "mewbo_core.plugins.load_all_plugin_components", _fake_fan_out
+            "mewbo_core.tooling.plugins.load_all_plugin_components", _fake_fan_out
         )
         resp = client.get("/api/tools", headers=auth_headers)
         tools = resp.get_json()["tools"]
@@ -364,7 +364,7 @@ class TestToolsProductCatalog:
     ):
         _reset_backend(tmp_path, monkeypatch)
         monkeypatch.setattr(
-            "mewbo_core.plugins.load_all_plugin_components",
+            "mewbo_core.tooling.plugins.load_all_plugin_components",
             lambda: _fake_fan_out(wiki_gated=False, scg_gated=False),
         )
         resp = client.get("/api/tools", headers=auth_headers)

@@ -1,10 +1,9 @@
 // Thin façade over `realClient` — exports each API function as a direct call.
-// The runtime mock fallback was removed in Phase 4; tests now own their mocks
-// inline via `vi.mock('../api/client', ...)`.
+// There is no runtime mock fallback; the client always talks to the live API.
+// Tests own their mocks inline via `vi.mock('../api/client', ...)`.
 import {
   AttachmentPayload,
   AttachmentRecord,
-  EventRecord,
   NotificationItem,
   QuestionAnswerItemPayload,
   QueryMode,
@@ -15,7 +14,7 @@ import {
   SessionUsage,
   ShareRecord
 } from '../types';
-import { AgentSummary, AnswerQuestionResult, ApiKeyCreated, ApiKeyRevoked, ApiKeySummary, ConfigState, CreateWorktreeInput, ForkResponse, MarketplacePlugin, ModelInfo, PluginSummary, ProjectSummary, RecoverResponse, SkillSummary, ToolScope, ToolSummary } from './contracts';
+import { AgentSummary, AnswerQuestionResult, ApiKeyCreated, ApiKeyRevoked, ApiKeySummary, ConfigState, ConfigStorageStatus, CreateWorktreeInput, ForkResponse, MarketplacePlugin, ModelInfo, PluginSummary, ProjectSummary, RecoverResponse, SessionListFilter, SkillSummary, ToolScope, ToolSummary } from './contracts';
 import { createRealClient } from './realClient';
 import { readRuntimeConfig } from '../runtimeConfig';
 import { apiFetch, withBase as sharedWithBase, authHeaders, readJson } from './httpBase';
@@ -47,8 +46,11 @@ function withBase(path: string): string {
 // Exported API functions — each one is a direct delegate to realClient.
 // ---------------------------------------------------------------------------
 
-export async function listSessions(includeArchived = false): Promise<SessionSummary[]> {
-  return realClient.listSessions(includeArchived);
+export async function listSessions(
+  includeArchived = false,
+  filter?: SessionListFilter
+): Promise<SessionSummary[]> {
+  return realClient.listSessions(includeArchived, filter);
 }
 
 export async function createSession(context?: SessionContext): Promise<string> {
@@ -65,20 +67,6 @@ export async function postQuery(
   return realClient.postQuery(sessionId, query, context, mode, attachments);
 }
 
-export async function fetchEvents(
-  sessionId: string,
-  after?: string
-): Promise<{
-  events: EventRecord[];
-  running: boolean;
-  status?: string;
-  done_reason?: string;
-  terminated?: boolean;
-  recoverable?: boolean;
-}> {
-  return realClient.fetchEvents(sessionId, after);
-}
-
 export async function fetchUsage(sessionId: string): Promise<SessionUsage> {
   return realClient.fetchUsage(sessionId);
 }
@@ -87,12 +75,27 @@ export async function getSessionSpec(sessionId: string): Promise<SessionSpecResp
   return realClient.getSessionSpec(sessionId);
 }
 
+export async function rebindSessionProject(
+  sessionId: string,
+  project: string
+): Promise<SessionSpecResponse> {
+  return realClient.rebindSessionProject(sessionId, project);
+}
+
 export async function archiveSession(sessionId: string): Promise<void> {
   return realClient.archiveSession(sessionId);
 }
 
 export async function unarchiveSession(sessionId: string): Promise<void> {
   return realClient.unarchiveSession(sessionId);
+}
+
+export async function pinSession(sessionId: string) {
+  return realClient.pinSession(sessionId);
+}
+
+export async function unpinSession(sessionId: string) {
+  return realClient.unpinSession(sessionId);
 }
 
 export async function updateSessionTitle(
@@ -171,7 +174,7 @@ export async function approvePlan(sessionId: string, approved: boolean): Promise
 export async function answerQuestion(
   sessionId: string,
   callId: string,
-  body: { call_token: string; answers: QuestionAnswerItemPayload[] }
+  body: { call_token: string; answers: QuestionAnswerItemPayload[]; notes?: string }
 ): Promise<AnswerQuestionResult> {
   return realClient.answerQuestion(sessionId, callId, body);
 }
@@ -326,4 +329,4 @@ export async function revokeApiKey(id: string): Promise<ApiKeyRevoked> {
   return realClient.revokeApiKey(id);
 }
 
-export type { AgentSummary, ApiKeyCreated, ApiKeyRevoked, ApiKeySummary, ConfigState, MarketplacePlugin, PluginSummary, ProjectSummary, RecoverResponse, SkillSummary, ToolScope, ToolSummary };
+export type { AgentSummary, ApiKeyCreated, ApiKeyRevoked, ApiKeySummary, ConfigState, ConfigStorageStatus, MarketplacePlugin, PluginSummary, ProjectSummary, RecoverResponse, SkillSummary, ToolScope, ToolSummary };

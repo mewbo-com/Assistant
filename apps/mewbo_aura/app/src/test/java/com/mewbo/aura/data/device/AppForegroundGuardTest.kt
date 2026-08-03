@@ -40,14 +40,13 @@ class AppForegroundGuardTest {
 
     @Test
     fun `a visible assist overlay alone permits an activity launch, whatever the process importance says`() {
-        // THE clock/alarm-from-the-overlay case, and the reason it was broken. Showing a
-        // VoiceInteractionSession rebinds the host service with
+        // Showing a VoiceInteractionSession rebinds the host service with
         // BIND_TREAT_LIKE_VISIBLE_FOREGROUND_SERVICE, so the process reports
         // IMPORTANCE_FOREGROUND_SERVICE (125) - NOT IMPORTANCE_FOREGROUND (100). Importance counts
-        // UP as it gets less important, so the old `<= 100` check read "backgrounded" and
-        // device_set_alarm/set_timer/dismiss_alarm all failed app_not_foreground, even though
-        // Android itself permits the launch from a visible TYPE_VOICE_INTERACTION window. 125 is the
-        // real case (AOSP-confirmed); IMPORTANCE_VISIBLE covers the same gap defensively should the
+        // UP as it gets less important, so a plain `<= 100` check alone would read this as
+        // "backgrounded" and fail device_set_alarm/set_timer/dismiss_alarm with app_not_foreground,
+        // even though Android permits the launch from a visible TYPE_VOICE_INTERACTION window. 125
+        // is the real case; IMPORTANCE_VISIBLE covers the same gap defensively should the
         // platform's bind flags ever change. Full chain in canStartActivityNow's KDoc.
         assertTrue(canStartActivityNow(processImportance = IMPORTANCE_FOREGROUND_SERVICE, assistOverlayVisible = true))
         assertTrue(canStartActivityNow(processImportance = IMPORTANCE_VISIBLE, assistOverlayVisible = true))

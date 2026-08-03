@@ -27,7 +27,7 @@ the snapshot) and ``runtime.cancel(session_id)`` actually reaches a registered
 ``RunHandle`` (a bare ``run_sync`` never registers one, which made cancel a
 no-op by construction and let a dead worker strand a ``running`` record).
 
-Security invariants (spec §6 / subsystem CLAUDE.md):
+Security invariants (/ subsystem CLAUDE.md):
 
 * **``scg.enabled`` gate.** The whole feature ships behind ``scg.enabled``
   (default ``False``); when off, the run fails fast with a structured error
@@ -52,7 +52,7 @@ from typing import Any, Literal
 
 from mewbo_core.common import get_logger
 from mewbo_core.permissions import auto_approve
-from mewbo_core.session_event_bus import get_session_event_bus
+from mewbo_core.session.session_event_bus import get_session_event_bus
 
 from .. import events
 from ..runner import _typewriter_chunks
@@ -78,6 +78,7 @@ from .run_streamer import (
     ProbeTrace,
     ResultsProjection,
     RunEventStreamer,
+    SpawnAttempts,
 )
 from .workspace_binding import WorkspaceGraphBinding
 
@@ -165,7 +166,7 @@ class OrchestratedSearchRunner:
     """
 
     def __init__(self, related_runner: RelatedQuestionsRunner | None = None) -> None:
-        """Bind the optional follow-up generator (``None`` ⇒ the legacy path)."""
+        """Bind the optional follow-up generator (``None`` ⇒ the transcript fallback)."""
         self._related_runner = related_runner
 
     # -- SearchRunner Protocol ---------------------------------------------
@@ -464,7 +465,7 @@ class OrchestratedSearchRunner:
                     returned_count=coordinator_returned,
                 )
         else:
-            # No live streamer (defensive / legacy call): emit the full trace.
+            # No live streamer: emit the full trace.
             for agent in trace:
                 store.append_run_event(
                     run.run_id,
@@ -606,7 +607,7 @@ class OrchestratedSearchRunner:
         """True when the record is terminal and this settle attempt must not proceed.
 
         A ``completed``/``cancelled`` record is final — never revisited (the
-        cancel-vs-drive race this guard originally exists for). A ``failed``
+        cancel-vs-drive race this guard exists for). A ``failed``
         record is the ONE sanctioned exception: when the caller is an
         explicit post-recovery reconcile (``allow_amend_from_failed=True``), a
         prior ``failed`` settlement is amendable, since the backing session
@@ -893,10 +894,18 @@ class OrchestratedSearchRunner:
     ) -> RunStatsWire:
         """Derive the honest run-stats block — NEVER fabricate an underivable value.
 
-        ``probes`` = spawned probe lanes; ``tool_calls`` = every ``tool_result``
-        event; tokens = the cross-lane totals (cumulative from the LAST
-        ``llm_call_end`` per agent, else the per-call sums). ``setup_ms`` = the
-        run's ``created_at`` → the first user/llm event (the pre-turn MCP
+        ``probes`` = spawned probe lanes (STARTED — each earned a ``sub_agent``
+        event); ``probes_rejected`` = spawn attempts PERMANENTLY refused — an
+        unresolvable project, an unknown agent type, an unavailable model —
+        and so invisible to ``len(trace)`` (see :class:`SpawnAttempts`: capacity
+        never refuses, an over-subscribed spawn waits and is dispatched later,
+        so it still earns a ``sub_agent`` event and is counted in ``probes``;
+        only a genuine resolution failure is a refusal). Together they
+        distinguish "ran" from "intended": ``probes + probes_rejected`` is what
+        the coordinator actually tried to spawn. ``tool_calls`` = every
+        ``tool_result`` event; tokens = the cross-lane totals (cumulative from
+        the LAST ``llm_call_end`` per agent, else the per-call sums). ``setup_ms``
+        = the run's ``created_at`` → the first user/llm event (the pre-turn MCP
         handshake gap the "73s total" hid) — ``None`` when no such event has a
         timestamp; ``search_ms`` = ``total_ms − setup_ms`` (also ``None`` when
         ``setup_ms`` is). The RunStats discipline: a value that can't be derived
@@ -904,6 +913,11 @@ class OrchestratedSearchRunner:
         """
         lane_stats = OrchestratedSearchRunner._lane_stats(records)
         tool_calls = sum(1 for r in records if r.get("type") == "tool_result")
+        probes_rejected = sum(
+            SpawnAttempts.rejected_count(r.get("payload") or {})
+            for r in records
+            if r.get("type") == "tool_result"
+        )
         input_tokens = sum(
             s.input_tokens or 0 for s in lane_stats.values()
         )
@@ -916,6 +930,7 @@ class OrchestratedSearchRunner:
         )
         return RunStatsWire(
             probes=len(trace),
+            probes_rejected=probes_rejected,
             tool_calls=tool_calls,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -1071,7 +1086,7 @@ class OrchestratedSearchRunner:
         """Launch the parallel follow-up call on a daemon thread; ``None`` if off.
 
         Disabled (returns ``None``) when no :class:`RelatedQuestionsRunner` is
-        armed (the legacy / test path — keeps settle LLM-free), when the run did
+        armed (the test path — keeps settle LLM-free), when the run did
         not complete, or when there is no answer to base follow-ups on. The
         thread writes its result into a shared box the settle worker joins on.
         """
@@ -1136,7 +1151,7 @@ class OrchestratedSearchRunner:
 
         Parses the run's start timestamp (``started_at`` preferred, ``created_at``
         fallback) and measures to settle time. ``0`` only when neither parses (a
-        record with no start stamp) — never the old hardcoded ``0`` that read
+        record with no start stamp) — never a hardcoded ``0``, which reads
         ``0ms`` beside a multi-minute run.
         """
         start_iso = run.started_at or run.created_at
@@ -1171,6 +1186,15 @@ class OrchestratedSearchRunner:
           ``confidence`` when no explicit rank), rounded 2dp. Nothing ran AND
           nothing emitted → ``(0.0, 0)`` so the console keeps suppressing the
           chip. The coordinator lane is NOT a probe — never in the probe ratio.
+          The denominator is ``len(trace)`` — probes that STARTED — never the
+          count the coordinator merely attempted: a PERMANENTLY refused probe
+          (unresolvable project, unknown agent type, unavailable model —
+          never a capacity wait, which never refuses) gathered no
+          evidence to average in, so it is rightly excluded here (see
+          ``AnswerSynthesis.confidence``). That refusal is not lost — it is
+          what ``RunStatsWire.probes_rejected`` (``_build_stats``) exists to
+          surface, deliberately as a SIBLING stat rather than folded into
+          this ratio.
         """
         with_data_probes = [a for a in trace if not ProbeTrace.is_dead_end(a.result)]
         sources = {f"probe:{a.agent_id}" for a in with_data_probes}

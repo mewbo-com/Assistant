@@ -18,11 +18,11 @@ Design:
   crosses a trust boundary — the documented carve-out from the house Pydantic
   rule ("the Pydantic rule stops at the process boundary"), the same one
   ``RenderedInstructions`` takes.
-* **Byte-identical when auth is off (or the caller is admin/legacy).** The
-  disabled/admin branch reproduces today's run exactly: the client's grants pass
+* **Byte-identical when auth is off, or the caller is an admin.** The
+  disabled/admin branch changes nothing about the run: the client's grants pass
   through untouched, permissive scope, ``capability_mode="all"``,
   ``permission_policy=None`` (so the loop keeps its own default policy), and
-  ``auto_approve``. This is the #1 rejection guard for the whole IAM effort.
+  ``auto_approve``. This is the #1 rejection guard here.
 
 Enforcement for a role-bounded (non-admin) caller pins ALL THREE tool channels
 so they agree — binding, capability tier, and execution policy:
@@ -48,8 +48,8 @@ so they agree — binding, capability tier, and execution policy:
   (``users.admin``/``config.write``/…) are the per-route guards' job, never a
   session gate.
 
-Disabled auth or an admin caller skips all of the above — a pure passthrough,
-byte-identical to the pre-IAM run.
+Disabled auth or an admin caller skips all of the above — a pure passthrough
+that gates nothing.
 """
 
 from __future__ import annotations
@@ -182,7 +182,7 @@ class SessionScopeResolver:
         Disabled auth, an unauthenticated request (``None``), or an admin
         principal all take the passthrough branch: grants untouched, permissive
         scope preserved, ``capability_mode="all"``, no permission policy (the loop
-        keeps its default), ``auto_approve`` — byte-identical to the pre-IAM run.
+        keeps its default), ``auto_approve`` — nothing is gated.
         """
         requested_caps = (
             list(requested_capabilities) if requested_capabilities is not None else None
@@ -298,7 +298,7 @@ class SessionScopeResolver:
 def authority_from_principal(principal: Principal | None) -> TriggerAuthority | None:
     """Snapshot an arming caller's authority for a trigger record, or ``None``.
 
-    Returns ``None`` for an unauthenticated (``None``) or admin/legacy caller —
+    Returns ``None`` for an unauthenticated (``None``) or admin caller —
     exactly the cases whose fired trigger should re-engage with today's ambient
     full power (a captured admin snapshot would resolve back to full power
     anyway). So a ``None`` result is the auth-disabled / admin path, and the

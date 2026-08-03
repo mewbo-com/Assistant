@@ -189,20 +189,24 @@ class RunRepository @Inject constructor(
     }
 
     /**
-     * Delivers the human's [answers] for a pending ask-user question ([callId]/[callToken] from the
-     * `user_question` event). This is a HUMAN-tap answer, wired from the chat surface's ViewModel —
-     * deliberately NOT part of `live()`'s auto-serviced `device_tool_call` pipeline (that answers the
-     * machine automatically; a question waits for a person). Status-code interpretation lives in the
-     * testable top-level [interpretAnswerResponse]; the [ResponseBody] is closed either way (the wire
-     * forbids retrying, exactly like [AuraApi.postDeviceToolResult]).
+     * Delivers the human's [answers] (plus optional group-level [notes]) for an ask-user question
+     * ([callId]/[callToken] from the originating `user_question` event) — whether the card is still
+     * pending OR the run already stopped waiting ([com.mewbo.aura.data.model.QuestionResolution.RunMovedOn]);
+     * the endpoint accepts both and reports which happened via the answered SSE event's `delivery`.
+     * This is a HUMAN-tap answer, wired from the chat surface's ViewModel — deliberately NOT part of
+     * `live()`'s auto-serviced `device_tool_call` pipeline (that answers the machine automatically; a
+     * question waits for a person). Status-code interpretation lives in the testable top-level
+     * [interpretAnswerResponse]; the [ResponseBody] is closed either way (the wire forbids retrying,
+     * exactly like [AuraApi.postDeviceToolResult]).
      */
     suspend fun answerQuestion(
         sessionId: String,
         callId: String,
         callToken: String,
         answers: List<QuestionAnswerItemDto>,
+        notes: String? = null,
     ): QuestionAnswerResult {
-        val response = api.answerQuestion(sessionId, callId, QuestionAnswerRequest(callToken = callToken, answers = answers))
+        val response = api.answerQuestion(sessionId, callId, QuestionAnswerRequest(callToken = callToken, answers = answers, notes = notes))
         return try {
             interpretAnswerResponse(response)
         } finally {

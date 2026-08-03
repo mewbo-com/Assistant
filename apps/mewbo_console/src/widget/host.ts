@@ -7,12 +7,11 @@
 //     from the synthetic origin `https://appassets.androidplatform.net/` and
 //     hands it a widget payload over the JS bridge;
 //   - the web console's `AppFrame`, which frames this page to render a Mewbo
-//     App. The console used to mount stlite in-document and paid for it: an
-//     embedded Streamlit multipage app pushes its own URLs onto
-//     `window.history`, which the console's router observed and reacted to by
-//     navigating away from the app. A frame gives the embedded app its own
-//     history, title and style scope, so that whole class of host
-//     contamination stops at the frame boundary.
+//     App: an embedded Streamlit multipage app pushes its own URLs onto
+//     `window.history`, and mounting Streamlit in-document would let the
+//     console's router observe those pushes and navigate away from the app.
+//     A frame gives the embedded app its own history, title and style scope,
+//     so that whole class of host contamination stops at the frame boundary.
 //
 // Contract (see apps/mewbo_console/CLAUDE.md → "widget-host entry"):
 //   - On boot the page posts `{type:"mewbo-widget-host-ready"}` to its host so

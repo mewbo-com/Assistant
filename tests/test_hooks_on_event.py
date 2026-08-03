@@ -9,12 +9,12 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from mewbo_core.config import HookEntry, HooksConfig
+from mewbo_core.contracts.types import EventRecord
 from mewbo_core.hooks import (
     HookManager,
     _make_event_command_hook,
     _make_http_event_hook,
 )
-from mewbo_core.types import EventRecord
 
 
 def _event(etype: str = "tool_result", text: str = "ok") -> EventRecord:

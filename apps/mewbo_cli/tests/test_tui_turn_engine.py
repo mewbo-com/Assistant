@@ -12,13 +12,15 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from mewbo_cli.cli_commands import REGISTRY
 from mewbo_cli.cli_context import CliState
 from mewbo_cli.tui.seams import PermissionGateway, TranscriptItem
 from mewbo_cli.tui.turn_engine import TurnEngine
 from mewbo_core.classes import ActionStep, TaskQueue
-from mewbo_core.session_runtime import SessionRuntime
-from mewbo_core.session_store import SessionStore
-from mewbo_core.tool_registry import ToolRegistry
+from mewbo_core.loop.session_runtime import SessionRuntime
+from mewbo_core.session.session_store import SessionStore
+from mewbo_core.tooling.ask_user import ASK_USER_QUESTION_TOOL_ID, AskUserQuestionTool
+from mewbo_core.tooling.tool_registry import ToolRegistry
 from rich.console import Console
 
 # --- fakes ---------------------------------------------------------------
@@ -93,7 +95,7 @@ def _stub_run(monkeypatch: pytest.MonkeyPatch, *, result: str = "ok",
         tq.task_result = result
         return tq
 
-    monkeypatch.setattr("mewbo_core.session_runtime.orchestrate_session", fake_orchestrate)
+    monkeypatch.setattr("mewbo_core.loop.session_runtime.orchestrate_session", fake_orchestrate)
     return captured
 
 
@@ -162,7 +164,7 @@ def _stub_run_with_completion(
         tq.task_result = result
         return tq
 
-    monkeypatch.setattr("mewbo_core.session_runtime.orchestrate_session", fake_orchestrate)
+    monkeypatch.setattr("mewbo_core.loop.session_runtime.orchestrate_session", fake_orchestrate)
 
 
 def test_last_turn_outcome_none_before_any_turn(tmp_path: Any) -> None:
@@ -455,6 +457,99 @@ def test_run_query_show_plan_emits_plan(tmp_path: Any, monkeypatch: pytest.Monke
     )
     h.engine.run_query("plan this")
     assert "plan" in h.kinds()
+
+
+# --- command-path parity: extra session tools ----------------------------
+#
+# ``ask_user_question`` rides ``run_sync(extra_session_tools=…)``. The query
+# turn threads it; the COMMAND path built its ``CommandContext`` without an
+# equivalent, so a session recovered with ``/continue`` or ``/retry`` — exactly
+# when a run most needs a human decision — silently lost the ability to ask and
+# had to guess. These drive the REAL command registry through ``handle`` so the
+# assertion sits at the caller's site, not on the plumbing.
+
+
+class _AskUserFactory:
+    """Stand-in for ``cli_master._ask_user_tools``: binds the CURRENT id.
+
+    Records each built list so a test can assert the very object the factory
+    returned is what reached ``run_sync``, and that a session-id change between
+    turns is picked up (the reason the seam is a factory, not a list).
+    """
+
+    def __init__(self, state: CliState) -> None:
+        self._state = state
+        self.bound_ids: list[str] = []
+        self.built: list[list[Any]] = []
+
+    def __call__(self) -> list[Any]:
+        self.bound_ids.append(self._state.session_id)
+        tools: list[Any] = [AskUserQuestionTool(self._state.session_id)]
+        self.built.append(tools)
+        return tools
+
+
+def _command_harness(tmp_path: Any) -> tuple[_Harness, _AskUserFactory]:
+    """A harness wired to the real command registry + an ask-user factory."""
+    h = _Harness(tmp_path)
+    factory = _AskUserFactory(h.state)
+    h.engine.command_registry = REGISTRY  # type: ignore[assignment]
+    h.engine._extra_session_tools_factory = factory  # type: ignore[attr-defined]
+    # Recovery resolves against the last user turn; seed one.
+    h.store.append_event(h.session_id, {"type": "user", "payload": {"text": "ship the thing"}})
+    return h, factory
+
+
+@pytest.mark.parametrize("line", ["/continue", "/retry", "/edit reworded prompt"])
+def test_command_run_inherits_ask_user_tool(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, line: str
+) -> None:
+    """A command-driven run receives the run's extra session tools."""
+    h, factory = _command_harness(tmp_path)
+    captured = _stub_run(monkeypatch)
+
+    assert h.engine.handle(line) is True
+
+    assert factory.bound_ids == [h.session_id]
+    assert captured["extra_session_tools"] is factory.built[-1]
+    assert captured["extra_session_tools"][0].tool_id == ASK_USER_QUESTION_TOOL_ID
+
+
+def test_command_run_binds_the_current_session_id(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The factory is resolved per run, so ``/new``-style id moves are honoured.
+
+    A list captured when the ``CommandContext`` was built would dispatch the
+    answer against the previous session.
+    """
+    h, factory = _command_harness(tmp_path)
+    _stub_run(monkeypatch)
+    h.engine.handle("/continue")
+
+    switched = h.store.create_session()
+    h.state.session_id = switched
+    h.store.append_event(switched, {"type": "user", "payload": {"text": "and again"}})
+    captured = _stub_run(monkeypatch)
+    h.engine.handle("/continue")
+
+    assert factory.bound_ids == [h.session_id, switched]
+    assert captured["extra_session_tools"] is factory.built[-1]
+
+
+def test_command_run_without_a_factory_binds_nothing(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No factory (plain-REPL / no-TTY, where no dispatcher is registered) ⇒
+    ``None`` — never an empty list that would read as "tools were considered".
+    """
+    h, _ = _command_harness(tmp_path)
+    h.engine._extra_session_tools_factory = None  # type: ignore[attr-defined]
+    captured = _stub_run(monkeypatch)
+
+    h.engine.handle("/continue")
+
+    assert captured["extra_session_tools"] is None
 
 
 def test_console_factory_used_for_capture_is_recording(tmp_path: Any) -> None:

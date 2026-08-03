@@ -150,7 +150,7 @@ class AssistTurnMachineTest {
     )
 
     private fun recentSession(sessionId: String = "old-session", title: String = "Yesterday's chat"): SessionSummary {
-        // Regression fixture (carried over from v3): the real backend emits a numeric offset
+        // Regression fixture: the real backend emits a numeric offset
         // (`+00:00`), never bare `Z` - `java.time.Instant.now().toString()` produces `Z` and would
         // mask a bare-`Instant.parse` regression in `recentSessionOrNull`, since that form happens
         // to parse fine. This must use the same shape the live device actually sends.
@@ -557,7 +557,7 @@ class AssistTurnMachineTest {
         assertFalse(handoffCalled)
     }
 
-    // ---- Pull-up (swipe-up on the composer pill) handoff (user directive 2026-07-04): the routing
+    // ---- Pull-up (swipe-up on the composer pill) handoff (user directive): the routing
     // DECISION seam - session present => route to it, absent => new chat; draft carried in both. ----
 
     @Test
@@ -938,7 +938,7 @@ class AssistTurnMachineTest {
         assertEquals(listOf("settle"), haptics.calls)
     }
 
-    // ---- [R4 2026-07-10] listeningEnded haptic: an a11y-mandated non-visual "mic is off" cue for
+    // ---- [R4] listeningEnded haptic: an a11y-mandated non-visual "mic is off" cue for
     // every way capture can end WITHOUT an accepted transcript - distinct from transcriptAccepted's
     // accepted-Final path (the two moments must never both fire for the same capture). ----
 

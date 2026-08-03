@@ -16,8 +16,8 @@ App directory: `/tmp/mewbo/apps/${SESSION_ID}/<app_id>/` — create it, write yo
 ## Build sequence
 
 1. **Design the collections** — a stable natural key per document (the email's message id, a record's own identifier — never a running counter or position) plus provenance fields (`source_file`/`source_path`) so any document traces back to what produced it.
-2. **Pick each pipeline's mode.** `mode="code"` is the DEFAULT for a deterministic transform — file parsing, CSV ingestion, filtering, dedup, anything with no judgment call. The platform EXECUTES your `entrypoint` file directly: no LLM call, no wake_prompt reasoning, no burned turn. Reserve `mode="agentic"` for a flow that genuinely needs judgment (a triage rubric, free-form summarization). A deterministic transform running agentically is pure waste — a real production app burned 45 LLM-minutes per fire doing exactly what a function does in milliseconds.
-3. **Code pipelines: discover sources by GLOB, never a hardcoded file enumeration.** Call `ctx.glob(pattern)` every run — don't name individual files. A hardcoded list quietly misses whatever shows up later; a real app once dropped every new CSV tracker on the floor because it only knew about the files present at build time.
+2. **Pick each pipeline's mode.** `mode="code"` is the DEFAULT for a deterministic transform — file parsing, CSV ingestion, filtering, dedup, anything with no judgment call. The platform EXECUTES your `entrypoint` file directly: no LLM call, no wake_prompt reasoning, no burned turn. Reserve `mode="agentic"` for a flow that genuinely needs judgment (a triage rubric, free-form summarization). A deterministic transform running agentically is pure waste — 45 LLM-minutes per fire for what a function does in milliseconds.
+3. **Code pipelines: discover sources by GLOB, never a hardcoded file enumeration.** Call `ctx.glob(pattern)` every run — don't name individual files. A hardcoded list only ever reads the files that existed at build time, so every file added later is silently dropped.
 4. **Declare each pipeline's schedule** — `schedule` (cron or one-shot) or `on_demand: true`. You never arm anything yourself; the platform does it at submit time.
 5. **Write the frontend** — reads via the `mewbo_app` SDK only.
 6. **Verify** — `python -m py_compile` every `.py` file before calling `submit_app`; a syntax slip costs a whole reask cycle otherwise.
@@ -162,7 +162,7 @@ Declared on `submit_app` exactly like an agentic pipeline, plus `mode`/`entrypoi
 
 A `mode="code"` pipeline is deterministic by default, but where a transform genuinely needs judgment (classify a row, summarize free text) it may call `ctx.llm(prompt, output_schema, *, max_tokens=1024)` — ONE schema-shaped model round-trip that returns a dict validated against `output_schema`. Two hard requirements:
 
-- **Declare `llm_budget_tokens` on the pipeline** (default `0` FORBIDS `ctx.llm` — declared capability, not ambient). The runner caps the cumulative `max_tokens` a run requests and refuses the call that would exceed it. Also **raise `timeout_seconds`** (default 10) — an llm pipeline should declare e.g. `120`–`300` so the model round-trip(s) have wall-clock headroom.
+- **Declare `llm_budget_tokens` on the pipeline** (default `0` FORBIDS `ctx.llm` — declared capability, not ambient). The runner caps the cumulative `max_tokens` a run requests and refuses the call that would exceed it. Also **raise `timeout_seconds`** (default 10, ceiling 240) — an llm pipeline should declare e.g. `120`–`240` so the model round-trip(s) have wall-clock headroom. The ceiling is fixed, not a suggestion: `submit_app` refuses anything higher, because a code pipeline holds the API's single web worker for its whole run.
 - **`output_schema` MUST have root `type: "object"`** — the model returns a JSON object; a non-object root is rejected up front. Wrap a list/scalar result in an object field (e.g. `{"type": "object", "properties": {"labels": {"type": "array", ...}}}`).
 
 ```python
@@ -282,13 +282,15 @@ Keep `user_writable` off any pipeline whose params are NOT user-facing (a schedu
 
 Call `submit_app` ONCE with the metadata. The frontend file CONTENTS are read from your app directory — do NOT paste them into arguments.
 
+`workspace_ref` with `kind:"own"` ignores its `key` — the app gets its own default scope. A `kind:"shared"` `key` must be an EXISTING project key from the platform's project list (what a session's project picker offers); an app id, an app title or a directory name is never one, and a submit naming one is refused.
+
 ```python
 submit_app(
     app_id="email-organizer",
     title="Email Organizer",
     summary="Groups your inbox into actionable task clusters every morning.",
     icon="📥",
-    workspace_ref={"kind": "own", "key": "email-organizer"},   # use the workspace choice you were handed
+    workspace_ref={"kind": "own", "key": ""},                   # use the workspace choice you were handed
     entrypoint="app.py",
     requirements=[],                                            # pure-Python packages your frontend imports
     collections=[
@@ -362,6 +364,7 @@ Updating a live app later is a **read-modify-resubmit loop**, because `submit_ap
 - **Glob, don't enumerate.** Discover input files by pattern (`ctx.glob(...)` for code, your workspace tools for agentic) every run a pipeline fires — a hardcoded file list goes stale the moment new data shows up.
 - **Give every document a stable natural key + provenance.** Never a running counter; carry `source_file`/`source_path` when the data came from a file.
 - **SDK only for data (frontend).** `import mewbo_app`; read via `app.data.query(...)` / `app.system.*`. No raw HTTP, no `js`, no dynamic `__import__`. A code pipeline's ONLY I/O is `ctx` — including `ctx.llm` (declare `llm_budget_tokens` first), never raw filesystem/network access outside it.
+- **`app.data.query(...)` pages transparently, so pass the real `limit` you need.** The REST page underneath is capped at 500 per request; the SDK follows the cursor for you until your `limit` is satisfied. Never assume one un-paged read returns a whole collection — a large `limit` you never actually asked for is a collection you never actually read.
 - **`ctx.read_file`/`ctx.glob` take workspace-relative paths only** — an absolute path is rejected even if it exists on the host.
 - **Never swallow a `ctx` failure.** A broad `except` around `ctx.read_file`/`ctx.glob`/`ctx.collection` that falls back to empty data hides a broken pipeline and disarms the submit-time verifier — fail loudly instead. If you must tolerate one case, narrow on `exc.code` (e.g. `"read"`), never on the exception's message text, and always re-raise everything else.
 - **State the timezone for "today" logic explicitly.** `ctx.now()` is UTC; convert (e.g. via `zoneinfo`) before bucketing by day for a non-UTC user.

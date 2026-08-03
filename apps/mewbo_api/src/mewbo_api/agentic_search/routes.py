@@ -351,6 +351,18 @@ search_run_stats_model = agentic_ns.model(
     "SearchRunStats",
     {
         "probes": fields.Integer(example=2),
+        "probes_rejected": fields.Integer(
+            example=0,
+            description=(
+                "Probe spawn attempts PERMANENTLY refused — an unresolvable "
+                "project, an unknown agent type, an unavailable model — "
+                "never a capacity wait (an over-subscribed spawn is accepted "
+                "and dispatched once a slot frees, so it counts in 'probes' "
+                "instead). Never counted in 'probes', which is STARTED lanes "
+                "only. 'probes + probes_rejected' is what the run actually "
+                "intended to spawn."
+            ),
+        ),
         "tool_calls": fields.Integer(example=5),
         "tokens": fields.Integer(example=4821),
         "setup_ms": fields.Integer(example=180),
@@ -868,8 +880,8 @@ class WorkspaceItemResource(Resource):
             return {"message": "workspace not found"}, 404
         # The hook is the graph-lifecycle seam: a sources change OR an
         # instructions/desc edit can re-drive the map+enrich. An instructions-only
-        # PATCH carries no ``sources`` key, so the old sources-only gate skipped
-        # it (the gap). Fire whenever the selection or the prose moved; the
+        # PATCH carries no ``sources`` key, so a sources-only gate would skip it
+        # entirely. Fire whenever the selection or the prose moved; the
         # hook is idempotent + in-flight-guarded, so a no-op PATCH still fires
         # nothing downstream.
         prose_changed = prev_prose is not None and prev_prose != (

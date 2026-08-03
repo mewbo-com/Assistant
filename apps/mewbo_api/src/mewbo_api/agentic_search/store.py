@@ -11,7 +11,7 @@ requirement):
 * **Runs** — durable :class:`RunRecord` snapshots + an append-only,
   idx-keyed event log per run (the same shape the SSE stream replays).
 * **Map jobs** — durable :class:`MapJobRecord` snapshots of an SCG indexing
-  run (spec §16.2) + their own append-only, idx-keyed event log. They live
+  run + their own append-only, idx-keyed event log. They live
   here, not in the SCG structure store, so they reuse the run event-log +
   ``RunSseGenerator`` plumbing verbatim.
 

@@ -196,7 +196,7 @@ class TeamView(ApiResponse):
 class TeamMemberView(ApiResponse):
     """One membership edge, with the member's profile resolved where possible.
 
-    The profile fields are ``None`` when ``user_id`` no longer resolves to a
+    The profile fields are ``None`` when ``user_id`` does not resolve to a
     stored user. That is a deliberate divergence from the SCIM group
     projection, which SKIPS such a member: an IdP is reconciling a roster and
     must not be told about a user the deployment cannot describe, whereas this
@@ -210,7 +210,7 @@ class TeamMemberView(ApiResponse):
     display_name: str | None = Field(default=None, description="Member display name, when known.")
     email: str | None = Field(default=None, description="Member email, when known.")
     status: str | None = Field(
-        default=None, description="Account status, or null when the id no longer resolves."
+        default=None, description="Account status, or null when the id does not resolve."
     )
 
 
@@ -589,7 +589,7 @@ class IamRoutesController:
 
         A configured group→team mapping targeting this slug is left alone: it
         lives in ``api.auth.team_mappings`` (edited through ``/api/config``), and
-        a rule whose target no longer exists is inert, not an error.
+        a rule whose target does not exist is inert, not an error.
         """
         self._require_team(team_id)
         self.team_store.delete(team_id)
@@ -847,10 +847,9 @@ class IamRoutesController:
     def _avatar(self, record: UserRecord) -> AvatarChain:
         """The avatar chain, both legs read from the model.
 
-        ``gravatar_url`` is asked for directly. This used to blank ``picture_url``
-        on a copy of the record and read ``avatar_url``, to force the precedence
-        resolver down its Gravatar branch — a workaround for the model exposing
-        only the collapsed value, which is now a member of its own.
+        ``gravatar_url`` is asked for directly — it is a member of its own, so
+        neither leg needs the precedence resolver forced down a branch by
+        blanking ``picture_url`` on a throwaway copy of the record.
         """
         policy: AvatarPolicy = self.settings.avatars
         return AvatarChain(
@@ -995,7 +994,7 @@ class IamRoutesController:
     def _team_member_view(self, record: TeamMembershipRecord) -> TeamMemberView:
         """Project one edge, resolving the member's profile against the user store.
 
-        An id that no longer resolves still yields a row, with the profile
+        An id that does not resolve still yields a row, with the profile
         fields left ``None`` — see :class:`TeamMemberView` for why this surface
         reports a stranded edge where the SCIM projection drops it.
         """

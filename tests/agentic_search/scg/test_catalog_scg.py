@@ -26,7 +26,7 @@ from __future__ import annotations
 import pytest
 from mewbo_api.agentic_search import catalog as catalog_mod, fixtures
 from mewbo_api.agentic_search.catalog import SourceCatalog
-from mewbo_core.tool_registry import load_registry
+from mewbo_core.tooling.tool_registry import load_registry
 from mewbo_graph.scg import store as scg_store
 from mewbo_graph.scg.types import ScgNode
 
@@ -191,12 +191,12 @@ def test_entries_keeps_all_catalog_sources() -> None:
     assert {"notion", "github", "filesystem", "web"} <= ids
 
 
-# ── Grant inversion regression (run-797097e4b1) ──────────────────────────────
+# ── Grant inversion regression ───────────────────────────────────────────────
 
 
 def _registry_with(specs):
     """A registry preloaded with *specs* (tool_id, server) — the live MCP set."""
-    from mewbo_core.tool_registry import ToolRegistry, ToolSpec
+    from mewbo_core.tooling.tool_registry import ToolRegistry, ToolSpec
 
     registry = ToolRegistry()
     for tool_id, server in specs:
@@ -223,7 +223,7 @@ def test_mapped_capability_mints_mcp_registry_id(monkeypatch) -> None:
     grant matches the live registry id.
     """
     registry = _registry_with([("mcp_github_search_repos", "github")])
-    monkeypatch.setattr(catalog_mod, "load_registry", lambda cwd=None: registry)
+    monkeypatch.setattr(catalog_mod, "load_registry", lambda cwd=None, **_kw: registry)
     store = scg_store.get_scg_store()
     # The node carries the RAW connector tool name, NOT the registry id.
     store.upsert_nodes([_capability("github", "search_repos")])
@@ -249,10 +249,10 @@ def test_search_grant_drops_write_tools(monkeypatch) -> None:
             ("mcp_gitea_wiki_write", "gitea"),
         ]
     )
-    monkeypatch.setattr(catalog_mod, "load_registry", lambda cwd=None: registry)
+    monkeypatch.setattr(catalog_mod, "load_registry", lambda cwd=None, **_kw: registry)
     monkeypatch.setattr(
         catalog_mod, "get_merged_mcp_config",
-        lambda project=None: {"servers": {"gitea": {}}},
+        lambda project=None, **_kw: {"servers": {"gitea": {}}},
     )
     granted = SourceCatalog.tools_for(["gitea"])
     # Read verbs kept ...
@@ -285,10 +285,10 @@ def test_failed_map_source_falls_through_but_write_filtered(monkeypatch) -> None
             ("mcp_github_merge_pull_request", "github"),
         ]
     )
-    monkeypatch.setattr(catalog_mod, "load_registry", lambda cwd=None: registry)
+    monkeypatch.setattr(catalog_mod, "load_registry", lambda cwd=None, **_kw: registry)
     monkeypatch.setattr(
         catalog_mod, "get_merged_mcp_config",
-        lambda project=None: {"servers": {"github": {}}},
+        lambda project=None, **_kw: {"servers": {"github": {}}},
     )
     # No SCG nodes for github → falls through to the live registry ids.
     granted = SourceCatalog.tools_for(["github"])

@@ -20,18 +20,17 @@ Public surface (three things):
 from __future__ import annotations
 
 import ast
-import difflib
 import json
 import re
 from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
+from mewbo_core.contracts.diff_stat import DiffStat
 from rich.console import Group, RenderableType
 from rich.panel import Panel
 from rich.text import Text
 
 from mewbo_cli.aider_ui import render_markdown
-from mewbo_cli.cli_diffview import unified_diff_to_old_new
 from mewbo_cli.cli_icons import ICONS
 from mewbo_cli.cli_theme import DEFAULT_PALETTE, Palette
 from mewbo_cli.tui.seams import MessageRendererRegistry, TranscriptItem
@@ -324,30 +323,6 @@ class ToolOutputCollapser:
         hidden = len(lines) - self._max_lines
         visible.append(f"… {hidden} lines hidden — expand to see all")
         return "\n".join(visible)
-
-
-# ---------------------------------------------------------------------------
-# Diffstat helper
-# ---------------------------------------------------------------------------
-
-
-def _diffstat(old_text: str, new_text: str) -> str:
-    """Return a compact ``+N -M`` diffstat string for old→new text.
-
-    Counts added and deleted lines using a simple set-difference approach
-    that is fast and allocation-light for typical file edits.
-    """
-    old_lines = old_text.splitlines(keepends=True)
-    new_lines = new_text.splitlines(keepends=True)
-    added = deleted = 0
-    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
-        None, old_lines, new_lines, autojunk=False
-    ).get_opcodes():
-        if tag in ("replace", "delete"):
-            deleted += i2 - i1
-        if tag in ("replace", "insert"):
-            added += j2 - j1
-    return f"+{added} -{deleted}"
 
 
 # ---------------------------------------------------------------------------
@@ -756,7 +731,8 @@ def _render_edit_tool(
     if file_path:
         line = f"{line} {file_path}"
     if old_text is not None and new_text is not None:
-        line = f"{line}  {_diffstat(str(old_text), str(new_text))}"
+        stat = DiffStat.from_texts(str(old_text), str(new_text))
+        line = f"{line}  {stat.render()}"
     head.append(line, style=f"{palette.assistant}")
     return head
 
@@ -829,10 +805,13 @@ def _render_default_tool(
     envelope = _diff_envelope(result)
     if envelope is not None:
         diff_text, file_path = envelope
-        old_text, new_text = unified_diff_to_old_new(diff_text)
         if file_path:
             head.append(f"  {file_path}", style="dim")
-        head.append(f"  {_diffstat(old_text, new_text)}", style="dim")
+        # Counted straight off the envelope text. Reconstructing the two sides
+        # and re-diffing them (what this did) drops the hunk boundaries the diff
+        # already established, so ``SequenceMatcher`` could re-pair lines across
+        # hunks and report fewer changes than the diff itself shows.
+        head.append(f"  {DiffStat.from_unified_diff(diff_text).render()}", style="dim")
         return head
 
     return Group(head, _truncated_body(str(result)))

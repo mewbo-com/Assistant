@@ -20,8 +20,8 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 
-from mewbo_core.key_store_mongo import MongoKeyStore
-from mewbo_core.session_store_mongo import MongoSessionStore
+from mewbo_core.secrets.key_store_mongo import MongoKeyStore
+from mewbo_core.session.session_store_mongo import MongoSessionStore
 from mewbo_core.triggers.store_mongo import MongoTriggerStore
 
 from mewbo_demo_seeder.models import SeedBundle

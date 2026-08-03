@@ -15,7 +15,7 @@ orchestrator's placeholder.
 
 from __future__ import annotations
 
-from mewbo_core.transcript_timeline import (
+from mewbo_core.session.transcript_timeline import (
     TimelineEntry,
     TranscriptTimeline,
     TurnTokenUsage,
@@ -557,7 +557,7 @@ def test_malformed_error_detail_degrades_to_the_legacy_string():
 
 
 # ---------------------------------------------------------------------------
-# Parity gaps the MCP port used to render nothing for
+# Row kinds a surface can silently render nothing for
 # ---------------------------------------------------------------------------
 
 
@@ -669,6 +669,111 @@ def test_widget_is_rendered():
     widget = next(e for e in entries if e.role == "widget").widget
     assert widget is not None
     assert widget["widget_id"] == "w1"
+
+
+def test_generative_ui_is_rendered_with_its_alt_text():
+    """The assembler is the ONE turn reconstruction; a panel must reach it.
+
+    `_run` is a closed `if etype == ... / continue` chain with no trailing else,
+    so an unhandled event type produces no entry at all and is invisible to
+    every consumer of the canonical timeline. `alt_text` is the whole point of
+    carrying the payload: it is the precomputed plain-text rendering, so a
+    non-visual reader shows what the panel SAID rather than that one existed.
+    """
+    entries = TranscriptTimeline.assemble(
+        [
+            _user("how's the build"),
+            {
+                "type": "generative_ui",
+                "ts": "t1",
+                "payload": {
+                    "ui_id": "gui-0123abcd",
+                    "session_id": "s1",
+                    "spec": {"root": [{"component": "Divider", "props": {}}]},
+                    "alt_text": "### CI\n[green]",
+                    "summary": "CI status for main",
+                },
+            },
+            _assistant("green"),
+        ]
+    )
+    assert "generative_ui" in _roles(entries)
+    panel = next(e for e in entries if e.role == "generative_ui").generative_ui
+    assert panel is not None
+    assert panel["ui_id"] == "gui-0123abcd"
+    assert panel["alt_text"] == "### CI\n[green]"
+    assert panel["summary"] == "CI status for main"
+
+
+def test_a_replaced_panel_upserts_onto_one_row():
+    """`ui_id` is the declared upsert key, so a re-render replaces in place.
+
+    `present_ui` tells the model to pass `ui_id` back to REPLACE a panel, so
+    stacking a near-copy per event would contradict the tool's own contract —
+    and would diverge from the console's `buildTimeline`, which the shared
+    corpus binds this assembler to.
+    """
+    payload = {
+        "ui_id": "gui-0123abcd",
+        "session_id": "s1",
+        "spec": {"root": [{"component": "Divider", "props": {}}]},
+        "alt_text": "first",
+        "summary": "s",
+    }
+    entries = TranscriptTimeline.assemble(
+        [
+            _user("show me"),
+            {"type": "generative_ui", "ts": "t1", "payload": payload},
+            {"type": "generative_ui", "ts": "t2", "payload": {**payload, "alt_text": "second"}},
+            _assistant("done"),
+        ]
+    )
+    panels = [e for e in entries if e.role == "generative_ui"]
+    assert len(panels) == 1
+    assert panels[0].generative_ui["alt_text"] == "second"
+    # The row records when the panel first appeared, not when it was refined.
+    assert panels[0].ts == "t1"
+    assert panels[0].id == "genui-gui-0123abcd"
+
+
+def test_two_distinct_panels_each_get_a_row():
+    """The upsert keys on `ui_id`, not on "a panel exists in this turn"."""
+    base = {
+        "session_id": "s1",
+        "spec": {"root": [{"component": "Divider", "props": {}}]},
+        "summary": "s",
+    }
+    entries = TranscriptTimeline.assemble(
+        [
+            _user("show me"),
+            {
+                "type": "generative_ui",
+                "ts": "t1",
+                "payload": {**base, "ui_id": "gui-aaaaaaaa", "alt_text": "one"},
+            },
+            {
+                "type": "generative_ui",
+                "ts": "t2",
+                "payload": {**base, "ui_id": "gui-bbbbbbbb", "alt_text": "two"},
+            },
+            _assistant("done"),
+        ]
+    )
+    panels = [e for e in entries if e.role == "generative_ui"]
+    assert [p.generative_ui["alt_text"] for p in panels] == ["one", "two"]
+    assert len({p.id for p in panels}) == 2
+
+
+def test_a_panel_with_no_ui_id_is_dropped():
+    """Matches the console's parse guard — an unkeyed panel cannot be upserted."""
+    entries = TranscriptTimeline.assemble(
+        [
+            _user("show me"),
+            {"type": "generative_ui", "ts": "t1", "payload": {"alt_text": "orphan"}},
+            _assistant("done"),
+        ]
+    )
+    assert "generative_ui" not in _roles(entries)
 
 
 def test_question_opens_pending_and_settles_in_place():

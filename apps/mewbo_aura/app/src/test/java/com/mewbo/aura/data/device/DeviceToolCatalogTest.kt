@@ -26,7 +26,7 @@ class DeviceToolCatalogTest {
     }
 
     @Test
-    fun `ships exactly the nine tools defined through Phase 4, no more`() {
+    fun `ships exactly the nine defined tools, no more`() {
         val ids = DeviceToolCatalog.ALL.map { it.toolId }.toSet()
         assertEquals(
             setOf(

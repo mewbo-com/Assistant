@@ -2,8 +2,8 @@
 
 Stdlib-only, imports NOTHING from the library's own submodules, so any layer
 (``entities`` below ``wiki``, or ``wiki`` itself) can import it down/sideways
-without a cycle. It hosts the two utilities that were previously duplicated /
-reached-up for:
+without a cycle. It hosts the two utilities every layer needs, so neither is
+duplicated nor reached up for:
 
 - ``cosine`` — the provider-agnostic cosine-similarity used by both the wiki
   embedder's vector math and the entity resolution ladder.

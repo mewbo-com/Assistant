@@ -30,8 +30,8 @@ from mewbo_api.realtime.recorder import (
     FAST_STRUCTURED_TAG,
     RealtimeSessionRecorder,
 )
-from mewbo_core.session_provenance import SessionOrigin
-from mewbo_core.structured_synthesis import Citation
+from mewbo_core.loop.structured_synthesis import Citation
+from mewbo_core.session.session_provenance import SessionOrigin
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -438,8 +438,8 @@ def test_draft_wire_contract_token_frames_unchanged(client, auth_headers, sync_p
 @pytest.fixture()
 def real_runtime(tmp_path):
     """A real JSON-backed SessionRuntime rooted at an isolated temp dir."""
-    from mewbo_core.session_runtime import SessionRuntime
-    from mewbo_core.session_store import SessionStore
+    from mewbo_core.loop.session_runtime import SessionRuntime
+    from mewbo_core.session.session_store import SessionStore
 
     return SessionRuntime(session_store=SessionStore(root_dir=str(tmp_path)))
 

@@ -23,6 +23,11 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal
 
+from mewbo_core.tooling.ask_user import (
+    USER_QUESTION_ANSWERED_EVENT,
+    USER_QUESTION_EVENT,
+    AskUserQuestionArgs,
+)
 from mewbo_core.triggers.spec import TriggerSpec, parse_trigger
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -38,6 +43,11 @@ JsonValue = str | int | float | bool | None | list[object] | dict[str, object]
 _VALIDATION_T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 TodoStatus = Literal["pending", "in_progress", "completed"]
+
+# The four ``user_question_answered`` outcomes that record the RUN stopping to
+# wait no longer — never the question closing. ``answered`` is deliberately
+# absent; see :class:`UserQuestionAnsweredEvent`.
+RunStoppedOutcome = Literal["timed_out", "declined", "interrupted", "cancelled"]
 
 # Snake_case wire type strings the console timeline (``utils/timeline.ts``) and
 # log builder (``utils/logs.ts``) actually key on — kept as constants so a
@@ -71,7 +81,7 @@ class _SeedEvent(BaseModel):
         Returns a dict carrying its own ``ts`` (the rebased instant); the store's
         ``append_event`` treats a supplied ``ts`` as authoritative
         (``EventRecord = {"ts": now, **event}`` — the spread wins), which is what
-        lets a seeded transcript carry historical timestamps.
+        lets a seeded transcript carry back-dated timestamps.
 
         ``session_id`` is part of the shared keyword contract so a kind whose wire
         payload embeds it (``widget_ready`` is the only one today) can build a
@@ -373,6 +383,117 @@ class PlanDecisionEvent(_SeedEvent):
         }
 
 
+class UserQuestionEvent(_SeedEvent):
+    """A pending ask-user question group — the ``user_question`` event.
+
+    The console maps this to a ``role: "question"`` timeline entry rendered as a
+    ``QuestionCard``: options as radios (single-select) or checkboxes
+    (``multi_select``), an always-present free-text row, the bounded-wait hint
+    when ``timeout_seconds`` is set, and a group-level notes box when
+    ``notes_placeholder`` is. A group with no matching
+    :class:`UserQuestionAnsweredEvent` stays "Awaiting your answer" — the state
+    that renders BOTH of those affordances, which is why the seeded shot leaves
+    two groups unresolved.
+
+    ``questions`` is handed straight to ``mewbo_core.tooling.ask_user`` for validation
+    (the ONE contract seam — the header cap, the empty-or-2-to-4 options rule,
+    the ``multi_select`` requirement, the timeout ceiling and the placeholder
+    cap all live there and are NOT re-implemented here), and ``to_event``
+    re-serializes through the parsed models so a seeded payload carries the
+    exact shape the api dispatcher writes.
+
+    ``call_token`` is an invented fixed string. It authorizes nothing: a seeded
+    transcript has no pending waiter and no run, so the answer route can only
+    ever refuse it.
+    """
+
+    kind: Literal["user_question"] = "user_question"
+    call_id: str = Field(description="Stable, invented group id; the answered-event fold key.")
+    call_token: str = Field(description="Invented single-use token echoed by the answer POST.")
+    questions: list[dict[str, JsonValue]] = Field(
+        description="1-4 questions in the ``mewbo_core.tooling.ask_user.UserQuestion`` shape.",
+    )
+    timeout_seconds: int | None = Field(
+        default=None,
+        description="Bounded wait in seconds; omit for the block-until-answered default.",
+    )
+    notes_placeholder: str | None = Field(
+        default=None,
+        description="Placeholder that makes the group-level free-text notes box render.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_args(self) -> UserQuestionEvent:
+        """Fail fast at bundle-load: trial-parse into the tool's own arg model."""
+        self._args()
+        return self
+
+    def _args(self) -> AskUserQuestionArgs:
+        """The tool-side argument model this event announces."""
+        return AskUserQuestionArgs.model_validate(
+            {
+                "questions": self.questions,
+                "timeout_seconds": self.timeout_seconds,
+                "notes_placeholder": self.notes_placeholder,
+            }
+        )
+
+    def to_event(
+        self, ts: datetime, *, session_model: str, agent_id: str, session_id: str
+    ) -> dict[str, object]:
+        """Emit ``{"type": "user_question", "payload": UserQuestionPayload}``."""
+        args = self._args()
+        payload: dict[str, object] = {
+            "call_id": self.call_id,
+            "call_token": self.call_token,
+            "questions": [q.model_dump(mode="json") for q in args.questions],
+            "timeout_seconds": args.timeout_seconds,
+            "notes_placeholder": args.notes_placeholder,
+        }
+        return {"type": USER_QUESTION_EVENT, "payload": payload, "ts": ts.isoformat()}
+
+
+class UserQuestionAnsweredEvent(_SeedEvent):
+    """A question group whose RUN stopped waiting — ``user_question_answered``.
+
+    ``call_id`` MUST match an earlier :class:`UserQuestionEvent` in the same
+    session: the console folds the outcome onto the pending card by scanning
+    BACKWARDS for a question entry with an equal ``call_id``, so a mismatched id
+    silently leaves the card pending — a wrong screenshot with a green test,
+    caught at bundle load by :meth:`SeedSession._user_questions_resolve` instead.
+
+    ``answered`` is deliberately NOT a seedable outcome. It would need
+    ``answers`` validated pairwise against the group's questions, and a card
+    settled as answered renders none of the affordances these shots document; a
+    seeded ``answered`` with no answers would render "No answer recorded."
+    The four outcomes here are the ones that leave the card ANSWERABLE, which is
+    the contract worth portraying: the run stopped waiting, the question did not
+    close, and a late answer arrives as a new message.
+    """
+
+    kind: Literal["user_question_answered"] = "user_question_answered"
+    call_id: str = Field(description="The UserQuestionEvent.call_id being resolved.")
+    outcome: RunStoppedOutcome
+
+    def to_event(
+        self, ts: datetime, *, session_model: str, agent_id: str, session_id: str
+    ) -> dict[str, object]:
+        """Emit the resolution payload the api writes (answer fields absent → null)."""
+        payload: dict[str, object] = {
+            "call_id": self.call_id,
+            "outcome": self.outcome,
+            "answered_via": None,
+            "answers": None,
+            "notes": None,
+            "delivery": None,
+        }
+        return {
+            "type": USER_QUESTION_ANSWERED_EVENT,
+            "payload": payload,
+            "ts": ts.isoformat(),
+        }
+
+
 class CompletionEvent(_SeedEvent):
     """The run's terminal ``completion`` — what makes the session read ``completed``.
 
@@ -453,6 +574,8 @@ SeedEventUnion = Annotated[
     | WidgetReadyEvent
     | PlanProposedEvent
     | PlanDecisionEvent
+    | UserQuestionEvent
+    | UserQuestionAnsweredEvent
     | CompletionEvent,
     Field(discriminator="kind"),
 ]
@@ -521,6 +644,32 @@ class SeedSession(BaseModel):
                 raise ValueError(
                     f"session {self.id!r} decides plan revision {event.revision} "
                     "before (or without) proposing it"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _user_questions_resolve(self) -> SeedSession:
+        """Every answered event must fold onto an EARLIER group of the same ``call_id``.
+
+        Same failure mode as a mismatched plan revision: the console's fold is a
+        backwards scan that silently does nothing when no id matches, leaving the
+        card "Awaiting your answer" instead of the outcome the bundle meant to
+        portray. Duplicate ids are refused for the same reason — the fold would
+        land on whichever group happened to be nearer.
+        """
+        asked: set[str] = set()
+        for event in self.events:
+            if isinstance(event, UserQuestionEvent):
+                if event.call_id in asked:
+                    raise ValueError(
+                        f"session {self.id!r} asks question group "
+                        f"{event.call_id!r} more than once"
+                    )
+                asked.add(event.call_id)
+            elif isinstance(event, UserQuestionAnsweredEvent) and event.call_id not in asked:
+                raise ValueError(
+                    f"session {self.id!r} resolves question group {event.call_id!r} "
+                    "before (or without) asking it"
                 )
         return self
 
@@ -652,6 +801,7 @@ class SeedBundle(BaseModel):
 
 __all__ = [
     "JsonValue",
+    "RunStoppedOutcome",
     "TodoStatus",
     "TodoItem",
     "ContextEvent",
@@ -665,6 +815,8 @@ __all__ = [
     "WidgetReadyEvent",
     "PlanProposedEvent",
     "PlanDecisionEvent",
+    "UserQuestionEvent",
+    "UserQuestionAnsweredEvent",
     "CompletionEvent",
     "SeedEventUnion",
     "SeedSession",

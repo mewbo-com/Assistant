@@ -40,8 +40,10 @@ class ResolutionStats:
     * ``dropped_ambiguous`` — a descriptor matched 2+ in-repo definitions across
       projects → dropped rather than guess one (this is what keeps "never
       mislinks" true).
-    * ``dropped_unresolved`` — a reference SCIP itself left unresolved (no
-      def-site anywhere, not classifiable as external).
+    * ``dropped_unresolved`` — the reference SITE could not be mapped back to a
+      node: an unreadable file, a range outside the file's bytes, or no
+      enclosing def to hang the edge's source on. A site failure, not a target
+      one — the remaining counters all describe what a reference pointed AT.
     """
 
     project_roots: int = 0
@@ -54,6 +56,28 @@ class ResolutionStats:
     dropped_unmodelled: int = 0
     dropped_ambiguous: int = 0
     dropped_unresolved: int = 0
+
+    def describe(self) -> str:
+        """One line naming what a pass resolved and what it deliberately dropped.
+
+        Lives on the stats rather than at the call site because every consumer
+        that reports a pass wants the same sentence, and the counters only mean
+        something together: a high ``dropped_unmodelled`` beside a zero
+        ``dropped_ambiguous`` is a HEALTHY pass (attributes and parameters are
+        not modelled kinds), while a zero ``indexed_roots`` is a pass that never
+        happened. Reading those apart is what made a resolver that contributed
+        nothing look, from the outside, exactly like one that ran.
+        """
+        return (
+            f"{self.indexed_roots}/{self.project_roots} project roots indexed, "
+            f"{self.def_sites_mapped} definitions mapped; "
+            f"{self.resolved_exact} exact + {self.resolved_stitched} stitched "
+            f"references, {self.extends} inheritance links, "
+            f"{self.external} external; dropped "
+            f"{self.dropped_unmodelled} unmodelled / "
+            f"{self.dropped_ambiguous} ambiguous / "
+            f"{self.dropped_unresolved} unresolved"
+        )
 
 
 @dataclass(frozen=True, slots=True)

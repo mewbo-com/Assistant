@@ -47,7 +47,7 @@ from mewbo_api.responses import ApiResponseKit
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from datetime import datetime
 
-    from mewbo_core.session_runtime import SessionRuntime
+    from mewbo_core.loop.session_runtime import SessionRuntime
     from mewbo_core.triggers.policy import TriggerPolicy
     from mewbo_core.triggers.store import TriggerStoreBase
 

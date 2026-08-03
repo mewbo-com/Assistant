@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from mewbo_graph.plugins.wiki._base import WikiSessionTool, _err_result
 from mewbo_graph.plugins.wiki._ctx import (
+    PhaseProgress,
     emit_phase_once,
     resolve_job_ctx,
     resolve_qa_ctx,
@@ -184,11 +185,24 @@ class MintEntityTool(WikiSessionTool):
         if isinstance(args, MockSpeaker):
             return args
 
+        # Checkpoint-aware resume. ``enrich`` is a fan-out with no boundary tool,
+        # so its skip had no code-level home and lived only as prose in
+        # ``ResumePlan.summary()`` — an instruction the model was free to ignore,
+        # and re-running the fan-out costs the most expensive phase in the
+        # pipeline twice. Guard BEFORE the phase stamp: a refused mint is not
+        # enrich work starting.
+        rp = getattr(ctx, "resume_plan", None)
+        if rp is not None and rp.should_skip("enrich"):
+            return MockSpeaker(content=json.dumps({
+                "ok": True,
+                "skipped": "entities already minted — reused on resume",
+            }))
+
         # The ``enrich`` phase has no boundary tool of its own — it is a
         # wiki-enricher fan-out, and minting IS the work. So the first enricher to
         # reach this line marks the phase as started and the rest are no-ops. Its
-        # predecessor (wiki_build_graph) used to stamp it on the way out, which
-        # reported enrich as underway for a fan-out that had not spawned yet.
+        # predecessor (wiki_build_graph) must NOT stamp it on the way out: that
+        # reports enrich as underway for a fan-out that has not spawned yet.
         # Keyed on ``job_id`` rather than the ctx type, matching
         # ``_record_qa_access``'s duck-typed guard: the QA agents mint entities
         # too, and a QA ctx carries no job whose phase there would be to advance.
@@ -211,6 +225,25 @@ class MintEntityTool(WikiSessionTool):
         )
         entity = minter.upsert(extracted, source=ctx.slug, slug=ctx.slug)
         self._anchor_entity(ctx, entity, args.anchors)
+        # Report the fan-out's progress. The unit is one minted entity and the
+        # total is genuinely unknowable mid-fan-out, so this reports a running
+        # count and the entity just written — the whole question a reader has
+        # during a phase that otherwise wrote nothing between its first mint and
+        # its last. The count is a store read, so it rides ``units_of`` and is
+        # only paid when a throttled write actually fires. A fresh tool instance
+        # per mint is why that throttle is seeded from the job, not this object.
+        if getattr(ctx, "job_id", None):
+            PhaseProgress(
+                ctx,
+                label="Enriching",
+                unit="entities",
+                units_of=lambda: (
+                    ctx.store.count_entities(
+                        ctx.slug, commit_sha=getattr(ctx, "commit_sha", None)
+                    ),
+                    None,
+                ),
+            ).advance(detail=f"{entity.name} ({entity.type})")
         return MockSpeaker(
             content=json.dumps({"ok": True, "entity": entity.model_dump()})
         )

@@ -1,0 +1,15 @@
+{
+  "name": "generative-ui",
+  "description": "present_ui SessionTool — structured UI panels rendered inline in the conversation.",
+  "version": "0.1.0",
+  "author": "Mewbo",
+  "requires-capabilities": ["generative_ui"],
+  "session_tools": [
+    {
+      "tool_id": "present_ui",
+      "module": "mewbo_core.builtin_plugins.generative_ui.present_ui",
+      "class": "PresentUiTool",
+      "unconditional": true
+    }
+  ]
+}

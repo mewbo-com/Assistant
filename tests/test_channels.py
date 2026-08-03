@@ -12,11 +12,12 @@ from mewbo_api.channels.base import (
     ChannelAdapter,
     ChannelRegistry,
     DeduplicationGuard,
+    InboundMessage,
 )
 from mewbo_api.channels.nextcloud_talk import NextcloudTalkAdapter
 from mewbo_api.channels.routes import _COMMAND_RE, extract_final_answer
-from mewbo_core.session_runtime import SessionRuntime
-from mewbo_core.session_store import SessionStore
+from mewbo_core.loop.session_runtime import SessionRuntime
+from mewbo_core.session.session_store import SessionStore
 
 # ------------------------------------------------------------------
 # DeduplicationGuard
@@ -543,3 +544,91 @@ class TestChannelCompletionHookHonesty:
         channels_routes._channel_completion_hook(session_id)
         assert len(adapter.sent) == 1
         assert adapter.sent[0]["text"] == "All done, fix merged."
+
+
+# ------------------------------------------------------------------
+# Inbound pipeline — channel identity is written once, at mint
+# ------------------------------------------------------------------
+
+
+class TestChannelIdentityIsMintOnly:
+    """The ``sender``/``room`` context event is written ONLY by the message
+    that mints the session.
+
+    ``_process_inbound`` resolves through ``SessionRuntime.resolve_session``,
+    which cannot report whether it minted or resolved — so a plain read of the
+    returned id tells you nothing about which happened. The tag pre-read that
+    survives alongside it exists for exactly this, and reads as a redundant
+    store lookup to anyone who does not know why. Writing the event on every
+    message instead would make the LATEST participant the session's recorded
+    sender, because context events reduce most-recent-wins: the last writer
+    becomes the answer every consumer sees.
+    """
+
+    def _wire(self, tmp_path, monkeypatch) -> tuple[SessionRuntime, _RecordingAdapter]:
+        store = SessionStore(root_dir=str(tmp_path))
+        runtime = SessionRuntime(session_store=store)
+        registry = ChannelRegistry()
+        adapter = _RecordingAdapter()
+        registry.register(adapter)
+        monkeypatch.setattr(channels_routes, "_runtime", runtime)
+        monkeypatch.setattr(channels_routes, "_registry", registry)
+        monkeypatch.setattr(channels_routes, "_hook_manager", None)
+        monkeypatch.setattr(channels_routes, "_dedup", DeduplicationGuard(ttl=60.0))
+        # The run is out of scope — assert on what the pipeline PERSISTED.
+        monkeypatch.setattr(runtime, "start_async", lambda **_kwargs: "")
+        return runtime, adapter
+
+    @staticmethod
+    def _message(message_id: str, sender: str, channel_id: str = "room-7") -> InboundMessage:
+        return InboundMessage(
+            platform="nextcloud-talk",
+            channel_id=channel_id,
+            thread_id=None,
+            message_id=message_id,
+            sender_id=f"{sender.lower()}-id",
+            sender_name=sender,
+            text="what is the deploy status?",
+            timestamp="2020-01-01T00:00:00Z",
+            room_name="Engineering",
+        )
+
+    @staticmethod
+    def _identity_events(runtime: SessionRuntime, session_id: str) -> list[dict]:
+        """Context events carrying the channel identity.
+
+        ``sender`` is the discriminator: the per-message context event the
+        pipeline also writes carries the reply target, never the participant.
+        """
+        return [
+            event["payload"]
+            for event in runtime.session_store.load_transcript(session_id)
+            if event.get("type") == "context" and "sender" in (event.get("payload") or {})
+        ]
+
+    def test_second_message_does_not_rewrite_channel_identity(self, tmp_path, monkeypatch) -> None:
+        runtime, adapter = self._wire(tmp_path, monkeypatch)
+
+        channels_routes._process_inbound(adapter, self._message("msg-1", "Ada"))
+        session_id = runtime.session_store.resolve_tag("nextcloud-talk:room:room-7")
+        assert session_id is not None
+        assert [e["sender"] for e in self._identity_events(runtime, session_id)] == ["Ada"]
+
+        # A different participant answers in the same room.
+        channels_routes._process_inbound(adapter, self._message("msg-2", "Grace"))
+
+        assert runtime.session_store.resolve_tag("nextcloud-talk:room:room-7") == session_id
+        # Still exactly one, and still the participant who opened the thread.
+        assert [e["sender"] for e in self._identity_events(runtime, session_id)] == ["Ada"]
+
+    def test_a_fresh_room_mints_its_own_identity(self, tmp_path, monkeypatch) -> None:
+        runtime, adapter = self._wire(tmp_path, monkeypatch)
+
+        channels_routes._process_inbound(adapter, self._message("msg-1", "Ada"))
+        channels_routes._process_inbound(adapter, self._message("msg-2", "Grace", "room-9"))
+
+        first = runtime.session_store.resolve_tag("nextcloud-talk:room:room-7")
+        second = runtime.session_store.resolve_tag("nextcloud-talk:room:room-9")
+        assert first is not None and second is not None and first != second
+        assert [e["sender"] for e in self._identity_events(runtime, first)] == ["Ada"]
+        assert [e["sender"] for e in self._identity_events(runtime, second)] == ["Grace"]

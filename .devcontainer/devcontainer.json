@@ -1,0 +1,74 @@
+{
+	"name": "Mewbo",
+
+	// Compose-based, not a single container: the dev environment IS a stack.
+	// Mongo (and anything else the app expects) runs alongside the workspace
+	// inside it, so development never depends on services living on the host.
+	"dockerComposeFile": "docker-compose.yml",
+	"service": "workspace",
+	"workspaceFolder": "/workspaces/Assistant",
+
+	// Bring the whole stack up, not just the workspace service. Without this
+	// only `service` is started and Mongo would be missing.
+	"runServices": ["workspace", "mongo"],
+
+	// Stop the stack when the window closes rather than leaving Mongo and a
+	// nested daemon running. (Verified inert in CLI 0.88.0 — kept because it
+	// states intent and costs nothing if a later version honours it.)
+	"shutdownAction": "stopCompose",
+
+	"features": {
+		// Docker-IN-Docker: this container runs its OWN dockerd. Nothing is
+		// mounted from the host daemon, and containers started in here are
+		// children of this container rather than siblings on the host. That is
+		// what lets an agent build images, run the demo stack and drive the Web
+		// IDE without any host line of sight. Requires `privileged` on the
+		// service — see docker-compose.yml.
+		// `moby: false` is REQUIRED, not a preference: the moby-cli system
+		// packages do not exist for Debian trixie, and the feature aborts the
+		// build outright rather than degrading. Since the trixie base is fixed
+		// by the glibc 2.41 requirement (see Dockerfile), the only way through
+		// is upstream Docker CE. Do not flip this back without also moving the
+		// base image.
+		"ghcr.io/devcontainers/features/docker-in-docker:2": {
+			"moby": false,
+			"installDockerBuildx": true,
+			"dockerDashComposeVersion": "v2"
+		},
+		// The base already ships zsh + Oh My Zsh and creates the `mewbo` user,
+		// so this is here for its shell plumbing only — letting it redo that
+		// work would either undo or duplicate it.
+		"ghcr.io/devcontainers/features/common-utils:2": {
+			"username": "mewbo",
+			"installZsh": true,
+			"installOhMyZsh": false,
+			"configureZshAsDefaultShell": true,
+			"upgradePackages": false
+		},
+		// Pinned to 20 to match every CI job (.github/workflows/console.yml).
+		"ghcr.io/devcontainers/features/node:2": {
+			"version": "20"
+		},
+		"ghcr.io/devcontainers/features/github-cli:1": {},
+		"ghcr.io/anthropics/devcontainer-features/claude-code:1": {}
+	},
+
+	// Two phases, because they cost different amounts. `create` runs once per
+	// container and does the expensive dependency sync; `start` runs on every
+	// start (including resume) and only seeds trust, identity and config. Both
+	// dispatch into init.d/, so adding a step is a new file rather than a
+	// config edit — and a dependency bump never forces an image rebuild.
+	"postCreateCommand": "bash .devcontainer/bootstrap.sh create",
+	"postStartCommand": "bash .devcontainer/bootstrap.sh start",
+
+	// 5125/3001 are the API and console defaults from docker.example.env; 5173
+	// is vite's default, which is what `npm run dev` actually serves here.
+	"forwardPorts": [5125, 3001, 5173],
+	"portsAttributes": {
+		"5125": { "label": "mewbo api" },
+		"3001": { "label": "mewbo console (compose)" },
+		"5173": { "label": "mewbo console (vite dev)" }
+	},
+
+	"remoteUser": "mewbo"
+}

@@ -82,3 +82,16 @@ describe("qa route round-trip", () => {
     expect(parsed).toMatchObject(route);
   });
 });
+
+describe("outline route", () => {
+  it("round-trips slug + platform, same as graph", () => {
+    const route: WikiRoute = { kind: "outline", slug: "owner/repo", platform: "gitea" };
+    const [path, query] = splitHref(buildHref(route));
+    expect(parseWikiRoute(path, query)).toEqual(route);
+  });
+
+  it("parses /wiki/outline distinctly from /wiki/graph", () => {
+    expect(parseWikiRoute("/wiki/outline", "slug=owner/repo").kind).toBe("outline");
+    expect(parseWikiRoute("/wiki/graph", "slug=owner/repo").kind).toBe("graph");
+  });
+});

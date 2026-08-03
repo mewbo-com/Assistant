@@ -1,6 +1,5 @@
 import { useState } from "react";
-import { useLocation } from "wouter";
-import { ArrowLeft, ExternalLink, MoreHorizontal, Pause, Play, Trash2 } from "lucide-react";
+import { ArrowLeft, ExternalLink, Loader2, MoreHorizontal, Pause, Play, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -10,14 +9,25 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useOpenTargetSession } from "@/hooks/useOpenTargetSession";
+import { openAppSession } from "../../../api/apps";
 import { useArchiveApp, usePauseApp, useResumeApp } from "../../../hooks/useApps";
 import type { AppSpec } from "../../../types/apps";
 import { AppStatusBadge } from "../AppStatusBadge";
 
 export function AppDetailHeader({ spec, onBack }: { spec: AppSpec; onBack: () => void }) {
-  const [, setLocation] = useLocation();
   const [confirmArchive, setConfirmArchive] = useState(false);
   const archive = useArchiveApp();
+  // Get-or-create, not the static `maintainer_session_id ?? owner_session_id`
+  // jump this replaces: that fallback pointed a first-ever click at the
+  // BUILD transcript (the only session that could possibly exist yet), not a
+  // session about maintaining the app now. The backend mints the maintainer
+  // session on first call and reuses it after, so this is still "open", never
+  // "new".
+  const openSession = useOpenTargetSession(
+    () => openAppSession(spec.app_id).then((r) => r.session_id),
+    "Couldn't open the app session",
+  );
 
   return (
     // A structural boundary between the detail header and the panes below it,
@@ -49,13 +59,16 @@ export function AppDetailHeader({ spec, onBack }: { spec: AppSpec; onBack: () =>
           variant="ghost"
           size="sm"
           iconOnly
-          aria-label="Open builder session"
-          title="Open the builder/maintainer session"
-          onClick={() =>
-            setLocation(`/s/${encodeURIComponent(spec.maintainer_session_id ?? spec.owner_session_id)}`)
-          }
+          aria-label="Open a session about this app"
+          title="Open a session about this app"
+          disabled={openSession.isPending}
+          onClick={() => openSession.mutate()}
         >
-          <ExternalLink className="h-3.5 w-3.5" />
+          {openSession.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <ExternalLink className="h-3.5 w-3.5" />
+          )}
         </Button>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>

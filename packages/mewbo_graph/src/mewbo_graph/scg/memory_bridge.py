@@ -70,9 +70,9 @@ def polarity_label(polarity: Polarity) -> str:
 def polarity_of(node: MemoryNode) -> Polarity:
     """Read a note's polarity off its labels; default ``positive`` if unlabelled.
 
-    A dead-end label damps routing; anything else (including an untagged legacy
-    note) reads as positive evidence — the conservative default, so an existing
-    corpus keeps biasing toward known-good pathways without a backfill.
+    A dead-end label damps routing; anything else, an untagged note included,
+    reads as positive evidence — the conservative default, so an untagged corpus
+    keeps biasing toward known-good pathways with no backfill.
     """
     if polarity_label("dead_end") in node.labels:
         return "dead_end"

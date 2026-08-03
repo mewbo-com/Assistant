@@ -5,20 +5,15 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -27,20 +22,18 @@ import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
@@ -53,6 +46,10 @@ import com.mewbo.aura.data.model.ComposerScope
 import com.mewbo.aura.data.model.ProjectSummary
 import com.mewbo.aura.data.model.ToolSummary
 import com.mewbo.aura.ui.chat.ChatIcons
+import com.mewbo.aura.ui.common.AuraListBottomSheet
+import com.mewbo.aura.ui.common.AutoRowCaption
+import com.mewbo.aura.ui.common.AutoRowLabel
+import com.mewbo.aura.ui.common.ProjectRowKind
 import com.mewbo.aura.ui.theme.AuraColors
 import com.mewbo.aura.ui.theme.AuraMotion
 import com.mewbo.aura.ui.theme.AuraShape
@@ -82,8 +79,13 @@ private sealed interface OptionsPane {
  * mechanism carries the new pick into the NEXT turn (mirrors the freely re-pickable ModelPickerSheet).
  * While frozen the rows show their current value with a "set for this chat" subtitle instead of a
  * drill-in affordance.
+ *
+ * All three panes share the container's ONE lazy list, which is why the drill-in panes are
+ * `LazyListScope` content rather than composables of their own: the Tools catalog runs 300+ entries,
+ * and a pane that brought its own scroll container would nest a list inside the sheet's list. Their
+ * back/refresh [PaneHeader] rides the container's pinned `header` slot instead, so it stays reachable
+ * however far the list beneath it has travelled.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ComposerOptionsSheet(
     scope: ComposerScope,
@@ -99,37 +101,47 @@ fun ComposerOptionsSheet(
     modifier: Modifier = Modifier,
 ) {
     var pane by remember { mutableStateOf<OptionsPane>(OptionsPane.Root) }
+    // Keyed on [pane] so leaving Tools discards every group's expansion, exactly as it did while this
+    // map was remembered inside the pane's own composable. It has to be hoisted this far up because
+    // the pane bodies are LazyListScope content, which cannot `remember`.
+    val expanded = remember(pane) { mutableStateMapOf<String, Boolean>() }
+    val paneTitle: String? = when (pane) {
+        OptionsPane.Root -> null
+        OptionsPane.Project -> "Project"
+        OptionsPane.Tools -> "Tools"
+    }
 
-    ModalBottomSheet(
-        onDismissRequest = { pane = OptionsPane.Root; onDismiss() },
-        sheetState = rememberModalBottomSheetState(),
-        containerColor = AuraColors.surfaceInput,
-        shape = SheetShape,
+    AuraListBottomSheet(
+        onDismiss = { pane = OptionsPane.Root; onDismiss() },
         modifier = modifier,
+        header = if (paneTitle == null) {
+            null
+        } else {
+            { PaneHeader(title = paneTitle, onBack = { pane = OptionsPane.Root }, onRefresh = onRefresh) }
+        },
     ) {
         when (pane) {
-            OptionsPane.Root -> RootPane(
-                scope = scope,
-                runInFlight = runInFlight,
-                visionSupported = visionSupported,
-                onPhotosTap = onPhotosTap,
-                onFilesTap = onFilesTap,
-                onOpenProject = { if (!runInFlight) pane = OptionsPane.Project },
-                onOpenTools = { if (!runInFlight) pane = OptionsPane.Tools },
-            )
-            OptionsPane.Project -> ProjectPane(
+            OptionsPane.Root -> item {
+                RootPane(
+                    scope = scope,
+                    runInFlight = runInFlight,
+                    visionSupported = visionSupported,
+                    onPhotosTap = onPhotosTap,
+                    onFilesTap = onFilesTap,
+                    onOpenProject = { if (!runInFlight) pane = OptionsPane.Project },
+                    onOpenTools = { if (!runInFlight) pane = OptionsPane.Tools },
+                )
+            }
+            OptionsPane.Project -> projectPaneItems(
                 projects = scope.projects.orEmpty(),
                 selectedKey = scope.selectedProjectKey,
-                onBack = { pane = OptionsPane.Root },
                 onSelect = { key -> onSelectProject(key); pane = OptionsPane.Root },
-                onRefresh = onRefresh,
             )
-            OptionsPane.Tools -> ToolsPane(
+            OptionsPane.Tools -> toolsPaneItems(
                 scope = scope,
-                onBack = { pane = OptionsPane.Root },
+                expanded = expanded,
                 onToggle = onToggleTool,
                 onToggleServer = onToggleServer,
-                onRefresh = onRefresh,
             )
         }
     }
@@ -297,47 +309,53 @@ private fun PaneHeader(title: String, onBack: () -> Unit, modifier: Modifier = M
     }
 }
 
-/** Bottom clearance shared by both scrollable panes so the last row never sits under the
- * gesture/nav bar: the system inset plus the same breathing room [RootPane] already applies at its
- * own bottom edge. */
-@Composable
-private fun paneContentPadding(): PaddingValues {
-    val navBarInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-    return PaddingValues(bottom = navBarInset + AuraSpacing.Composer.internalPadding)
-}
-
-@Composable
-private fun ProjectPane(
+private fun LazyListScope.projectPaneItems(
     projects: List<ProjectSummary>,
     selectedKey: String?,
-    onBack: () -> Unit,
     onSelect: (String?) -> Unit,
-    onRefresh: () -> Unit,
-    modifier: Modifier = Modifier,
 ) {
-    Column(modifier = modifier.fillMaxWidth()) {
-        PaneHeader(title = "Project", onBack = onBack, onRefresh = onRefresh)
-        // weight(fill = false): capped at the sheet's remaining height (never squeezed/overlapped
-        // past it), but wraps to content when shorter - a short project list doesn't force the
-        // sheet to full height.
-        LazyColumn(modifier = Modifier.weight(1f, fill = false), contentPadding = paneContentPadding()) {
-            item(key = TemporaryProjectKey) {
-                ProjectRow(label = "Temporary", temporary = true, selected = selectedKey == null, onClick = { onSelect(null) })
-            }
-            // Divider BELOW the ephemeral temp-dir cwd, setting it apart from real, saved projects
-            // (user directive 2026-07-14) — same treatment as the settings ProjectPickerSheet.
-            item(key = TemporaryDividerKey) {
-                HorizontalDivider(color = AuraColors.outlineHairline)
-            }
-            items(projects, key = { it.contextKey }) { project ->
-                ProjectRow(label = project.name, temporary = false, selected = selectedKey == project.contextKey, onClick = { onSelect(project.contextKey) })
-            }
-        }
+    item(key = TemporaryProjectKey) {
+        ProjectRow(
+            label = "Temporary",
+            kind = ProjectRowKind.Temporary,
+            selected = selectedKey == null,
+            onClick = { onSelect(null) },
+        )
+    }
+    item(key = ComposerScope.AUTO_PROJECT_KEY) {
+        ProjectRow(
+            label = AutoRowLabel,
+            caption = AutoRowCaption,
+            kind = ProjectRowKind.Auto,
+            selected = selectedKey == ComposerScope.AUTO_PROJECT_KEY,
+            onClick = { onSelect(ComposerScope.AUTO_PROJECT_KEY) },
+        )
+    }
+    // Divider BELOW the two SYNTHETIC rows, setting them apart from real, saved projects —
+    // same treatment as the settings ProjectPickerSheet. Neither is one of your projects:
+    // one is a throwaway scratch cwd, the other defers the choice to Mewbo.
+    item(key = TemporaryDividerKey) {
+        HorizontalDivider(color = AuraColors.outlineHairline)
+    }
+    items(projects, key = { it.contextKey }) { project ->
+        ProjectRow(
+            label = project.name,
+            kind = ProjectRowKind.Saved,
+            selected = selectedKey == project.contextKey,
+            onClick = { onSelect(project.contextKey) },
+        )
     }
 }
 
 @Composable
-private fun ProjectRow(label: String, temporary: Boolean, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun ProjectRow(
+    label: String,
+    kind: ProjectRowKind,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    caption: String? = null,
+) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = modifier
@@ -346,17 +364,22 @@ private fun ProjectRow(label: String, temporary: Boolean, selected: Boolean, onC
             .clickable(onClick = onClick)
             .padding(horizontal = AuraSpacing.screenGutter),
     ) {
-        // Leading scope glyph: the ephemeral "date_range" for the temporary scratch cwd (muted tint),
-        // the "project" glyph (scopeProject accent) for a real project. A FILLED slot on every row,
-        // so this is not the §7.13 empty-icon-slot indent regression.
+        // Leading scope glyph + tint come from the row's KIND ([ProjectRowKind]), shared with the
+        // settings picker. A FILLED slot on every row, so this is not the §7.13 empty-icon-slot
+        // indent regression.
         Icon(
-            imageVector = if (temporary) ChatIcons.TemporaryProjectScope else ChatIcons.ProjectScope,
+            imageVector = kind.glyph,
             contentDescription = null,
-            tint = if (temporary) AuraColors.textSecondary else AuraColors.scopeProject,
+            tint = kind.tint,
             modifier = Modifier.size(AuraSpacing.DrawerRow.iconSize),
         )
         Spacer(modifier = Modifier.width(AuraSpacing.DrawerRow.iconToLabelGap))
-        Text(text = label, style = AuraType.listItem, color = AuraColors.textPrimary, modifier = Modifier.weight(1f))
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
+            Text(text = label, style = AuraType.listItem, color = AuraColors.textPrimary)
+            // A caption only where the label alone can't carry the meaning (the Auto row), matching
+            // [DrillInRow]'s own label+caption shape - not a second line on every row.
+            caption?.let { Text(text = it, style = AuraType.caption) }
+        }
         if (selected) {
             Icon(
                 imageVector = Icons.Filled.Check,
@@ -374,67 +397,59 @@ private fun ProjectRow(label: String, temporary: Boolean, selected: Boolean, onC
  * [com.mewbo.aura.data.repo.SessionScopeRepository.tools]; "MCP Servers" stopped being accurate the
  * moment a non-MCP group could appear here). [ToolSummary.groupKey] groups collapse to one
  * switch-bearing header row each (stable alphabetical order), expanding to their member [ToolRow]s
- * on tap - the catalog runs 300+ entries, so both the grouping and the [LazyColumn] below are
- * load-bearing, not cosmetic. [expanded] is local, transient UI state (per review:
- * persisting it beyond this pane's own composition isn't part of the brief).
+ * on tap - the catalog runs 300+ entries, so both the grouping and emitting these rows lazily are
+ * load-bearing, not cosmetic. [expanded] is local, transient UI state (per review: persisting it
+ * beyond a single visit to this pane isn't part of the brief) - [ComposerOptionsSheet] holds it only
+ * because LazyListScope content can't `remember`, and re-keys it per pane to keep that lifetime.
  *
- * Provenance sections (user directive 2026-07-14): the server/product groups are LAYERED under
+ * Provenance sections (user directive): the server/product groups are LAYERED under
  * [ScopeSectionHeader]s by [ToolSummary.scope] (project → system → plugin → builtin → other,
  * [ComposerScope.FACET_ORDER]) — an accessible, TalkBack-navigable heading per provenance, with the
  * existing per-server expand/collapse + bulk toggle untouched beneath it. Ordering is scope-section
  * first, then alphabetical within a section (the prior stable order).
  */
-@Composable
-private fun ToolsPane(
+private fun LazyListScope.toolsPaneItems(
     scope: ComposerScope,
-    onBack: () -> Unit,
+    expanded: SnapshotStateMap<String, Boolean>,
     onToggle: (String) -> Unit,
     onToggleServer: (List<String>, Boolean) -> Unit,
-    onRefresh: () -> Unit,
-    modifier: Modifier = Modifier,
 ) {
     val ordered = scope.tools.orEmpty().groupBy { it.groupKey }.entries
         .sortedWith(compareBy({ scopeSectionRank(sectionScopeOf(it.value)) }, { it.key }))
-    val expanded = remember { mutableStateMapOf<String, Boolean>() }
 
-    Column(modifier = modifier.fillMaxWidth()) {
-        PaneHeader(title = "Tools", onBack = onBack, onRefresh = onRefresh)
-        LazyColumn(modifier = Modifier.weight(1f, fill = false), contentPadding = paneContentPadding()) {
-            var lastSection: String? = null
-            ordered.forEach { (server, tools) ->
-                val section = sectionScopeOf(tools)
-                if (section != lastSection) {
-                    lastSection = section
-                    item(key = "section:$section") { ScopeSectionHeader(scope = section) }
-                }
-                val (active, total) = scope.activeCountFor(server)
-                item(key = "header:$server") {
-                    ServerGroupHeader(
-                        server = server,
-                        active = active,
-                        total = total,
-                        expanded = expanded[server] == true,
-                        onToggleExpand = { expanded[server] = expanded[server] != true },
-                        onToggleAll = { checked -> onToggleServer(tools.map { it.toolId }, checked) },
-                    )
-                }
-                if (expanded[server] == true) {
-                    items(tools, key = { it.toolId }) { tool ->
-                        ToolRow(
-                            tool = tool,
-                            active = scope.isToolActive(tool.toolId),
-                            onToggle = { onToggle(tool.toolId) },
-                            // Gutter-inset convention (ui/CLAUDE.md chat rendering rules): an extra
-                            // screenGutter on top of ToolRow's own, indenting group members under
-                            // their header.
-                            modifier = Modifier.padding(start = AuraSpacing.screenGutter),
-                        )
-                    }
-                }
-                item(key = "divider:$server") {
-                    HorizontalDivider(color = AuraColors.outlineHairline)
-                }
+    var lastSection: String? = null
+    ordered.forEach { (server, tools) ->
+        val section = sectionScopeOf(tools)
+        if (section != lastSection) {
+            lastSection = section
+            item(key = "section:$section") { ScopeSectionHeader(scope = section) }
+        }
+        val (active, total) = scope.activeCountFor(server)
+        item(key = "header:$server") {
+            ServerGroupHeader(
+                server = server,
+                active = active,
+                total = total,
+                expanded = expanded[server] == true,
+                onToggleExpand = { expanded[server] = expanded[server] != true },
+                onToggleAll = { checked -> onToggleServer(tools.map { it.toolId }, checked) },
+            )
+        }
+        if (expanded[server] == true) {
+            items(tools, key = { it.toolId }) { tool ->
+                ToolRow(
+                    tool = tool,
+                    active = scope.isToolActive(tool.toolId),
+                    onToggle = { onToggle(tool.toolId) },
+                    // Gutter-inset convention (ui/CLAUDE.md chat rendering rules): an extra
+                    // screenGutter on top of ToolRow's own, indenting group members under
+                    // their header.
+                    modifier = Modifier.padding(start = AuraSpacing.screenGutter),
+                )
             }
+        }
+        item(key = "divider:$server") {
+            HorizontalDivider(color = AuraColors.outlineHairline)
         }
     }
 }
@@ -467,7 +482,7 @@ private fun scopeSectionIcon(scope: String): ImageVector = when (scope) {
 }
 
 /**
- * Provenance section header in the Tools pane (user directive 2026-07-14): an icon + capitalized
+ * Provenance section header in the Tools pane (user directive): an icon + capitalized
  * scope label ("Project" / "System" / …), marked as a semantic HEADING so TalkBack announces it and
  * lets the user jump between provenance sections. Quiet chrome (sectionHeader type + textSecondary),
  * distinct from the interactive [ServerGroupHeader] rows beneath it.
@@ -538,7 +553,7 @@ private fun ServerGroupHeader(
     ) {
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
             // The per-server provenance tag moved UP to the enclosing
-            // [ScopeSectionHeader] (user directive 2026-07-14) — showing it here too would
+            // [ScopeSectionHeader] (user directive) — showing it here too would
             // double-label every row, so the group row is now just its name + "N of M on".
             Text(text = server, style = AuraType.listItem, color = AuraColors.textPrimary)
             Text(text = "$active of $total on", style = AuraType.caption)
@@ -573,16 +588,13 @@ private fun ToolRow(tool: ToolSummary, active: Boolean, onToggle: () -> Unit, mo
     }
 }
 
-/** Top corners only (same shape [com.mewbo.aura.ui.chat.ModelPickerSheet] uses). */
-private val SheetShape = RoundedCornerShape(topStart = AuraShape.radiusBubble, topEnd = AuraShape.radiusBubble)
-
 /** No matching [AuraSpacing] token for the disabled-Photos caption's gap; flagged in the task
  * report (same convention `ui/chat/ChatScreen.kt`'s `TitleGap`/`ChevronSize` already established). */
 private val AttachPillCaptionGap: Dp = 4.dp
 
-/** [ProjectPane]'s synthetic "Temporary" row has no [ProjectSummary.contextKey] to key off - a
+/** [projectPaneItems]'s synthetic "Temporary" row has no [ProjectSummary.contextKey] to key off - a
  * sentinel unlikely to collide with a real one. */
 private const val TemporaryProjectKey = "__temporary__"
 
-/** LazyColumn key for the divider that sets the ephemeral "Temporary" row apart from real projects. */
+/** Lazy-list key for the divider that sets the ephemeral "Temporary" row apart from real projects. */
 private const val TemporaryDividerKey = "__temporary_divider__"

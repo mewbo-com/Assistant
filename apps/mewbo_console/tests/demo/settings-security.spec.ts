@@ -31,6 +31,16 @@ test("settingsSecurity — secrets roll-up + issued keys", async ({ page, demo }
     await expect(page.getByText(label, { exact: false })).toBeVisible();
   }
 
+  // Membership alone ("these two labels are present") says nothing about a
+  // THIRD key row rendering unnoticed — this shot exists precisely because a
+  // legacy hand-capture leaked a real deployment's issued-key ids, so an
+  // extra row here is the exact defect class to catch. Pin the count.
+  await expect(
+    page.locator(
+      'div[class*="rounded-lg"][class*="bg-[hsl(var(--background))]"][class*="px-4"][class*="py-3"]',
+    ),
+  ).toHaveCount(SEED.apiKeyLabels.length);
+
   // The secrets roll-up must show real is-set state, not an all-"not set"
   // skeleton — `llm.api_key` is configured in demo/configs/app.json.
   await expect(page.getByText("llm.api_key")).toBeVisible();

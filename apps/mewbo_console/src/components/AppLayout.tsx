@@ -10,8 +10,8 @@ import { Button } from "./ui/button";
 import { useIsMobile } from "../hooks/useIsMobile";
 import type { NotificationItem, SessionSummary } from "../types";
 
-// One persisted rail state (desktop expanded/collapsed). Migrates the legacy
-// task-sidebar key once, then writes only the new key.
+// One persisted rail state (desktop expanded/collapsed). Falls back to
+// LEGACY_SIDEBAR_KEY once, then writes only RAIL_KEY.
 const RAIL_KEY = "mewbo:rail";
 const LEGACY_SIDEBAR_KEY = "mewbo:sidebar-open";
 
@@ -20,7 +20,7 @@ function readInitialCollapsed(): boolean {
     const rail = localStorage.getItem(RAIL_KEY);
     if (rail === "collapsed") return true;
     if (rail === "expanded") return false;
-    // Migrate: the old sidebar stored "0" when closed. Seed the new key once.
+    // LEGACY_SIDEBAR_KEY stored "0" when closed; seed RAIL_KEY from it once.
     const collapsed = localStorage.getItem(LEGACY_SIDEBAR_KEY) === "0";
     localStorage.setItem(RAIL_KEY, collapsed ? "collapsed" : "expanded");
     return collapsed;

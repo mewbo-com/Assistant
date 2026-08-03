@@ -1,11 +1,11 @@
 """WorkspaceGraphBinding — the ONE seam that turns a workspace into graph access.
 
-This widens the gate the ``OrchestratedSearchRunner`` used to own alone: *any*
-run type that binds a workspace gets the ``scg`` capability + the graph
+*Any* run type that binds a workspace gets the ``scg`` capability + the graph
 traversal tools (``scg_route`` / ``scg_memory`` / fan-out verbs) + the workspace
-source scope. Before this seam each of those three facts was assembled inline in
-the search runner, so the structured graph-first path (and any future binding)
-would have had to copy them. This atomic class is the single resolution point:
+source scope. Assembling those three facts inline in the
+``OrchestratedSearchRunner`` would force the structured graph-first path (and
+any future binding) to copy them. This atomic class is the single resolution
+point:
 
     binding = WorkspaceGraphBinding.for_workspace(workspace, allowed_tools, project)
     for ctx in binding.context_events:        # capability + quarantined instructions

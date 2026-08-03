@@ -30,6 +30,7 @@ class _Icons:
     tool_pending: str = "○"
     plan: str = "📋"  # proposed-plan card title
     refine: str = "✎"  # refine-the-plan affordance
+    panel: str = "▤"  # generative-UI panel card title
 
     # Status-line glyphs (Nerd Font md — match the user statusLine convention).
     user: str = "\U000f0004"  # nf-md-account (󰀄) — user@host

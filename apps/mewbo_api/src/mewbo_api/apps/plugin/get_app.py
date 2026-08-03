@@ -6,7 +6,7 @@ Apps have a submit-only WRITE surface (:mod:`submit_app`) and an execute surface
 shipped. Without one, a maintainer re-woken to modify its own app can only
 introspect it by reaching outside the tool surface — and since the only update
 path is "resubmit the WHOLE app" (``submit_app`` reads the entire bundle off
-disk), a fresh context that no longer holds the staged frontend files literally
+disk), a fresh context that does not hold the staged frontend files literally
 cannot update the app. ``get_app`` closes both gaps so the full lifecycle —
 read (``get_app``), update (``submit_app``), execute (``run_pipeline``), data
 (``app_data``) — is expressible as tool calls, and a versioned update is
@@ -35,8 +35,7 @@ a session bound to no app reads a uniform ``not_found`` (the ``app_data`` /
 ``schedule_trigger`` precedent — no existence leak).
 
 Terminal-free (the ``app_data`` / ``run_pipeline`` shape): reading or staging an
-app is normal iterative work, never a run exit. Per the ``submit_widget``
-post-mortem (``packages/mewbo_core/CLAUDE.md``), ``SessionTool`` is a STRUCTURAL
+app is normal iterative work, never a run exit. ``SessionTool`` is a STRUCTURAL
 Protocol — a standalone class inherits NO default method bodies, so
 ``should_terminate_run`` / ``terminal_reason`` are defined explicitly below.
 
@@ -51,15 +50,15 @@ factories, rather than the narrower plugin Protocols.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from mewbo_core.common import MockSpeaker, get_logger, pydantic_to_openai_tool
-from mewbo_core.session_tools import DEFAULT_SESSION_TOOL_MODES
+from mewbo_core.tooling.session_tools import DEFAULT_SESSION_TOOL_MODES
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from mewbo_api.apps.models import PipelineRun
-from mewbo_api.apps.plugin.submit_app import _apps_root  # noqa: PLC2701 — staging-root convention
+from mewbo_api.apps.plugin.runtime import session_tags_for
+from mewbo_api.apps.staging import AppStagingArea, AppStagingError
 from mewbo_api.apps.store import (
     get_app_data_store,
     get_app_store,
@@ -70,7 +69,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mewbo_core.classes import ActionStep
-    from mewbo_core.types import Event
+    from mewbo_core.contracts.types import Event
 
     from mewbo_api.apps.models import AppSpec, PipelineSpec
     from mewbo_api.apps.store import AppDataStoreBase, AppStoreBase, PipelineRunStoreBase
@@ -130,11 +129,11 @@ GET_APP_SCHEMA: dict[str, object] = pydantic_to_openai_tool(GetAppArgs, name=GET
 class GetAppTool:
     """Handles ``get_app`` — resolve the session's app, then read it or stage it.
 
-    Satisfies the :class:`~mewbo_core.session_tools.SessionTool` Protocol via the
+    Satisfies the :class:`~mewbo_core.tooling.session_tools.SessionTool` Protocol via the
     class-shaped ``tool_id``/``schema``/``modes`` attributes plus ``handle`` /
-    ``should_terminate_run`` / ``terminal_reason`` (defined explicitly — structural
-    Protocol, no inherited bodies; see the ``submit_widget`` post-mortem in core's
-    CLAUDE.md). Terminal-free: reading/staging an app is normal iterative work.
+    ``should_terminate_run`` / ``terminal_reason`` (defined explicitly — a
+    structural Protocol inherits no bodies). Terminal-free: reading or staging an
+    app is normal iterative work.
 
     The three store collaborators resolve from the process-wide store factories
     (``get_app_store`` / ``get_app_data_store`` / ``get_pipeline_run_store``) when
@@ -320,65 +319,45 @@ class GetAppTool:
     def _stage(self, app: AppSpec) -> MockSpeaker:
         """Re-materialize the FULL stored bundle into this session's app directory.
 
-        Writes the raw ``spec.frontend.files`` (every frontend file + every
-        ``mode="code"`` pipeline source) under
-        ``<apps_root>/<session_id>/<app_id>/`` — the same convention ``submit_app``
-        reads back — so a resubmit carries the whole app forward. Confined TWICE:
-        the app dir must resolve under THIS session's dir (defense-in-depth against
-        a hostile stored ``app_id`` relocating within the apps root — the model's
-        ``app_id`` validator only bans ``:``, not ``/``/``..``), and every target
-        file must resolve under the app dir, even though every stored path already
-        passed ``AppFrontend``'s traversal validator.
+        Delegates the write to :class:`~mewbo_api.apps.staging.AppStagingArea`,
+        which owns the staging-directory convention and both containment rules —
+        the Web IDE mount resolver materializes through the same class, so there is
+        exactly one implementation of where an app's source lands on disk.
         """
-        base = Path(_apps_root()).resolve()
-        session_dir = (base / self._session_id).resolve()
-        app_dir = (session_dir / app.app_id).resolve()
         try:
-            app_dir.relative_to(session_dir)
-        except ValueError:
-            return self._err(
-                "stage", f"app_id {app.app_id!r} escapes the session directory"
-            )
-
-        written: list[dict[str, Any]] = []
-        try:
-            app_dir.mkdir(parents=True, exist_ok=True)
-            for rel, content in sorted(app.frontend.files.items()):
-                target = (app_dir / rel).resolve()
-                try:
-                    target.relative_to(app_dir)
-                except ValueError:
-                    return self._err("stage", f"file path {rel!r} escapes the app directory")
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content, encoding="utf-8")
-                written.append({"path": rel, "bytes": len(content.encode("utf-8"))})
-        except OSError as exc:
-            return self._err("stage", f"could not stage the app bundle: {exc}")
-
+            bundle = AppStagingArea(session_id=self._session_id).materialize(app)
+        except AppStagingError as exc:
+            return self._err("stage", str(exc))
         return self._ok(
             {
                 "operation": "stage",
-                "app_id": app.app_id,
-                "directory": str(app_dir),
-                "files": written,
+                "app_id": bundle.app_id,
+                "directory": bundle.directory,
+                "files": [f.model_dump() for f in bundle.files],
             }
         )
 
     # -- resolution helpers ---------------------------------------------------
 
     def _resolve_app(self, app_store: AppStoreBase) -> AppSpec | None:
-        """The app this session owns or maintains (mirrors ``run_pipeline``).
+        """The app this session owns, maintains, or was opened against.
 
-        Scope is derived purely from the session — the builder session
-        (``owner_session_id``, pre-submit) or the maintainer session
-        (``maintainer_session_id``, post-submit) binds this session to exactly one
-        app. ``include_archived=True`` so a maintainer can still read/stage an
-        archived app it owns.
+        Delegates to :meth:`~mewbo_api.apps.staging.AppStagingArea.app_for_session`
+        — the same binding rule the Web IDE mount resolver reads, so a session the
+        IDE mounts is always a session these tools can serve.
+
+        It is handed this session's TAGS as well, which is what lets a session
+        opened against an app resolve it at all: such a session is on neither
+        ``maintainer_session_id`` nor ``owner_session_id`` (re-pointing either
+        would give the app two claimants and break the repair wake), so its
+        server-stamped ``app:<id>`` tag is its only binding. ``get_app`` is
+        deliberately the ONLY tool that reads the tag tier: ``app_data``,
+        ``run_pipeline`` and ``submit_app`` keep resolving by the id fields
+        alone, so such a session is READ-plus-STAGE only.
         """
-        for app in app_store.list_apps(include_archived=True):
-            if self._session_id in (app.maintainer_session_id, app.owner_session_id):
-                return app
-        return None
+        return AppStagingArea(session_id=self._session_id).app_for_session(
+            app_store, session_tags=session_tags_for(self._session_id)
+        )
 
     def _resolve_stores(
         self,

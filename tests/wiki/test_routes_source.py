@@ -75,7 +75,7 @@ def runtime_stub(store):
 
 @pytest.fixture()
 def wiki_app(monkeypatch, store, runtime_stub, clone_dir):
-    monkeypatch.setenv("MASTER_API_TOKEN", API_KEY)
+    monkeypatch.setenv("MEWBO_MASTER_API_TOKEN", API_KEY)
     monkeypatch.setattr("mewbo_api.backend.MASTER_API_TOKEN", API_KEY, raising=False)
 
     import mewbo_api.wiki.routes as routes_mod

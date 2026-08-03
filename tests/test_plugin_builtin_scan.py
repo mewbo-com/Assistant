@@ -12,8 +12,8 @@ import os
 from pathlib import Path
 
 import pytest
-from mewbo_core import plugins as plugins_module
-from mewbo_core.plugins import (
+from mewbo_core.tooling import plugins as plugins_module
+from mewbo_core.tooling.plugins import (
     PluginFanOut,
     discover_builtin_plugins,
     load_all_plugin_components,
@@ -152,7 +152,7 @@ def test_load_all_plugin_components_builtin_before_installed(
 
     # Fake installed plugin with the same name — should appear AFTER the
     # built-in in the ordered components list.
-    from mewbo_core.plugins import PluginComponents, PluginManifest
+    from mewbo_core.tooling.plugins import PluginComponents, PluginManifest
 
     installed = PluginComponents(
         manifest=PluginManifest(

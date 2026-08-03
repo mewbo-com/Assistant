@@ -145,11 +145,11 @@ export function TriggerRow({
         {argsSummary && (
           <>
             <span aria-hidden className="opacity-40">·</span>
-            {/* Was a fixed 240px cap, sized for the old max-w-5xl page. The
-                Settings shell is max-w-3xl (narrower card), so this scales
-                with the row instead of eating a fixed chunk of a smaller
-                budget — flex-wrap on the parent still lets it drop to its own
-                line rather than overflow. */}
+            {/* Scales with the row rather than a fixed cap, so it fits the
+                Settings shell's max-w-3xl card without eating a
+                disproportionate chunk of a narrower budget — flex-wrap on
+                the parent still lets it drop to its own line rather than
+                overflow. */}
             <span className="font-mono truncate max-w-[45%]" title={argsSummary}>{argsSummary}</span>
           </>
         )}

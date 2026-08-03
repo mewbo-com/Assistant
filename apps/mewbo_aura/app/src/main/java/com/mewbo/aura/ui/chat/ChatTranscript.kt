@@ -113,7 +113,9 @@ fun ChatTranscript(
     // Submit a ChatItem.Question card's answer (ask-user questions). Default no-op so the assist
     // overlay's own ChatTranscript call site (out of this lane) keeps compiling — it hands off to the
     // app before a blocked question is answered. The docked ChatSurface host passes the real callback.
-    onSubmitQuestionAnswer: (callId: String, callToken: String, answers: List<QuestionAnswerItemDto>, onResult: (Boolean) -> Unit) -> Unit = { _, _, _, onResult -> onResult(false) },
+    onSubmitQuestionAnswer:
+        (callId: String, callToken: String, answers: List<QuestionAnswerItemDto>, notes: String?, onResult: (Boolean) -> Unit) -> Unit =
+        { _, _, _, _, onResult -> onResult(false) },
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -133,32 +135,26 @@ fun ChatTranscript(
     // settled history, not in-flight work.
     val isRunLive = runPhase == RunPhase.Sending || runPhase == RunPhase.Streaming
 
-    // The AuraSpark row is the PERSISTENT run-liveness cue (user directive 2026-07-04: "must always
-    // be able to tell running from dead"), visible for the entire run - not just the pre-first-delta
-    // gap. Follow-up sends and mid-turn tool phases (nothing else on screen moves during those) need
-    // the same tell the original Sending-only state gave, so this is simply isRunLive rather than
-    // additionally gating on whether an assistant message has opened yet (the old `hasOpenAssistant`
-    // check, now unused and removed).
+    // The AuraSpark row is the PERSISTENT run-liveness cue, visible for the entire run - not just
+    // the pre-first-delta gap. Follow-up sends and mid-turn tool phases (nothing else on screen
+    // moves during those) need the same tell, so this is simply isRunLive rather than
+    // additionally gating on whether an assistant message has opened yet.
     val showThinking = isRunLive
 
     // Transcript-level fact a single row can't determine about itself (spec §6.5/§6.12): does ANY
     // settled assistant reply exist yet? Computed once per items-list change, not per row. The
     // per-row action-row footer is a separate, purely per-item fact (see the itemsIndexed loop):
-    // every COMPLETED assistant message now shows its own footer (user directive 2026-07-04 round 3:
-    // footer under every response, not just the last), so there is no single "chosen" row to track.
+    // every COMPLETED assistant message shows its own footer, not just the last, so there is no
+    // single "chosen" row to track.
     val hasSettledReply = remember(items) {
         items.any { it is ChatItem.AssistantMessage && !it.isStreaming }
     }
 
-    // the bottom disclaimer renders ONLY once a reply has settled AND no run is live — it
-    // must not mount during Sending/Streaming. On a FOLLOW-UP turn a prior reply is already settled
-    // (`hasSettledReply` true), so without the `!isRunLive` guard the disclaimer stayed pinned at the
-    // transcript bottom right under the fresh user bubble + spark, AHEAD of the new turn's response
-    // and its footer (the reported overlap). `!isRunLive` is the transcript-level twin of the per-row
-    // `showActionRow` (= a settled, non-streaming assistant message): the disclaimer's appearance now
-    // coincides EXACTLY with the settled ActionRow footer's, never before it. This also makes the
-    // disclaimer and the spark mutually exclusive (spark ⇔ live, disclaimer ⇔ settled), which is why
-    // the spark below no longer needs a bottom inset to hold it off (supersedes §7.20).
+    // The bottom disclaimer renders ONLY once a reply has settled AND no run is live: on a
+    // follow-up turn a prior reply is already settled, so `hasSettledReply` alone would pin it
+    // under the fresh user bubble + spark, ahead of the new turn's response. `!isRunLive` makes
+    // the disclaimer and the spark mutually exclusive (spark ⇔ live, disclaimer ⇔ settled), so the
+    // spark needs no bottom inset to hold the disclaimer off it.
     val showDisclaimer = shouldShowDisclaimer(hasSettledReply, isRunLive)
 
     // M7 chip entrance (spec §6.11: "Chips fade in per M7 timing when their event arrives") -
@@ -169,7 +165,7 @@ fun ChatTranscript(
     // replays the animation), and NEVER being read as Compose State means growing it can't
     // trigger every other row to recompose too (which a shared State-backed set would).
     //
-    // Keyed on [sessionId], not a bare remember{} (fix-round-3 minor #5): ChatTranscript's OWN
+    // Keyed on [sessionId], not a bare remember{}: ChatTranscript's OWN
     // composition survives a session switch (ChatViewModel/ChatScreen persist across the single
     // `chat` nav destination's rebinds, task integ bug A), so a one-shot seed would keep treating
     // a NEWLY bound session's whole reloaded history as "never seen" and replay every chip's
@@ -208,18 +204,16 @@ fun ChatTranscript(
             // No uniform Arrangement.spacedBy - spec §6.3's rhythm is ASYMMETRIC (24dp after a
             // user bubble, 12dp otherwise), computed per item below instead.
         ) {
-            // The "Mewbo is an AI tool and can make mistakes." disclaimer anchors to the END of the whole transcript
-            // - one instance, final position only (user directive 2026-07-04 round 2; supersedes
-            // the first-turn anchoring from earlier the same day, which showed it mid-conversation
-            // above a turn-boundary divider). Being its OWN keyed item declared at DSL position 0,
-            // reverseLayout renders it at the visual BOTTOM - below everything: the newest response
-            // and its action-row footer - and it stays there as new turns append (new content has
-            // higher reversedItems indices, so it renders ABOVE this fixed row). Gated on
-            // `showDisclaimer` (= a reply has settled AND no run is live): it never shows
-            // during the first turn's stream, and — the fix — never during a FOLLOW-UP turn's stream
-            // either, where it would sit under the fresh user bubble ahead of the new response. So it
-            // is mutually exclusive with the spark below (settled ⇔ disclaimer, live ⇔ spark), and its
-            // appearance coincides with the settled ActionRow footer's. Index 0 stays the
+            // The "Mewbo is an AI tool and can make mistakes." disclaimer anchors to the END of the
+            // whole transcript - one instance, final position only. Being its OWN keyed item
+            // declared at DSL position 0, reverseLayout renders it at the visual BOTTOM - below
+            // everything: the newest response and its action-row footer - and it stays there as
+            // new turns append (new content has higher reversedItems indices, so it renders ABOVE
+            // this fixed row). Gated on `showDisclaimer` (= a reply has settled AND no run is
+            // live): it never shows during a turn's stream, first or follow-up, where it would
+            // otherwise sit under the fresh user bubble ahead of the new response. So it is
+            // mutually exclusive with the spark below (settled ⇔ disclaimer, live ⇔ spark), and
+            // its appearance coincides with the settled ActionRow footer's. Index 0 stays the
             // visual-bottom stick target, so autoscroll/isAtBottom above are unaffected. animateItem
             // fades it in/out on that gated appearance rather than popping.
             if (showDisclaimer) {
@@ -240,18 +234,14 @@ fun ChatTranscript(
                         modifier = transcriptItemTransition(reducedMotion, fadeEdges = true)
                             .fillMaxWidth()
                             .padding(horizontal = AuraSpacing.AssistantText.gutter)
-                            // The spark is the bottom-most row of a LIVE turn: the disclaimer no
-                            // longer co-renders during Sending/Streaming (they are now
-                            // mutually exclusive), so it only needs a top gap against the streamed
-                            // text above it; the LazyColumn's own bottom contentPadding buffers it off
-                            // the composer. The old `bottom = Composer.gapTight` inset was §7.20
-                            // compensation to hold the disclaimer off the spark — dead now that the
-                            // disclaimer is never its neighbor during a live turn.
+                            // The spark is the bottom-most row of a LIVE turn: the disclaimer
+                            // never co-renders during Sending/Streaming, so the spark only needs a
+                            // top gap against the streamed text above it - the LazyColumn's own
+                            // bottom contentPadding buffers it off the composer.
                             .padding(top = AuraSpacing.ActionRow.topMargin),
                         contentAlignment = Alignment.CenterStart,
                     ) {
-                        // M3 (spec §7): AuraSpark's Thinking pulse replaces the old 3-dot
-                        // TypingIndicator. Per showThinking's own KDoc above, it's the persistent
+                        // AuraSpark's Thinking pulse. Per showThinking's own KDoc above, it's the persistent
                         // run-liveness cue for the WHOLE run now, not just the pre-first-delta gap.
                         AuraSpark(state = SparkState.Thinking, size = AuraSpacing.Composer.iconSize)
                     }
@@ -396,7 +386,8 @@ private fun ChatItemRow(
     onNotice: (String) -> Unit,
     onReadAloudToggle: (ChatItem.AssistantMessage) -> Unit,
     onUserMessageLongPress: ((ChatItem.UserBubble) -> Unit)?,
-    onSubmitQuestionAnswer: (callId: String, callToken: String, answers: List<QuestionAnswerItemDto>, onResult: (Boolean) -> Unit) -> Unit,
+    onSubmitQuestionAnswer:
+        (callId: String, callToken: String, answers: List<QuestionAnswerItemDto>, notes: String?, onResult: (Boolean) -> Unit) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     when (item) {
@@ -427,8 +418,8 @@ private fun ChatItemRow(
             onNotice = onNotice,
             // Passed straight through (not curried with `item` here) - see AssistantMessageRow's
             // param doc. Currying at THIS call site allocated a fresh lambda on every itemsIndexed
-            // invocation, which is exactly the per-row recomposition instability fix-round item 2
-            // measures for.
+            // invocation, which is exactly the per-row recomposition instability a recomposition-count
+            // measurement caught.
             onReadAloudToggle = onReadAloudToggle,
             modifier = modifier,
         )

@@ -18,7 +18,8 @@ from typing import Any
 
 import pytest
 from mewbo_core.classes import ActionStep
-from mewbo_core.errors import ToolInputError
+from mewbo_core.config import reset_config, set_config_override
+from mewbo_core.contracts.errors import ToolInputError
 from mewbo_tools.aider_bridge.edit_blocks import (
     EditBlockApplyError,
     _compute_replacement,
@@ -43,6 +44,34 @@ from mewbo_tools.integration.aider_file_tools import (
     _parse_read_request,
 )
 from mewbo_tools.integration.file_edit_tool import FileEditTool, _apply_edit, _parse_request
+
+
+@pytest.fixture(autouse=True)
+def _unpinned_path_scope():
+    """Pin the path-scope axis OFF: these exercise EDIT/READ/LIST semantics.
+
+    What this module is about is real edit application, malformed-block
+    handling, the ``{"kind": "diff", ...}`` contract, ``replace_all``, the
+    parser edge cases and the read/list envelopes — against an explicit
+    caller-supplied ``root``, which every case here spells as a bare
+    ``tmp_path``. ``path_scope_to_active_project`` ships ON and refuses a
+    ``root`` argument that widens beyond the session's scope, so leaving it at
+    its default would fail these for a reason none of them is testing. That axis
+    has its own coverage in ``tests/test_path_guard_scope_parity.py``.
+
+    It also keeps ``TestReadFileTool::test_path_traversal_blocked`` HONEST. With
+    the root dropped, ``../../../etc/passwd`` is refused because no root was
+    admitted at all — and that assertion is a disjunction, so it would pass
+    without the traversal check ever running.
+
+    Resets afterwards: ``set_config_override`` is process-global and nothing in
+    ``conftest.py`` clears it, so an unreset override leaks into every later
+    module.
+    """
+    set_config_override({"agent": {"path_scope_to_active_project": False}})
+    yield
+    reset_config()
+
 
 # ---------------------------------------------------------------------------
 # Helpers

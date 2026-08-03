@@ -13,20 +13,40 @@ import { SEED } from "./shots";
  * invented feature prose.
  *
  * Anchoring note: the pending card's title is "Plan (revision 2)" — a bare
- * /Plan/ also matches the rejected card AND the composer's plan-mode toggle, so
- * every locator here is revision-qualified or role-scoped.
+ * /Plan/ also matches the rejected card, the composer's plan-mode toggle, AND
+ * (unrelated to this session) another seeded session's title, "Plan a
+ * birthday dinner menu", which the rail renders alongside every session
+ * page — so every locator here is role-scoped to the card's own toggle
+ * BUTTON, never a bare text search. That scoping is also what keeps the
+ * pending-card locator strict-mode-safe regardless of expand state: rev 2's
+ * own markdown body renders an H2 reading "...implementation plan (revision
+ * 2)", a case-insensitive substring hit for a plain `getByText` once
+ * expanded — the accessible NAME of the toggle button is unaffected, since
+ * the expandable body is a sibling of the button, not a descendant of it.
  */
 test.use({ viewport: { width: 1400, height: 1000 } });
 
 test("planApproval — rejected revision + pending revision 2", async ({ page, demo }) => {
   await demo.openSession(SEED.session.planTitle);
 
+  // Exactly TWO plan cards (rejected rev 1 + pending rev 2) — the session
+  // proposes no third revision, so a stray extra proposal (or a decision
+  // that failed to fold onto its revision, leaving a duplicate pending card)
+  // must fail this assertion instead of passing silently. Scoped to the
+  // status-labelled toggle buttons `PlanCard` itself renders, which is what
+  // keeps this from also counting the rail's unrelated "Plan a birthday
+  // dinner menu" session row or the composer's plan-mode toggle.
+  const planCards = page.getByRole("button", {
+    name: /Rejected|Awaiting approval|Approved/,
+  });
+  await expect(planCards).toHaveCount(2);
+
   // The rejected card proves the decision FOLD ran (a mismatched revision would
   // silently leave it pending — the failure mode the bundle validator guards).
   await expect(page.getByText("Rejected").first()).toBeVisible();
 
   // The pending card is the subject of the shot.
-  const pending = page.getByText("Plan (revision 2)");
+  const pending = page.getByRole("button", { name: "Plan (revision 2)" });
   await expect(pending).toBeVisible();
   await expect(page.getByText("Awaiting approval").first()).toBeVisible();
 

@@ -2,9 +2,9 @@
 
 A search RUN's terminal is an NL ``AnswerSynthesis`` (the cited answer), but the
 console's ResultsPanel also renders a list of normalized result CARDS — the
-discrete hits the answer is built from. Before this tool the agents had no way
-to surface those cards, so a fast-tier run that inlined all work (no probe
-sub-agents) produced ``results: []`` even with a real answer.
+discrete hits the answer is built from. This tool is the only way an agent
+surfaces those cards: without an emit, a fast-tier run that inlines all work
+(no probe sub-agents) yields ``results: []`` even with a real answer.
 
 EVERY search agent emits through it, ONCE each (root and probes): each
 ``scg-path-probe`` emits the hits its pathway grounded right before its
@@ -30,7 +30,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal
 
 from mewbo_core.common import MockSpeaker, pydantic_to_openai_tool
-from mewbo_core.session_tools import DEFAULT_SESSION_TOOL_MODES
+from mewbo_core.tooling.session_tools import DEFAULT_SESSION_TOOL_MODES
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from mewbo_graph.plugins.scg._core import (

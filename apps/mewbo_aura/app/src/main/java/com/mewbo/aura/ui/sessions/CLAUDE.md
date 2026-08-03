@@ -2,31 +2,40 @@
 
 # Aura Sessions View-State + Rail Helpers — ui/sessions/
 
-Scope: `ui/sessions/` — **there is no list SCREEN here anymore** (the drawer,
-[`ui/navigation/`](../navigation/CLAUDE.md), replaced it). This package holds `SessionsViewModel` +
-`SessionsUiState` and the two PURE, unit-tested rail helpers (`RecentsFilter`, `SessionGrouping`) +
-`RelativeTime`. Rail visual laws + provenance: DESIGN.md §3.
+Scope: `ui/sessions/` — `SessionsViewModel`/`SessionsUiState` plus the pure, unit-tested rail helpers
+`RecentsFilter`, `SessionGrouping`, `RelativeTime`. There is no list screen here; the drawer
+([`ui/navigation/`](../navigation/CLAUDE.md)) is the recents surface.
 
-- **`RecentsFilter`** (`MOBILE_ONLY` / `ALL`) — the analogue of the console's `DEFAULT_VISIBLE_ORIGINS`.
-  `MOBILE_ONLY` matches `origin == "mobile"`; **a `null` origin (pre-provenance session) is treated as
-  NOT mobile → excluded by the default filter.** The filter default is `MOBILE_ONLY`, held in the VM
-  (NOT in `SessionsUiState`) so it survives a refresh (which replaces the state) and resets on VM
-  recreation. Filtering is applied CLIENT-SIDE by the drawer over the full fetched list (`GET /api/sessions`
-  returns everything, so the filter can't starve).
-- **`SessionsViewModel` — stale-while-revalidate.** The VM is recreated per chat back-stack
-  entry, so it SEEDS its initial state from the `@Singleton` `SessionRepository`'s shared cache
-  (`Loaded(cached)` when non-empty) and re-fetches in the background; `refresh()` likewise keeps a
-  rendered list on screen and shows the skeleton (`Loading`) ONLY when the cache is genuinely EMPTY
-  (first launch) — it never error-blanks. A failed background refresh WITH a non-empty cache degrades to
-  `Loaded(offline = true)`, never `Error`; its `runCatching` manually re-throws `CancellationException`
-  (the VM is created fresh per host and torn down mid-fetch, a fix). `renameSession`/`archiveSession`
-  mutate the repository's cached list IN PLACE (instant UI); the trailing `refresh()` is server-truth
-  reconciliation, not the source of the update. **No hard-delete exists — the API has none.**
-- **`SessionGrouping`** — buckets `TODAY` / `PREVIOUS_7_DAYS` (`date >= today.minusDays(7) && date < today`) /
-  `OLDER` in fixed display order (empty buckets dropped). Recency ts = `updatedAt.ifBlank { createdAt }`;
-  an unparseable/blank ts sorts as `OLDER`, never crashes bucketing.
-- **`RelativeTime`** — `format`/`formatShort` parse ONLY via `Timestamps.parseInstantOrNull`
-  ([`data/model/CLAUDE.md`](../../data/model/CLAUDE.md) — the ONE ISO parser, since Android's bundled
-  `java.time.Instant.parse` throws on the backend's numeric-offset form). `formatShort` uses `java.time`
-  + hardcoded `Locale.US` for deterministic "Today"/"Yesterday" across CI hosts; `parseEpochMillis` is
-  split out so parsing is plain-JUnit testable without `DateUtils`.
+- **`RecentsFilter`** (`MOBILE_ONLY` / `ALL`). `MOBILE_ONLY` matches `origin == "mobile"`; **a `null`
+  origin is NOT mobile and is excluded by the default filter.** The default is `MOBILE_ONLY`, held in
+  the VM and NOT in `SessionsUiState`, so it survives a refresh (which replaces the state) and resets
+  on VM recreation. Filtering is CLIENT-SIDE over the full fetched list — `GET /api/sessions` returns
+  everything, so the filter cannot starve.
+- **`SessionsViewModel` is stale-while-revalidate.** The VM is recreated per chat back-stack entry, so
+  it SEEDS its initial state from the `@Singleton` `SessionRepository`'s shared cache
+  (`Loaded(cached)` when non-empty) and re-fetches in the background. `refresh()` likewise keeps the
+  rendered list on screen; the skeleton (`Loading`) shows ONLY when the cache is genuinely empty. A
+  failed background refresh with a non-empty cache degrades to `Loaded(offline = true)`, never
+  `Error`. Its `runCatching` must manually re-throw `CancellationException` — the VM is created fresh
+  per host and torn down mid-fetch. `renameSession`/`archiveSession` mutate the repository's cached
+  list IN PLACE for instant UI; the trailing `refresh()` is server-truth reconciliation, not the source
+  of the update. **No hard-delete exists — the API has none.**
+- **`SessionGrouping`** buckets `PINNED` / `TODAY` / `PREVIOUS_7_DAYS`
+  (`date >= today.minusDays(7) && date < today`) / `OLDER` in fixed display order, dropping empty
+  buckets. Recency ts = `updatedAt.ifBlank { createdAt }`; an unparseable or blank ts sorts as `OLDER`
+  rather than crashing bucketing.
+- **A pinned session gets its OWN bucket ahead of every date bucket and is EXCLUDED from date bucketing
+  entirely** — never both, or the row renders twice and reads as a duplicate rather than emphasis. Date
+  bucketing alone cannot keep a pin visible: a session pinned three weeks ago sorts into `OLDER`,
+  exactly where a pin exists to prevent it from hiding. Ordered `pinnedAt` descending; an unparseable
+  stamp sorts to the end of the bucket. **Pinning is applied AFTER `RecentsFilter.matches` has narrowed
+  the list** — it is an ORDERING, never a way around the filter, which is what keeps a pinned
+  non-mobile session from leaking past `MOBILE_ONLY`.
+- **Pin/unpin** — `SessionsViewModel.setPinned` mirrors `archiveSession`'s shape: patch the cached row
+  in place (instant re-section), then a trailing `refresh()` reconciles. The wire route is
+  `POST`/`DELETE` on ONE path (`api/sessions/{id}/pin`) — there is no `/unpin` path.
+- **`RelativeTime`** parses ONLY via `Timestamps.parseInstantOrNull`
+  ([`data/model/CLAUDE.md`](../../data/model/CLAUDE.md)), because Android's bundled
+  `java.time.Instant.parse` throws on the backend's numeric-offset form. `formatShort` hardcodes
+  `Locale.US` so "Today"/"Yesterday" are deterministic across CI hosts; `parseEpochMillis` is split out
+  so parsing is plain-JUnit testable without `DateUtils`.

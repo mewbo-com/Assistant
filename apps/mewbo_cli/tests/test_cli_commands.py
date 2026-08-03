@@ -7,9 +7,9 @@ import pytest
 from rich.console import Console
 
 from mewbo_core.config import set_config_override, set_mcp_config_path  # noqa: E402
-from mewbo_core.session_runtime import SessionRuntime  # noqa: E402
-from mewbo_core.session_store import SessionStore  # noqa: E402
-from mewbo_core.tool_registry import ToolRegistry, ToolSpec  # noqa: E402
+from mewbo_core.loop.session_runtime import SessionRuntime  # noqa: E402
+from mewbo_core.session.session_store import SessionStore  # noqa: E402
+from mewbo_core.tooling.tool_registry import ToolRegistry, ToolSpec  # noqa: E402
 
 import mewbo_cli.cli_commands as cli_commands
 from mewbo_cli.cli_commands import get_registry  # noqa: E402

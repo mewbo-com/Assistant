@@ -4,7 +4,7 @@ import json
 from types import SimpleNamespace
 
 from mewbo_core.config import set_config_override, set_mcp_config_path
-from mewbo_core.tool_registry import (
+from mewbo_core.tooling.tool_registry import (
     _CAPABILITY_MODE_TIERS,
     CapabilityMode,
     ToolRegistry,
@@ -56,7 +56,7 @@ def test_default_registry_homeassistant_enabled(monkeypatch):
 
 def test_registry_disables_on_factory_error():
     """Disable tools that fail during initialization."""
-    from mewbo_core.tool_registry import ToolRegistry, ToolSpec
+    from mewbo_core.tooling.tool_registry import ToolRegistry, ToolSpec
 
     def _boom():
         raise RuntimeError("nope")
@@ -148,7 +148,7 @@ def test_manifest_skips_missing_local_class(tmp_path, monkeypatch):
 
 def test_manifest_skips_mcp_tool_when_support_missing(tmp_path, monkeypatch):
     """Skip MCP tools when MCP adapters are unavailable."""
-    monkeypatch.setattr("mewbo_core.tool_registry._load_mcp_support", lambda: None)
+    monkeypatch.setattr("mewbo_core.tooling.tool_registry._load_mcp_support", lambda: None)
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(
         json.dumps(
@@ -177,7 +177,7 @@ def test_manifest_skips_mcp_tool_when_support_missing(tmp_path, monkeypatch):
 def test_manifest_skips_mcp_tool_missing_server(tmp_path, monkeypatch):
     """Skip MCP tools missing server/tool metadata."""
     dummy_mcp = SimpleNamespace(MCPToolRunner=object)
-    monkeypatch.setattr("mewbo_core.tool_registry._load_mcp_support", lambda: dummy_mcp)
+    monkeypatch.setattr("mewbo_core.tooling.tool_registry._load_mcp_support", lambda: dummy_mcp)
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(
         json.dumps(
@@ -207,7 +207,7 @@ def test_auto_manifest_returns_existing_when_mcp_missing(tmp_path, monkeypatch):
     manifest_path = tmp_path / "tool-manifest.auto.json"
     manifest_path.write_text("{}", encoding="utf-8")
     set_config_override({"runtime": {"config_dir": str(tmp_path)}})
-    monkeypatch.setattr("mewbo_core.tool_registry._load_mcp_support", lambda: None)
+    monkeypatch.setattr("mewbo_core.tooling.tool_registry._load_mcp_support", lambda: None)
 
     result = _ensure_auto_manifest(str(tmp_path / "mcp.json"))
     assert result == str(manifest_path)
@@ -224,7 +224,7 @@ def test_auto_manifest_handles_discovery_error(tmp_path, monkeypatch):
             raise RuntimeError("boom")
 
     monkeypatch.setattr(
-        "mewbo_core.tool_registry._load_mcp_support",
+        "mewbo_core.tooling.tool_registry._load_mcp_support",
         lambda: DummyMcpModule(),
     )
 
@@ -245,7 +245,7 @@ def test_auto_manifest_handles_write_failure(tmp_path, monkeypatch):
             return ({}, {})
 
     monkeypatch.setattr(
-        "mewbo_core.tool_registry._load_mcp_support",
+        "mewbo_core.tooling.tool_registry._load_mcp_support",
         lambda: DummyMcpModule(),
     )
 
@@ -287,7 +287,9 @@ def test_tool_catalog_reports_registered_tools():
 def test_default_manifest_cache_path_uses_home_fallback(tmp_path, monkeypatch):
     """Fallback to ~/.mewbo when config dir is empty."""
     set_config_override({"runtime": {"config_dir": ""}})
-    monkeypatch.setattr("mewbo_core.tool_registry.os.path.expanduser", lambda _p: str(tmp_path))
+    monkeypatch.setattr(
+        "mewbo_core.tooling.tool_registry.os.path.expanduser", lambda _p: str(tmp_path)
+    )
     path = _default_manifest_cache_path()
     assert path.endswith("tool-manifest.auto.json")
 
@@ -326,7 +328,9 @@ def test_auto_manifest_marks_cached_tools_disabled_on_failure(tmp_path, monkeypa
         def _load_mcp_config(self, _path):
             raise RuntimeError("boom")
 
-    monkeypatch.setattr("mewbo_core.tool_registry._load_mcp_support", lambda: DummyMcpModule())
+    monkeypatch.setattr(
+        "mewbo_core.tooling.tool_registry._load_mcp_support", lambda: DummyMcpModule()
+    )
 
     result = _ensure_auto_manifest(str(tmp_path / "mcp.json"))
     assert result == str(manifest_path)
@@ -366,7 +370,14 @@ def test_manifest_builds_mcp_factory(tmp_path, monkeypatch):
     )
 
     class DummyMCPToolRunner:
-        def __init__(self, server_name: str, tool_name: str, *, cwd: str | None = None):
+        def __init__(
+            self,
+            server_name: str,
+            tool_name: str,
+            *,
+            cwd: str | None = None,
+            trust_cwd: bool = True,
+        ):
             self.server_name = server_name
             self.tool_name = tool_name
 
@@ -374,7 +385,7 @@ def test_manifest_builds_mcp_factory(tmp_path, monkeypatch):
             return None
 
     dummy_module = SimpleNamespace(MCPToolRunner=DummyMCPToolRunner)
-    monkeypatch.setattr("mewbo_core.tool_registry._load_mcp_support", lambda: dummy_module)
+    monkeypatch.setattr("mewbo_core.tooling.tool_registry._load_mcp_support", lambda: dummy_module)
 
     registry = load_registry(str(manifest_path))
     tool = registry.get("mcp_tool")
@@ -479,7 +490,7 @@ def test_auto_manifest_marks_failed_server(tmp_path, monkeypatch):
         lambda _config: ({}, {"srv": RuntimeError("boom")}),
     )
     monkeypatch.setattr(
-        "mewbo_core.tool_registry._build_manifest_payload",
+        "mewbo_core.tooling.tool_registry._build_manifest_payload",
         lambda _tools: {"tools": "bad"},
     )
 
@@ -532,7 +543,7 @@ def test_auto_manifest_marks_failed_server(tmp_path, monkeypatch):
     )
 
     monkeypatch.setattr(
-        "mewbo_core.tool_registry._build_manifest_payload",
+        "mewbo_core.tooling.tool_registry._build_manifest_payload",
         lambda _tools: {"tools": [{"tool_id": "mcp_srv_tool_a"}, {"name": "bad"}, "bad"]},
     )
 
@@ -553,12 +564,12 @@ def test_auto_manifest_marks_failed_server(tmp_path, monkeypatch):
 
 def test_get_or_build_registry_reuses_identical_inputs(monkeypatch, tmp_path):
     """A 2nd run with identical inputs reuses the SAME registry — built once."""
-    import mewbo_core.tool_registry as tr
+    import mewbo_core.tooling.tool_registry as tr
 
     reset_registry_cache()
     calls: list = []
 
-    def fake_load_registry(*, cwd=None, extra_mcp_servers=None):
+    def fake_load_registry(*, cwd=None, extra_mcp_servers=None, trust_cwd=True):
         calls.append((cwd, extra_mcp_servers))
         return ToolRegistry()
 
@@ -575,12 +586,12 @@ def test_get_or_build_registry_reuses_identical_inputs(monkeypatch, tmp_path):
 
 def test_get_or_build_registry_rebuilds_on_different_cwd(monkeypatch, tmp_path):
     """A different cwd is a distinct scope → the registry is rebuilt."""
-    import mewbo_core.tool_registry as tr
+    import mewbo_core.tooling.tool_registry as tr
 
     reset_registry_cache()
     calls: list = []
 
-    def fake_load_registry(*, cwd=None, extra_mcp_servers=None):
+    def fake_load_registry(*, cwd=None, extra_mcp_servers=None, trust_cwd=True):
         calls.append((cwd, extra_mcp_servers))
         return ToolRegistry()
 
@@ -596,12 +607,12 @@ def test_get_or_build_registry_rebuilds_on_different_cwd(monkeypatch, tmp_path):
 
 def test_get_or_build_registry_rebuilds_on_changed_mcp_servers(monkeypatch, tmp_path):
     """Changing the plugin-contributed MCP servers rebuilds (key includes them)."""
-    import mewbo_core.tool_registry as tr
+    import mewbo_core.tooling.tool_registry as tr
 
     reset_registry_cache()
     calls: list = []
 
-    def fake_load_registry(*, cwd=None, extra_mcp_servers=None):
+    def fake_load_registry(*, cwd=None, extra_mcp_servers=None, trust_cwd=True):
         calls.append((cwd, extra_mcp_servers))
         return ToolRegistry()
 
@@ -626,16 +637,16 @@ def test_orchestrator_reuses_registry_across_runs(monkeypatch, tmp_path):
     """End-to-end: two Orchestrators (= two queries) on the same cwd share the
     cached registry; a different cwd rebuilds — proving the per-query rebuild is
     gone."""
-    import mewbo_core.tool_registry as tr
-    from mewbo_core.orchestrator import Orchestrator
-    from mewbo_core.session_store import SessionStore
+    import mewbo_core.tooling.tool_registry as tr
+    from mewbo_core.loop.orchestrator import Orchestrator
+    from mewbo_core.session.session_store import SessionStore
 
     reset_registry_cache()
     set_mcp_config_path("")
     set_config_override({"plugins": {"enabled": False}, "home_assistant": {"enabled": False}})
     calls: list = []
 
-    def fake_load_registry(*, cwd=None, extra_mcp_servers=None):
+    def fake_load_registry(*, cwd=None, extra_mcp_servers=None, trust_cwd=True):
         calls.append(cwd)
         return ToolRegistry()
 
@@ -657,7 +668,7 @@ def test_orchestrator_reuses_registry_across_runs(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# capability_mode coarse privilege tier (Phase 1a)
+# capability_mode coarse privilege tier
 # ---------------------------------------------------------------------------
 
 
@@ -797,7 +808,7 @@ def test_capability_mode_vocabulary_is_consistent_across_homes():
     """
     from typing import get_args
 
-    from mewbo_core.agent_context import AgentContext
+    from mewbo_core.agents.agent_context import AgentContext
 
     modes = set(get_args(CapabilityMode))
     assert modes == {"read_only", "execute", "all"}

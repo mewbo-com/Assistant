@@ -35,7 +35,7 @@ def register_builtin_plugins() -> None:
     the ``wiki`` / ``scg`` plugin suites discovered without the core wheel
     ever importing up into this package.
     """
-    from mewbo_core.plugins import register_builtin_root
+    from mewbo_core.tooling.plugins import register_builtin_root
 
     register_builtin_root(plugins_root())
 
@@ -44,9 +44,8 @@ def register_builtin_plugins() -> None:
 # the `wiki` extra, or a test importing a submodule) gets the wiki/scg plugin
 # suites discovered — without core ever importing up to find them. Idempotent.
 #
-# NOTE: the library used to also push a runtime *capability provider* here
-# (`register_runtime_capabilities`) that blanket-granted `scg` to any session
-# once a source was mapped. It was removed — `scg` is advertisement-only now (see
-# `plugins/scg/__init__.py`). Core's generic provider seam still exists for any
-# future capability; this library simply registers no provider into it today.
+# No runtime *capability provider* is pushed alongside them: `scg` is
+# advertisement-only (see `plugins/scg/__init__.py`), so nothing here blanket-
+# grants it to a session. Core's generic provider seam stays available for a
+# future capability; this library registers nothing into it.
 register_builtin_plugins()

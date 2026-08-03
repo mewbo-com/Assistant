@@ -105,7 +105,7 @@ export function LandingScreen() {
 
   // Anything listed in /v1/wiki/projects is — by definition — indexed.
   // Route to its landing page; fall back to the welcome ("not indexed")
-  // screen only for legacy records that pre-date landingPageId.
+  // screen only when landingPageId is absent.
   const openProject = (p: Project) => {
     if (p.landingPageId) {
       navigate(

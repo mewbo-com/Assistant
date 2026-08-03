@@ -9,7 +9,7 @@ input (source descriptors, workspace instructions) never travels through this.
 
 from __future__ import annotations
 
-from mewbo_core.agent_registry import parse_agent_file
+from mewbo_core.agents.agent_registry import parse_agent_file
 from mewbo_core.common import get_logger
 
 try:

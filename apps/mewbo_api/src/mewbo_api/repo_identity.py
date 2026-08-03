@@ -14,6 +14,14 @@ Parsing handles the four ref shapes Mewbo sees in the wild:
 - ``git@host:owner/repo.git``              (scp-like SSH shorthand)
 - ``owner/repo`` / ``repo``                (host-less / bare reference)
 
+Recognising those shapes is NOT re-implemented here — it delegates to the one
+shared grammar, ``mewbo_core.workspaces.repositories.RepositoryRef.split_remote``, which
+the wiki's ``CredentialScope`` also parses through. This module keeps only its
+own PROJECTION of the resulting parts, which genuinely differs from a
+credential scope's: a reference with no structural host reads its LAST token as
+a repo name (``Assistant`` is a repo), where a credential scope reads that same
+token as a bare host. Both are right for their domain.
+
 The host is lowercased and a trailing ``.git`` is stripped; owner/repo case is
 preserved (forge hosts are case-insensitive on host but path case can matter).
 """
@@ -22,7 +30,8 @@ from __future__ import annotations
 
 import subprocess
 from dataclasses import dataclass
-from urllib.parse import urlsplit
+
+from mewbo_core.workspaces.repositories import RepositoryRef
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,43 +48,29 @@ class RepoIdentity:
 
     # -- parsing -----------------------------------------------------------
 
-    @staticmethod
-    def _strip_git_suffix(value: str) -> str:
-        return value[:-4] if value.endswith(".git") else value
-
     @classmethod
     def from_remote_url(cls, url: str) -> RepoIdentity | None:
         """Parse a remote URL or free-form ref into a ``RepoIdentity``.
 
-        Returns ``None`` for a blank/whitespace-only input.
+        Returns ``None`` for a blank/whitespace-only input. The shape
+        recognition (scheme URL, scp shorthand, host-less ref) and the
+        normalization (host lowercased, trailing ``.git`` dropped, empty
+        segments removed) come from the shared grammar; the projection below —
+        owner/repo are the LAST TWO segments, everything before them collapses
+        into the host or is dropped — is this class's own and is unchanged.
         """
         raw = (url or "").strip()
         if not raw:
             return None
-
-        # scp-like SSH shorthand: ``git@host:owner/repo.git`` (no ``://``).
-        if "://" not in raw and "@" in raw and ":" in raw:
-            userhost, _, path = raw.partition(":")
-            host = userhost.rpartition("@")[2]
-            return cls._from_host_and_path(host, path)
-
-        # Scheme URL: https://, ssh://, git://, http://.
-        if "://" in raw:
-            parts = urlsplit(raw)
-            return cls._from_host_and_path(parts.hostname or "", parts.path)
-
-        # Host-less reference: ``owner/repo`` or bare ``repo``.
-        return cls._from_host_and_path("", raw)
-
-    @classmethod
-    def _from_host_and_path(cls, host: str, path: str) -> RepoIdentity:
-        host = host.strip().lower()
-        segments = [s for s in path.strip().strip("/").split("/") if s]
+        host, raw_segments = RepositoryRef.split_remote(raw)
+        # An interior empty segment (``host/o//repo``) is preserved by the
+        # shared grammar because a credential scope refuses it; a project
+        # reference has always healed it instead, so drop them here.
+        segments = [segment for segment in raw_segments if segment]
         if not segments:
             return cls(host=host, owner="", repo="")
-        repo = cls._strip_git_suffix(segments[-1])
         owner = segments[-2] if len(segments) >= 2 else ""
-        return cls(host=host, owner=owner, repo=repo)
+        return cls(host=host, owner=owner, repo=segments[-1])
 
     # -- addressing --------------------------------------------------------
 

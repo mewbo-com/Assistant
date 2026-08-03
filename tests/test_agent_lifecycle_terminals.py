@@ -20,13 +20,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage
-from mewbo_core.agent_context import AgentContext
+from mewbo_core.agents.agent_context import AgentContext
+from mewbo_core.agents.hypervisor import AgentHandle, AgentHypervisor
+from mewbo_core.agents.spawn_agent import SpawnAgentTool
 from mewbo_core.classes import ActionStep
 from mewbo_core.hooks import HookManager
-from mewbo_core.hypervisor import AgentHandle, AgentHypervisor
 from mewbo_core.permissions import PermissionDecision, PermissionPolicy
-from mewbo_core.spawn_agent import SpawnAgentTool
-from mewbo_core.tool_registry import ToolRegistry, ToolSpec
+from mewbo_core.tooling.tool_registry import ToolRegistry, ToolSpec
 
 # ---------------------------------------------------------------------------
 # Harness (mirrors tests/test_spawn_agent_flow.py)
@@ -120,7 +120,7 @@ async def _hang_forever(*_args, **_kwargs):
 
 def _patch_model(*, response: str | None = None, boom: bool = False, hang: bool = False):
     """Patch the child loop's model — the one stubbed I/O boundary."""
-    mock_build = patch("mewbo_core.tool_use_loop.build_chat_model")
+    mock_build = patch("mewbo_core.loop.tool_use_loop.build_chat_model")
     started = mock_build.start()
     if boom:
         started.side_effect = RuntimeError("provider unreachable")

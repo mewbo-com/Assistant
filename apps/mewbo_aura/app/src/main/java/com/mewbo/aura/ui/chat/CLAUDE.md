@@ -17,14 +17,12 @@ Scope: `ui/chat/` — the docked chat surface and everything it hosts: `ChatScre
   `MarkdownBuffer.sanitize` + `rememberStreamedText`, all in [`ui/common/`](../common/CLAUDE.md));
   `WordFadeText` is deleted. Smoothness is the ABSENCE of churn (retainState + ~20Hz throttle), never a
   per-word reveal.
-- **Compose stability is measured, not claimed.** `@Immutable` on `ChatItem`/`ChatUiState` is
-  load-bearing. Two silent breaks: a per-item callback CURRIED at the list-dispatch site (curry only
-  inside the row's own body), and a callback-BUNDLE constructed inline every recomposition (hoist
-  behind `remember`). Re-verify with the Log-in-composition counter in `ChatPreviewActivity`.
+- **Compose stability is measured, not claimed** — `@Immutable` on `ChatItem`/`ChatUiState` is
+  load-bearing here; the ui-wide rule and its three known breaks live in [`ui/CLAUDE.md`](../CLAUDE.md).
 - Turn separation is BORDER + space (a `HorizontalDivider(outlineHairline)` in the `Turn` band before
   each user bubble with a predecessor); the disclaimer is a transcript-level SIBLING at DSL position 0
   (visual bottom under `reverseLayout`), gated on `shouldShowDisclaimer(hasSettledReply, isRunLive)` =
-  `hasSettledReply && !isRunLive`, NEVER first-turn-anchored or mid-transcript (DESIGN.md §7.7 / §7.20).
+  `hasSettledReply && !isRunLive`, NEVER first-turn-anchored or mid-transcript (DESIGN.md).
   **The `!isRunLive` half is load-bearing:** on a follow-up turn a prior reply is already settled, so
   gating on `hasSettledReply` alone left the disclaimer pinned under the fresh user bubble + spark
   during the new turn's stream, ahead of its response. Gated this way the disclaimer is
@@ -32,37 +30,58 @@ Scope: `ui/chat/` — the docked chat surface and everything it hosts: `ChatScre
   is the settled `ActionRow` footer — `ActionRow.disclaimerGap` stays `0.dp` (the footer's 48dp
   touch-cell inset supplies the air), and the spark carries ONLY its own `top = ActionRow.topMargin`
   gap (the `LazyColumn`'s bottom contentPadding buffers it off the composer; the old
-  `bottom = Composer.gapTight` §7.20 compensation is gone). Fixed 2026-07-14.
+  `bottom = Composer.gapTight` compensation is gone).
 - **All transcript rows share ONE `Modifier.animateItem` transition** (`transcriptItemTransition`:
   `AuraMotion.transcriptItemPlacementSpring` + fades, reduced-motion-gated) so a live turn's
   mount/shuffle/unmount reflows instead of flickering. Chip ENTRANCE stays owned by
   `ChipEntranceAnimator` and the streaming text is never per-delta-faded — content rows pass
   `fadeEdges = false` (placement + removal only); the spark/disclaimer pass `true` (fade both edges).
-  DESIGN.md §7.23.
+  DESIGN.md.
 
 ## Liveness — `ChatScreen` is the sole glow owner
 
 `ChatScreen`'s bottom `AuroraEdgeGlow` (`IN_APP_GLOW_*` tuning) is the ONE liveness layer; `ChatSurface`
 renders no aura of its own. `AuraSpark` at the transcript bottom is the persistent cue for the whole
 `Sending`/`Streaming` phase. The fresh-invocation ambient breathe runs
-`AMBIENT_INVOCATION_WINDOW_MS = 30s` (was 10s; ≥3× per user directive 2026-07-14), then fades to
-`Hidden` — rest is solid. **That SAME bounded breathe is re-armed on every run COMPLETION**:
+`AMBIENT_INVOCATION_WINDOW_MS = 30s`, then fades to `Hidden` — rest is solid. **That SAME bounded
+breathe is re-armed on every run COMPLETION**:
 the pure, unit-tested `chatGlowState(...)` shows `Listening` when EITHER the fresh-invocation
 window is open on an empty transcript OR a completion linger is armed — a monotonic `completionArmToken`
 captures each transition into `RunPhase.Done`, and (unlike the fresh breathe) this arm is deliberately
 NOT empty-gated, because it fires precisely when a response lands into a non-empty transcript. At run-end
 the glow blooms Thinking→Listening and lingers; the ≥3s ease-off applies at the linger's END (DESIGN.md
-§5). Shader/ease-off/speed-scale laws live in [`ui/aurora/CLAUDE.md`](../aurora/CLAUDE.md).
+). Shader/ease-off/speed-scale laws live in [`ui/aurora/CLAUDE.md`](../aurora/CLAUDE.md).
+
+## The project readout — stated exactly once, by whichever surface is up
+
+Two surfaces answer "where am I working", and `ChatUiState.showsComposerScopeIndicator` is the ONE
+predicate both read so they can never both answer or both stay silent:
+
+- **Pre-session** (no session, empty transcript): `ChatSurface`'s `ComposerScopeIndicator` — project
+  + faceted tool counts, tappable through to `ComposerOptionsSheet`.
+- **Open session**: `ChatTopBar`'s `TopBarProjectLine`, a second line under `Mewbo <model>` — scope
+  glyph + `ComposerScope.activeProjectLabel` in `caption`, and **deliberately NOT interactive** (the
+  composer's "+" already edits scope, and a control here would need a 48dp touch cell inside a 32dp
+  title block). Absent entirely when the session has no project, so an ordinary temp-dir chat keeps
+  a one-line bar.
+
+The line exists because the project MOVES: a session can start in auto-select mode and the model
+re-points it with `switch_project`, so the project the turn opened in is not necessarily the project it
+is working in. It is driven off `composerScope.selectedProjectKey`, which `ChatViewModel.publish`
+re-points on every persisted `context` event
+([`data/model/CLAUDE.md`](../../data/model/CLAUDE.md) § the session's project is live) — read once at
+session load it would go stale mid-turn, which is precisely when it matters.
+
+`ProjectRowKind` ([`ui/common`](../common/CLAUDE.md)) owns the glyph+tint for the three kinds
+(Saved / Temporary / Auto), shared by this line and BOTH project pickers.
 
 ## The composer scope row (pre-session) — ChatSurface
 
 `ComposerScopeIndicator` shows `project · N tools` above the composer while no session exists; tap opens
-`ComposerOptionsSheet`. This wave (2026-07-14) rebuilt it as a proper row:
+`ComposerOptionsSheet`.
 
-- **Alignment:** the scope glyphs align to the composer pill's straight edge via
-  `AuraSpacing.Composer.scopeRowStartInset = horizontalMargin + height/2` (16 + 32 = 48dp) — `radiusPill`
-  is a 50% stadium, so the corner curve becomes the straight line exactly `height/2` in from the edge.
-  Reuse this anchor for any composer-content alignment (values → DESIGN.md §3).
+- **Alignment** uses `AuraSpacing.Composer.scopeRowStartInset` — the anchor and why it is
+  `horizontalMargin + height/2` live in [`ui/composer/CLAUDE.md`](../composer/CLAUDE.md).
 - **Faceted counts:** the row's tool count is `ComposerScope.toolsFacetSummary`
   ([`data/model`](../../data/model/CLAUDE.md)) — "2 project · 5 system · 3 plugin" — falling back to the
   plain total when no active tool carries a recognized scope (older backend), never a lone "N other".
@@ -72,7 +91,7 @@ the glow blooms Thinking→Listening and lingers; the ≥3s ease-off applies at 
   (3) only THEN is the project name `widthIn`-capped and allowed to ellipsize. Text truncation is the
   third rung, never the first.
 - **Glyphs + tint:** `ChatIcons.ProjectScope`/`ToolScope` (Folder/Build, `Icons.Filled.*`), tinted
-  `scopeProject`/`scopeTool` (DESIGN.md §4) — glyphs only, never body text.
+  `scopeProject`/`scopeTool` (DESIGN.md) — glyphs only, never body text.
 - The tool picker (`ComposerOptionsSheet`, [`ui/composer`](../composer/CLAUDE.md)) is provenance-GROUPED:
   scope-section headers layered over the existing per-server groups (the old per-server scope tag was
   removed to avoid double-labeling). The project picker (`ProjectPickerSheet`, [`ui/settings`](../settings/CLAUDE.md))
@@ -106,7 +125,7 @@ drawable.
   report `running: true` yet" — `start_async` registers the run synchronously before the 202.
 - **Permanent termination is a terminal COMPOSER state, not an error card** — `ChatUiState.sessionEnded`
   disables the composer and drops any Retry (a terminated session 410s every retry). No error residue
-  (DESIGN.md §6).
+  (DESIGN.md).
 
 Promoted tool cards → [`toolcards/CLAUDE.md`](toolcards/CLAUDE.md); the Streamlit widget card →
 [`widget/CLAUDE.md`](widget/CLAUDE.md). `ChatIcons` is the FROZEN legacy hand-rolled glyph set — reuse

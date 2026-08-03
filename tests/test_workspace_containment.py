@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Workspace containment — filesystem firebreak.
 
-The nine-point contract for ``workspace_mode`` v1, adapted to the staged
-enforcement flag (``agent.workspace_enforcement``, default OFF):
+The nine-point contract for ``workspace_mode`` v1, plus the escape regression
+that motivated flipping ``agent.workspace_enforcement`` on by default:
 
 1. workspace_write child cannot READ outside its root (sibling / /app / cred).
 2. ...cannot WRITE outside its root.
 3. read_only: writes denied everywhere; reads confined.
-4. flag OFF (default): every path byte-identical to the pre-existing tenant union.
+4. flag OFF (opt-out): every path byte-identical to the pre-existing tenant
+   union — this is what the escape looked like before the default flipped,
+   and it stays reachable for an operator who explicitly disables enforcement.
 5. deep-nesting monotonicity via ``child()``.
 6. authoritative root injection: a model-supplied wider root is IGNORED under
    active containment, HONORED (advisory) under full_access / flag off.
@@ -18,7 +20,11 @@ enforcement flag (``agent.workspace_enforcement``, default OFF):
 
 Enforcement is exercised by driving ``resolve_safe_path`` directly with an
 explicit containment (and via the loop's active-containment context), never by
-standing up a real LLM turn.
+standing up a real LLM turn. ``TestTenantUnionEscapeAtShippedDefaults`` below
+is the one exception that matters: it reproduces the actual cross-project
+escape against the config the ``app_config_file`` fixture WRITES (the true
+shipped default, not a forced override), because a test that only ever forces
+the flag proves the mechanism works and nothing about what ships.
 """
 
 from __future__ import annotations
@@ -26,10 +32,10 @@ from __future__ import annotations
 import os
 
 import pytest
-from mewbo_core.agent_context import AgentContext
-from mewbo_core.config import reset_config, set_config_override
-from mewbo_core.exit_plan_mode import PLAN_DIR_ROOT
-from mewbo_core.workspace import (
+from mewbo_core.agents.agent_context import AgentContext
+from mewbo_core.config import AppConfig, reset_config, set_config_override
+from mewbo_core.tooling.exit_plan_mode import PLAN_DIR_ROOT
+from mewbo_core.workspaces.workspace import (
     WORKSPACE_MODE_RANK,
     WorkspaceContainment,
     active_containment,
@@ -115,6 +121,11 @@ class TestWorkspaceContainmentModel:
 
 
 class TestResolveSafePathContained:
+    def teardown_method(self):
+        # ``set_config_override`` is process-global and nothing in ``conftest``
+        # resets it, so a case that pins an axis must hand the config back.
+        reset_config()
+
     def test_workspace_write_read_inside_ok(self, workspace):
         c = WorkspaceContainment(mode="workspace_write", root=workspace["ws"])
         got = resolve_safe_path("a.py", root=workspace["ws"], containment=c)
@@ -179,6 +190,16 @@ class TestResolveSafePathContained:
     def test_inactive_full_access_containment_is_noop(self, workspace):
         # An explicit full_access containment must NOT divert to the strict path;
         # it resolves through the ordinary tenant union (root arg inserted).
+        #
+        # This case exercises ``workspace_enforcement``, not path scoping; pin the
+        # path-scope axis off so it is testing one thing. ``workspace`` builds
+        # under ``tmp_path`` and binds no project, so with
+        # ``path_scope_to_active_project`` at its shipped default (True) the
+        # ``root`` argument here is a WIDENING one and is correctly ignored —
+        # which would make this assertion fail for a reason that has nothing to
+        # do with containment. The scoped behaviour has its own coverage in
+        # ``tests/test_path_guard_scope_parity.py``.
+        set_config_override({"agent": {"path_scope_to_active_project": False}})
         c = WorkspaceContainment(mode="full_access", root=workspace["ws"])
         got = resolve_safe_path("a.py", root=workspace["ws"], containment=c)
         assert str(got) == os.path.join(workspace["ws"], "a.py")
@@ -189,14 +210,35 @@ class TestResolveSafePathContained:
 
 
 # ---------------------------------------------------------------------------
-# (4) flag OFF (default): byte-identical to the pre-existing tenant union
+# (4) agent.workspace_enforcement OFF: byte-identical to the pre-existing union
 # ---------------------------------------------------------------------------
 
 
 class TestFlagOffByteIdentical:
+    """The flag is ``agent.workspace_enforcement`` — NOT ``path_scope_to_active_project``.
+
+    Naming it matters because the two default OPPOSITE ways:
+    ``workspace_enforcement`` is the one this class turns off, while
+    ``path_scope_to_active_project`` ships **on**. A reader who assumed the
+    second is what "flag off" meant would read the case below as proof that a
+    model-supplied ``root`` widens the scope under the SHIPPED default — which
+    is exactly the hole that made the defect invisible for as long as it was.
+    """
+
+    def teardown_method(self):
+        reset_config()
+
     def test_union_still_honors_explicit_root(self, workspace):
         # With no containment at all, an explicit root widens the union exactly
         # as before — a path under it resolves.
+        #
+        # This case exercises ``workspace_enforcement``, not path scoping; pin
+        # the path-scope axis off so it is testing one thing. Under the shipped
+        # default this ``root`` is a WIDENING one (nothing published, and the
+        # workspace is not a configured project), so it is correctly ignored —
+        # asserted from the other side in
+        # ``tests/test_path_guard_scope_parity.py``.
+        set_config_override({"agent": {"path_scope_to_active_project": False}})
         got = resolve_safe_path("a.py", root=workspace["ws"])
         assert str(got) == os.path.join(workspace["ws"], "a.py")
 
@@ -276,16 +318,23 @@ class TestWorkspaceModeNarrowing:
 # ---------------------------------------------------------------------------
 
 
-def _build_loop(*, workspace_mode: str, cwd: str, enforcement: bool):
+def _build_loop(*, workspace_mode: str, cwd: str, enforcement: bool | None):
     """Construct a ToolUseLoop with the enforcement flag set for the run.
+
+    *enforcement* of ``None`` leaves the config UNTOUCHED — the run exercises
+    whatever ``agent.workspace_enforcement`` actually ships as (the
+    ``app_config_file`` fixture writes real ``AppConfig()`` defaults to disk),
+    rather than a value this helper forced. Use ``None`` for a test that must
+    prove something about the SHIPPED default; an explicit ``True``/``False``
+    is for tests that need a specific value regardless of what ships.
 
     Imported lazily + patched like the sibling loop tests so no real model is
     built.
     """
     from unittest.mock import MagicMock, patch
 
-    from mewbo_core.hypervisor import AgentHypervisor
-    from mewbo_core.tool_use_loop import ToolUseLoop
+    from mewbo_core.agents.hypervisor import AgentHypervisor
+    from mewbo_core.loop.tool_use_loop import ToolUseLoop
 
     # Reuse the sibling suite's tool/registry/policy/hook fakes.
     from test_tool_use_loop import (  # type: ignore[import-not-found]
@@ -295,13 +344,14 @@ def _build_loop(*, workspace_mode: str, cwd: str, enforcement: bool):
         _make_spec,
     )
 
-    set_config_override({"agent": {"workspace_enforcement": enforcement}})
+    if enforcement is not None:
+        set_config_override({"agent": {"workspace_enforcement": enforcement}})
     ctx = AgentContext.root(
         model_name="m",
         registry=AgentHypervisor(max_concurrent=100),
         workspace_mode=workspace_mode,
     )
-    with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+    with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
         mock_build.return_value = MagicMock()
         mock_build.return_value.bind_tools.return_value = MagicMock()
         return ToolUseLoop(
@@ -371,3 +421,135 @@ class TestLoopContainmentSeam:
             {"name": "read_file", "args": {"path": "a.py"}, "id": "1"}
         )
         assert step.tool_input["root"] == workspace["ws"]
+
+
+# ---------------------------------------------------------------------------
+# The escape regression — reproduces a cross-tenant read, against
+# the config the ``app_config_file`` fixture actually WRITES (real ``AppConfig()``
+# defaults), not a value this suite forces. The vulnerable surface is the
+# tenant UNION in ``_get_allowed_roots()`` (cwd ∪ every configured project path
+# ∪ scratch): a single directory is not enough to reproduce it, because the
+# union already refuses a path that belongs to no configured root regardless of
+# enforcement. Two REGISTERED projects are required so the read actually lands
+# inside the union the historical behaviour granted.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def tenants(tmp_path):
+    """Two configured projects, each owning a file only its own tenant should read."""
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    alpha.mkdir()
+    beta.mkdir()
+    (alpha / "own.py").write_text("mine = True\n")
+    beta_secret = beta / "credentials.env"
+    beta_secret.write_text("SECRET=hunter2\n")
+    set_config_override(
+        {"projects": {"alpha": {"path": str(alpha)}, "beta": {"path": str(beta)}}}
+    )
+    return {"alpha": str(alpha), "beta": str(beta), "beta_secret": str(beta_secret)}
+
+
+class TestTenantUnionEscapeAtShippedDefaults:
+    """The primary artifact for the cross-tenant escape: an attempted escape, and its refusal.
+
+    A ``workspace_write`` child rooted at project ``alpha`` must not be able to
+    read project ``beta``'s file via the historical tenant-union allowlist —
+    neither through the root the LOOP injects, nor through a wider root the
+    MODEL supplies. Both vectors are exercised because the loop's authoritative
+    injection only overrides a model-supplied root once containment is
+    active; a test that only tries the loop-injected vector would miss a
+    regression in that override.
+    """
+
+    def teardown_method(self):
+        reset_config()
+
+    def test_shipped_default_is_enforcement_on(self):
+        # Pin the default itself, so a change here is loud rather than a test
+        # elsewhere silently starting to exercise a different value.
+        assert AppConfig().agent.workspace_enforcement is True
+
+    def test_loop_injected_root_refuses_cross_tenant_read(self, tenants):
+        loop = _build_loop(
+            workspace_mode="workspace_write", cwd=tenants["alpha"], enforcement=None
+        )
+        step = loop._tool_call_to_action_step(
+            {"name": "read_file", "args": {"path": tenants["beta_secret"]}, "id": "1"}
+        )
+        assert step.tool_input["root"] == tenants["alpha"]
+        with active_containment(loop._containment):
+            with pytest.raises(ValueError) as exc:
+                resolve_safe_path(step.tool_input["path"], root=step.tool_input["root"])
+        assert tenants["alpha"] in str(exc.value)
+
+    def test_model_supplied_wider_root_is_ignored_not_honored(self, tenants):
+        # The escape as the issue describes it: the model names the OTHER
+        # tenant's project as `root` outright, trying to widen its own reach.
+        loop = _build_loop(
+            workspace_mode="workspace_write", cwd=tenants["alpha"], enforcement=None
+        )
+        step = loop._tool_call_to_action_step(
+            {
+                "name": "read_file",
+                "args": {"path": tenants["beta_secret"], "root": tenants["beta"]},
+                "id": "1",
+            }
+        )
+        # Authoritative injection overrides the model's requested root outright.
+        assert step.tool_input["root"] == tenants["alpha"]
+        with active_containment(loop._containment):
+            with pytest.raises(ValueError):
+                resolve_safe_path(step.tool_input["path"], root=step.tool_input["root"])
+
+    def test_escape_reproduces_only_when_enforcement_explicitly_disabled(self, tenants):
+        # Documents the hole the flip closed: the identical request the two
+        # tests above refuse SUCCEEDS once an operator opts back into the
+        # historical union by turning enforcement off explicitly.
+        loop = _build_loop(
+            workspace_mode="workspace_write", cwd=tenants["alpha"], enforcement=False
+        )
+        step = loop._tool_call_to_action_step(
+            {"name": "read_file", "args": {"path": tenants["beta_secret"]}, "id": "1"}
+        )
+        with active_containment(loop._containment):
+            got = resolve_safe_path(step.tool_input["path"], root=step.tool_input["root"])
+        assert str(got) == tenants["beta_secret"]
+
+
+# ---------------------------------------------------------------------------
+# read_only write-tier regression — resolve_safe_path's own write= arm was
+# always correct (see TestResolveSafePathContained above); the defect was that
+# every PRODUCTION write call site omitted write=, so permits_write() was
+# unreachable from any real tool and read_only silently behaved as
+# workspace_write. Drives the real tool/function call sites, not the raw guard.
+# ---------------------------------------------------------------------------
+
+
+class TestReadOnlyWriteRefusedAtProductionSites:
+    def teardown_method(self):
+        reset_config()
+
+    def test_file_edit_tool_write_refused_under_read_only(self, workspace):
+        from mewbo_core.contracts.errors import ToolInputError
+        from mewbo_tools.integration.edit_common import resolve_and_validate_path
+
+        ro = WorkspaceContainment(mode="read_only", root=workspace["ws"])
+        with active_containment(ro):
+            with pytest.raises(ToolInputError):
+                resolve_and_validate_path("a.py", workspace["ws"], write=True)
+            # The read/validate arm (get_state) stays permitted.
+            resolve_and_validate_path("a.py", workspace["ws"], write=False)
+
+    def test_search_replace_apply_refused_under_read_only(self, workspace):
+        from mewbo_tools.aider_bridge.edit_blocks import apply_search_replace_blocks
+
+        target = os.path.join(workspace["ws"], "a.py")
+        block = f"{target}\n<<<<<<< SEARCH\nx = 1\n=======\nx = 2\n>>>>>>> REPLACE\n"
+        ro = WorkspaceContainment(mode="read_only", root=workspace["ws"])
+        with active_containment(ro):
+            with pytest.raises(ValueError):
+                apply_search_replace_blocks(block, root=workspace["ws"], write=True)
+        # File on disk is untouched — the write never landed.
+        assert open(target, encoding="utf-8").read() == "x = 1\n"

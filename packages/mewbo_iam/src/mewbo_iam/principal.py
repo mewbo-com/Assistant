@@ -143,8 +143,8 @@ class Principal(ProfileAvatarMixin):
 
     ``scopes`` follows a deliberate three-state law:
 
-    * ``None`` — unrestricted-legacy: an identity minted before scoping existed,
-      or a full-power user key. Scopes impose no narrowing.
+    * ``None`` — unrestricted: a full-power user key, or an identity minted
+      without scopes. Scopes impose no narrowing.
     * ``()`` — explicitly none: a service account whose signed key granted zero
       scopes. It can do nothing scope-gated.
     * a non-empty tuple — the exact set of scope-narrowed capabilities.

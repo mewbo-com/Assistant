@@ -172,7 +172,7 @@ class HeaderView:
     :class:`~rich.console.Group`).  The caller is responsible for any
     background styling; this class returns content only.
 
-    Width dispatch mirrors the legacy ``render_header`` dispatcher:
+    Width dispatch mirrors the ``render_header`` dispatcher:
     - width >= 100 → wide  (all 6 KV rows + horizontal rules)
     - width >= 70  → normal (4–5 KV rows + rules)
     - else         → tiny  (single inline line + 2 detail lines)

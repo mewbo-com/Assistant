@@ -1,4 +1,4 @@
-"""Tests for ``mewbo_core.draft_stream.DraftStreamer``.
+"""Tests for ``mewbo_core.session.draft_stream.DraftStreamer``.
 
 Design
 ------
@@ -21,7 +21,7 @@ from typing import Any
 from unittest.mock import patch
 
 from langchain_core.messages import AIMessageChunk, HumanMessage, SystemMessage
-from mewbo_core.draft_stream import DraftStreamer, _extract_text_delta
+from mewbo_core.session.draft_stream import DraftStreamer, _extract_text_delta
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -69,7 +69,7 @@ def _patch_build_chat_model(chunks: list[AIMessageChunk]) -> tuple[_FakeModel, A
     """Return (fake_model, patch ctx mgr) for build_chat_model in draft_stream."""
     fake = _FakeModel(chunks)
     patcher = patch(
-        "mewbo_core.draft_stream.build_chat_model",
+        "mewbo_core.session.draft_stream.build_chat_model",
         return_value=fake,
     )
     return fake, patcher
@@ -232,7 +232,7 @@ class TestDraftStreamer:
             return fake
 
         streamer = DraftStreamer(model_name="openai/gpt-4o-mini")
-        with patch("mewbo_core.draft_stream.build_chat_model", side_effect=_fake_build):
+        with patch("mewbo_core.session.draft_stream.build_chat_model", side_effect=_fake_build):
             self._run(_collect(streamer.astream("q")))
 
         assert captured_model_name == ["openai/gpt-4o-mini"]
@@ -248,8 +248,13 @@ class TestDraftStreamer:
             return fake
 
         streamer = DraftStreamer(model_name=None)
-        with patch("mewbo_core.draft_stream.build_chat_model", side_effect=_fake_build), \
-             patch("mewbo_core.draft_stream.get_config_value", return_value="openai/default"):
+        with (
+            patch("mewbo_core.session.draft_stream.build_chat_model", side_effect=_fake_build),
+            patch(
+                "mewbo_core.session.draft_stream.get_config_value",
+                return_value="openai/default",
+            ),
+        ):
             self._run(_collect(streamer.astream("q")))
 
         assert len(captured) == 1
@@ -280,7 +285,7 @@ class TestDraftStreamer:
 
         streamer = DraftStreamer()
         with patcher, patch(
-            "mewbo_core.draft_stream.langfuse_invoke_config", return_value=fake_config
+            "mewbo_core.session.draft_stream.langfuse_invoke_config", return_value=fake_config
         ):
             self._run(_collect(streamer.astream("q")))
 
@@ -296,7 +301,7 @@ class TestDraftStreamer:
 
         streamer = DraftStreamer()
         with patcher, patch(
-            "mewbo_core.draft_stream.langfuse_invoke_config", return_value={}
+            "mewbo_core.session.draft_stream.langfuse_invoke_config", return_value={}
         ):
             self._run(_collect(streamer.astream("q")))
 

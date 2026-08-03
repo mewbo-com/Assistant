@@ -43,8 +43,8 @@ import re
 import subprocess
 from collections.abc import Mapping
 
-from mewbo_core.attachments import is_image, parse_to_markdown
 from mewbo_core.common import get_logger
+from mewbo_core.session.attachments import is_image, parse_to_markdown
 
 from mewbo_tools.integration.file_catalog import FileCatalog
 

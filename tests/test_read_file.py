@@ -2,8 +2,38 @@
 
 from __future__ import annotations
 
+import json
+
+import pytest
 from mewbo_core.classes import ActionStep
+from mewbo_core.config import reset_config, set_config_override
+from mewbo_core.tooling.tool_registry import _default_registry
 from mewbo_tools.integration.aider_file_tools import AiderListDirTool, ReadFileTool
+
+
+@pytest.fixture(autouse=True)
+def _unpinned_path_scope():
+    """Pin the path-scope axis OFF: these exercise read/list SEMANTICS.
+
+    What this module is about is line offsets, byte truncation, ``max_entries``
+    and the tool envelopes — against an explicit caller-supplied ``root``, which
+    every case here spells as a bare ``tmp_path``. ``path_scope_to_active_project``
+    ships ON and refuses a ``root`` argument that widens beyond the session's
+    scope, so leaving it at its default would fail all of these for a reason none
+    of them is testing. That axis has its own coverage in
+    ``tests/test_path_guard_scope_parity.py``.
+
+    It also keeps ``test_aider_read_file_blocks_escape`` HONEST. With the root
+    dropped, ``../oops.txt`` is refused because no root was admitted at all —
+    the assertion passes without the traversal check ever running.
+
+    Resets afterwards: ``set_config_override`` is process-global and nothing in
+    ``conftest.py`` clears it, so an unreset override leaks into every later
+    module.
+    """
+    set_config_override({"agent": {"path_scope_to_active_project": False}})
+    yield
+    reset_config()
 
 
 def test_read_file_reads(tmp_path):
@@ -208,3 +238,48 @@ def test_read_file_truncation_message(tmp_path):
     payload = result.content
     assert payload.get("total_lines") == 3000
     assert "truncated" in payload.get("text", "")
+
+
+def test_read_file_tool_spec_declares_a_cap_wide_enough_for_a_realistic_file(tmp_path):
+    """``read_file``'s registered ``max_result_chars`` must not undercut its own line cap.
+
+    Left undeclared, a ``ToolSpec`` falls back to the registry's 2000-CHARACTER
+    class default (`tool_registry.py`'s ``ToolSpec.max_result_chars``) — two
+    orders of magnitude tighter than this tool's own advertised 2000-LINE
+    window, so a multi-hundred-line source file (well under the line cap)
+    would get silently re-truncated by the LOOP after the tool already
+    returned it whole. Pin the relationship directly: build a realistic
+    500-line file, read it through the real tool, serialize the payload the
+    same way ``ToolUseLoop`` does (``json.dumps`` of the dict content), and
+    assert the serialized size fits inside the REGISTERED spec's declared cap
+    — not a hardcoded number — so a regression back to the 2000-char default
+    fails this test rather than silently reappearing in the loop.
+    """
+    target = tmp_path / "module.py"
+    # ~40 chars/line before line-numbering — representative of real source,
+    # not a pathological one-word-per-line fixture.
+    target.write_text(
+        "\n".join(f"def handler_{i}(request, response):  # noqa: PLR0913" for i in range(500)),
+        encoding="utf-8",
+    )
+
+    tool = ReadFileTool()
+    step = ActionStep(
+        tool_id="read_file",
+        operation="get",
+        tool_input={"path": "module.py", "root": str(tmp_path)},
+    )
+    result = tool.get_state(step)
+    payload = result.content
+    assert payload.get("total_lines") == 500
+    assert "truncated" not in payload.get("text", "")
+
+    serialized = json.dumps(payload, ensure_ascii=False, default=str)
+
+    spec = _default_registry().get_spec("read_file")
+    assert spec is not None
+    assert spec.max_result_chars > 0, "read_file must declare a nonzero cap"
+    assert len(serialized) <= spec.max_result_chars, (
+        "the registered max_result_chars is tighter than a realistic file's "
+        "serialized payload — the loop would re-truncate a whole read"
+    )

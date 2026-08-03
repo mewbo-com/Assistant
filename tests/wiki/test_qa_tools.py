@@ -257,6 +257,75 @@ def test_emit_answer_requires_trailing_sources_block(qa_setup):
 
 
 # ---------------------------------------------------------------------------
+# Mermaid gate — refuse the emit, never terminate, nothing persisted
+# ---------------------------------------------------------------------------
+
+
+def test_emit_answer_refuses_known_bad_mermaid_without_terminating(qa_setup):
+    """A fenced diagram matching a real measured failure mode is refused.
+
+    Reuses ``test_mermaid_gate.py``'s own corpus (the reserved-keyword
+    'graph' node id) so the two suites can't silently drift on what
+    "known-bad" means. The run stays alive — ``should_terminate_run()`` is
+    still False and the store gets NO new events — so the model can repair
+    and re-send, exactly like the block-validation errors above.
+    """
+    from wiki.test_mermaid_gate import KNOWN_BAD  # noqa: PLC0415 (sibling test helper)
+
+    store, sid = qa_setup
+    bad_diagram = KNOWN_BAD[3][2]  # "lowercase 'graph' as a flowchart node id"
+    tool = WikiEmitAnswerTool(session_id=sid)
+    step = MagicMock(tool_input={"blocks": [
+        {"kind": "p", "text": f"Here is the module layout:\n```mermaid\n{bad_diagram}\n```"},
+        {"kind": "sources", "items": ["src/main.py"]},
+    ]})
+    with patch.object(emit_answer_mod, "_resolve_runtime", return_value=_runtime(store)):
+        result = asyncio.run(tool.handle(step))
+    body = str(result.content)
+    assert "validation" in body
+    assert "Mermaid" in body
+    assert "graph" in body
+    assert store.load_qa_events("a1") == []
+    assert store.get_qa("a1").status == "running"
+    assert tool.should_terminate_run() is False
+
+
+def test_emit_answer_accepts_known_good_mermaid(qa_setup):
+    """A fenced diagram the real parser accepts is unaffected by the gate.
+
+    Reuses ``test_mermaid_gate.py``'s own known-good corpus for the same
+    drift-proofing reason as the refusal test above.
+    """
+    from wiki.test_mermaid_gate import KNOWN_GOOD  # noqa: PLC0415 (sibling test helper)
+
+    store, sid = qa_setup
+    good_diagram = KNOWN_GOOD[0][1]
+    tool = WikiEmitAnswerTool(session_id=sid)
+    step = MagicMock(tool_input={"blocks": [
+        {"kind": "p", "text": f"Here is the module layout:\n```mermaid\n{good_diagram}\n```"},
+        {"kind": "sources", "items": ["src/main.py"]},
+    ]})
+    with patch.object(emit_answer_mod, "_resolve_runtime", return_value=_runtime(store)):
+        result = asyncio.run(tool.handle(step))
+    assert "ok" in str(result.content)
+    assert store.get_qa("a1").status == "complete"
+
+
+def test_emit_answer_unaffected_when_no_mermaid_present(qa_setup):
+    """An ordinary answer with no fence at all is untouched by the gate."""
+    store, sid = qa_setup
+    tool = WikiEmitAnswerTool(session_id=sid)
+    step = MagicMock(tool_input={"blocks": [
+        {"kind": "p", "text": "No diagram needed for this narrow lookup."},
+        {"kind": "sources", "items": ["src/main.py"]},
+    ]})
+    with patch.object(emit_answer_mod, "_resolve_runtime", return_value=_runtime(store)):
+        result = asyncio.run(tool.handle(step))
+    assert "ok" in str(result.content)
+    assert store.get_qa("a1").status == "complete"
+
+
+# ---------------------------------------------------------------------------
 # Terminal status on the snapshot — the MCP poll's done-signal
 # ---------------------------------------------------------------------------
 
@@ -302,8 +371,8 @@ def test_terminal_call_sets_complete_on_snapshot(qa_setup):
 def test_emit_answer_terminal_reason_is_completed():
     """``WikiEmitAnswerTool`` inherits ``terminal_reason() == "completed"``.
 
-    Regression guard: a tool overriding ``should_terminate_run`` but
-    declaring no ``terminal_reason`` makes ``tool_use_loop`` raise AttributeError
+    A tool overriding ``should_terminate_run`` but declaring no
+    ``terminal_reason`` makes ``tool_use_loop`` raise AttributeError
     when it selects the terminating tool. The reason lives on the shared
     ``WikiSessionTool`` base — this test fails if that base method is removed,
     because the base IS the body under test (the tool defines no own override).
@@ -333,3 +402,48 @@ def test_emit_answer_terminate_then_reason_matches_loop_selector(qa_setup):
         asyncio.run(tool.handle(step))
     assert tool.should_terminate_run() is True
     assert tool.terminal_reason() == "completed"
+
+
+# ---------------------------------------------------------------------------
+# Required-terminal declaration — the completion seam's gate contract
+# ---------------------------------------------------------------------------
+
+
+def test_emit_answer_declares_required_terminal():
+    """``WikiEmitAnswerTool`` opts into the completion seam's required-terminal gate."""
+    tool = WikiEmitAnswerTool(session_id="sess-qa-1")
+    assert tool.required_terminal is True
+
+
+def test_emit_answer_terminal_satisfied_tracks_should_terminate_run(qa_setup):
+    """``terminal_satisfied()`` reads the SAME success flag as ``should_terminate_run``.
+
+    Before any call neither is satisfied; the one atomic accept-state call
+    flips BOTH together — they must never disagree for the same call, or the
+    completion-seam gate could nudge a run that already delivered its answer.
+    """
+    store, sid = qa_setup
+    tool = WikiEmitAnswerTool(session_id=sid)
+    assert tool.terminal_satisfied() is False  # before any call
+
+    step = MagicMock(tool_input={"blocks": [
+        {"kind": "p", "text": "Hi."},
+        {"kind": "sources", "items": ["src/main.py"]},
+    ]})
+    with patch.object(emit_answer_mod, "_resolve_runtime", return_value=_runtime(store)):
+        asyncio.run(tool.handle(step))
+    assert tool.terminal_satisfied() is True
+    assert tool.terminal_satisfied() == tool.should_terminate_run()
+
+
+def test_emit_answer_terminal_satisfied_stays_false_on_rejected_call(qa_setup):
+    """A rejected call (validation error) never flips ``terminal_satisfied``."""
+    store, sid = qa_setup
+    tool = WikiEmitAnswerTool(session_id=sid)
+    step = MagicMock(tool_input={"blocks": [
+        {"kind": "not_a_real_kind", "text": "x"},
+        {"kind": "sources", "items": ["src/main.py"]},
+    ]})
+    with patch.object(emit_answer_mod, "_resolve_runtime", return_value=_runtime(store)):
+        asyncio.run(tool.handle(step))
+    assert tool.terminal_satisfied() is False

@@ -41,6 +41,10 @@ file.tools.aider-shell:
   purpose: Tool guidance — Aider shell.
   template_file: tools/aider-shell.txt
 
+file.tools.shell-session:
+  purpose: Tool guidance — background shell sessions (read/write/kill/list).
+  template_file: tools/shell-session.txt
+
 file.tools.file-edit:
   purpose: Tool guidance — file edit.
   template_file: tools/file-edit.txt

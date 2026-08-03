@@ -9,18 +9,26 @@ patched, so nothing here sleeps or depends on wall time.
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
-from mewbo_core.agent_context import AgentContext
+from mewbo_core.agents.agent_context import AgentContext
+from mewbo_core.agents.hypervisor import AgentHandle, AgentHypervisor
 from mewbo_core.common import MockSpeaker
 from mewbo_core.hooks import HookManager
-from mewbo_core.hypervisor import AgentHandle, AgentHypervisor
-from mewbo_core.llm_resilience import DoomLoopGuard, LlmResilienceExhausted, PollClassRule
+from mewbo_core.llm.llm_resilience import (
+    DoomLoopGuard,
+    LlmResilienceExhausted,
+    PollClassRule,
+    RetryStrategy,
+)
+from mewbo_core.loop.tool_use_loop import ToolUseLoop, _SessionToolError
 from mewbo_core.permissions import PermissionDecision, PermissionPolicy
-from mewbo_core.session_tools import DEFAULT_SESSION_TOOL_MAX_RESULT_CHARS
-from mewbo_core.tool_registry import ToolRegistry, ToolSpec
-from mewbo_core.tool_use_loop import ToolUseLoop, _SessionToolError
+from mewbo_core.tooling.session_tools import DEFAULT_SESSION_TOOL_MAX_RESULT_CHARS
+from mewbo_core.tooling.tool_registry import ToolRegistry, ToolSpec
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -123,7 +131,7 @@ def _run_loop(loop: ToolUseLoop, responses: list[AIMessage], specs: list[ToolSpe
     # buffered path; a MagicMock attribute would be iterated as a coroutine.
     del bound.astream
 
-    with patch("mewbo_core.tool_use_loop.build_chat_model") as build:
+    with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as build:
         build.return_value = MagicMock()
         build.return_value.bind_tools.return_value = bound
         tq, state = asyncio.run(loop.run("do the task", tool_specs=specs))
@@ -143,7 +151,7 @@ class TestActiveModelIsAuthoritative:
     """After a sticky escalation the loop must stop reading the frozen model."""
 
     def _loop(self, **kwargs) -> ToolUseLoop:
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as build:
             build.return_value = MagicMock()
             build.return_value.bind_tools.return_value = MagicMock()
             return ToolUseLoop(
@@ -214,7 +222,7 @@ class TestActiveModelIsAuthoritative:
             asked.append(model)
             return 100_000
 
-        with patch("mewbo_core.token_budget.get_model_max_input_tokens", _max_input):
+        with patch("mewbo_core.session.token_budget.get_model_max_input_tokens", _max_input):
             loop._should_compact_messages([])
         assert asked == ["small-window-model"]
 
@@ -230,7 +238,7 @@ class TestActiveModelIsAuthoritative:
         loop._deferred_ids = set()
         loop._last_active_ids = set()
 
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as build:
             build.return_value = MagicMock()
             build.return_value.bind_tools.return_value = MagicMock()
             loop._apply_model_escalation(
@@ -248,6 +256,225 @@ class TestActiveModelIsAuthoritative:
         # Replacement, never mutation — the original context object is frozen
         # and every other field must survive the swap intact.
         assert loop._spawn_agent_tool._agent_context.agent_id == loop._ctx.agent_id
+
+
+# ---------------------------------------------------------------------------
+# What an escalated rung actually binds
+# ---------------------------------------------------------------------------
+
+
+def _schema_names(schemas) -> set[str]:
+    """Tool names out of a ``bind_tools`` argument, across both schema shapes.
+
+    Registry specs and the spawn family arrive OpenAI-wrapped
+    (``{"type": "function", "function": {"name": ...}}``); a SessionTool
+    contributes its flat ``{"name": ...}`` schema straight from ``.schema``.
+    """
+    names: set[str] = set()
+    for schema in schemas or []:
+        fn = schema.get("function") if isinstance(schema, dict) else None
+        name = (fn or {}).get("name") if isinstance(fn, dict) else None
+        names.add(str(name or (schema.get("name") if isinstance(schema, dict) else "")))
+    return names
+
+
+class TestEveryRungBindsTheWholeToolSurface:
+    """A fallback rung must bind what the primary bound — not the registry alone.
+
+    ``_bind_model`` is the only complete binder: it appends the spawn family,
+    ``activate_skill`` and the per-agent SessionTools to whatever the caller
+    passed. It appended them to its own LOCAL parameter, so the caller's
+    registry-only list is what reached the resilience strategy — and the
+    escalated rung rebuilt from THAT. The bound surface therefore collapsed to
+    the registry at exactly the model-substitution generation and healed itself
+    the next step, which is what kept it invisible.
+
+    Both directions are pinned here: what the escalated rung binds, and what the
+    initial bind carries, so neither can regress without the other noticing.
+    """
+
+    def _loop(self, *, fallback_models=()) -> tuple[ToolUseLoop, _FakeSessionTool]:
+        session_tool = _FakeSessionTool("read_repo", ["ok"])
+        skills = MagicMock()
+        skills.list_auto_invocable.return_value = ["some-skill"]
+        ctx = AgentContext.root(
+            model_name="primary-model",
+            max_depth=5,
+            fallback_models=fallback_models,
+            registry=AgentHypervisor(max_concurrent=100),
+        )
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as build:
+            build.return_value = MagicMock()
+            build.return_value.bind_tools.return_value = MagicMock()
+            loop = ToolUseLoop(
+                agent_context=ctx,
+                tool_registry=_registry(_spec("read_file")),
+                permission_policy=_policy(),
+                hook_manager=_hooks(),
+                session_id="s1",
+                skill_registry=skills,
+                extra_session_tools=[session_tool],
+            )
+        return loop, session_tool
+
+    @staticmethod
+    def _bind_capture(bound_per_model: dict[str, Any]):
+        """A ``build_chat_model`` stub recording each model's bind_tools call."""
+
+        def _build(*, model_name: str, **_kwargs):
+            unbound = MagicMock()
+
+            def _bind(schemas, **_kw):
+                bound_per_model[model_name] = list(schemas)
+                answer = MagicMock()
+                answer.ainvoke = AsyncMock(return_value=AIMessage(content="ok"))
+                del answer.astream
+                return answer
+
+            unbound.bind_tools.side_effect = _bind
+            return unbound
+
+        return _build
+
+    def test_the_escalated_rung_keeps_the_spawn_family_and_session_tools(self):
+        loop, session_tool = self._loop(fallback_models=("rescue-model",))
+        # Exactly what the caller hands the strategy: registry specs only.
+        registry_only = loop._build_tool_schemas_for_mode([_spec("read_file")], "act")
+        assert _schema_names(registry_only) == {"read_file"}
+
+        primary = MagicMock()
+        primary.ainvoke = AsyncMock(side_effect=TimeoutError("primary wedged"))
+        del primary.astream
+
+        bound_per_model: dict[str, Any] = {}
+        strategy = RetryStrategy(
+            timeout=5.0,
+            primary_retries=1,  # one attempt, then straight down the ladder
+            fallback_retries=1,
+            turn_deadline=0,  # disabled — nothing here depends on wall time
+            backoff_base=0.0,
+            backoff_cap=0.0,
+            rng=lambda: 0.0,
+        )
+
+        with patch(
+            "mewbo_core.loop.tool_use_loop.build_chat_model",
+            side_effect=self._bind_capture(bound_per_model),
+        ):
+            _response, final_model = asyncio.run(
+                loop._invoke_with_resilience(
+                    primary_model=primary,
+                    messages=[SystemMessage(content="sys")],
+                    tool_schemas=registry_only,
+                    turns=0,
+                    invoke_config=None,
+                    strategy=strategy,
+                )
+            )
+
+        assert final_model == "rescue-model", "the run must have escalated"
+        escalated = _schema_names(bound_per_model["rescue-model"])
+        # The registry leg was never the part at risk.
+        assert "read_file" in escalated
+        # Delegation: losing these strands a mid-run fan-out with no way to
+        # spawn or monitor the children the plan already depends on.
+        assert {"spawn_agent", "spawn_agents"} <= escalated
+        assert {"check_agents", "steer_agent"} <= escalated
+        # The per-agent SessionTools — the agent's actual subject-matter surface.
+        assert session_tool.tool_id in escalated
+        assert "activate_skill" in escalated
+
+    def test_the_initial_bind_carries_all_four_populations(self):
+        # The same invariant from the other side, so a regression cannot hide by
+        # breaking the primary bind instead of the fallback one.
+        loop, session_tool = self._loop()
+        bound_per_model: dict[str, Any] = {}
+        registry_only = loop._build_tool_schemas_for_mode([_spec("read_file")], "act")
+
+        with patch(
+            "mewbo_core.loop.tool_use_loop.build_chat_model",
+            side_effect=self._bind_capture(bound_per_model),
+        ):
+            loop._bind_model(registry_only)
+
+        initial = _schema_names(bound_per_model["primary-model"])
+        assert "read_file" in initial
+        assert {"spawn_agent", "spawn_agents", "check_agents", "steer_agent"} <= initial
+        assert session_tool.tool_id in initial
+        assert "activate_skill" in initial
+
+    def test_llm_call_start_records_the_bound_tool_count(self):
+        # Nothing in the transcript recorded the bound set, so a collapsed
+        # surface was only visible by reading the model's behaviour back. The
+        # count makes it one query.
+        events: list[dict] = []
+        session_tool = _FakeSessionTool("read_repo", ["ok"])
+        skills = MagicMock()
+        skills.list_auto_invocable.return_value = ["some-skill"]
+        # The full ``run`` path renders the catalog into the system prompt.
+        skills.render_catalog.return_value = ""
+        ctx = AgentContext.root(
+            model_name="primary-model",
+            max_depth=5,
+            registry=AgentHypervisor(max_concurrent=100),
+            event_logger=events.append,
+        )
+        captured: dict[str, Any] = {}
+        answer = MagicMock()
+        answer.ainvoke = AsyncMock(return_value=AIMessage(content="done"))
+        del answer.astream
+
+        def _build(*, model_name: str, **_kwargs):
+            unbound = MagicMock()
+
+            def _bind(schemas, **_kw):
+                captured[model_name] = list(schemas)
+                return answer
+
+            unbound.bind_tools.side_effect = _bind
+            return unbound
+
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model", side_effect=_build):
+            loop = ToolUseLoop(
+                agent_context=ctx,
+                tool_registry=_registry(_spec("read_file")),
+                permission_policy=_policy(),
+                hook_manager=_hooks(),
+                session_id="s1",
+                skill_registry=skills,
+                extra_session_tools=[session_tool],
+            )
+            asyncio.run(loop.run("do the task", tool_specs=[_spec("read_file")]))
+
+        starts = [e for e in events if e.get("type") == "llm_call_start"]
+        assert starts, "the turn must have emitted a heartbeat"
+        # Tied to what ``bind_tools`` actually received, not to a constant a new
+        # built-in session tool would silently invalidate.
+        assert starts[0]["payload"]["bound_tools"] == len(captured["primary-model"])
+        assert _schema_names(captured["primary-model"]) >= {
+            "read_file",
+            "spawn_agent",
+            "spawn_agents",
+            "check_agents",
+            "steer_agent",
+            "activate_skill",
+            session_tool.tool_id,
+        }
+
+    def test_the_binder_does_not_mutate_the_callers_schema_list(self):
+        # The append must not leak the other way either: a binder that grew the
+        # caller's list in place would re-append the extras on every re-bind.
+        loop, _session_tool = self._loop()
+        registry_only = loop._build_tool_schemas_for_mode([_spec("read_file")], "act")
+        before = len(registry_only)
+
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as build:
+            build.return_value = MagicMock()
+            build.return_value.bind_tools.return_value = MagicMock()
+            loop._bind_model(registry_only)
+            loop._bind_model(registry_only)
+
+        assert len(registry_only) == before
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +497,7 @@ class TestSessionToolResultSizing:
         )
 
     def _loop(self, session_tool) -> ToolUseLoop:
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as build:
             build.return_value = MagicMock()
             build.return_value.bind_tools.return_value = MagicMock()
             return ToolUseLoop(
@@ -283,10 +510,10 @@ class TestSessionToolResultSizing:
             )
 
     def test_realistic_repo_manifest_reaches_the_model_intact(self):
-        # The regression this closes: a ~1,900-file manifest arrived as 22
-        # paths (1.14%) because a session tool has no registry spec, so the
-        # 2000-char shell/MCP default applied to it by accident. The very next
-        # playbook step required choosing files out of that manifest.
+        # The failure this pins: a session tool has no registry spec, so the
+        # 2000-char shell/MCP default can apply to it by accident — which cuts
+        # a ~1,900-file manifest down to 22 paths (1.14%). The very next
+        # playbook step requires choosing files out of that manifest.
         manifest = self._manifest()
         assert len(manifest) > 90_000, "fixture must exercise a realistic repo size"
         assert len(manifest) < DEFAULT_SESSION_TOOL_MAX_RESULT_CHARS, (
@@ -322,6 +549,92 @@ class TestSessionToolResultSizing:
         assert "[truncated]" in delivered
         assert len(delivered) < 200
 
+    def test_a_truncated_dict_result_stays_parseable_json(self):
+        # The failure this pins: ``_windowed`` fits the FIELD, then a
+        # string-level safety net cut the SERIALIZED envelope, so the model
+        # received an unterminated value inside an unclosed object — and lost
+        # ``total_lines``, the one field that would let it ask for the rest.
+        body = "".join(f"line {i}\n" for i in range(600))
+        tool = _FakeSessionTool(
+            "reader",
+            [{"kind": "file", "path": "/w/app.py", "text": body, "total_lines": 600}],
+            max_result_chars=500,
+        )
+        loop = self._loop(tool)
+
+        _tq, _state, seen = _run_loop(
+            loop, [_tool_call("reader", {}), AIMessage(content="done")], [_spec()]
+        )
+
+        delivered = _tool_messages(seen[-1])[0]
+        parsed = json.loads(delivered)  # the whole contract: it must parse
+        assert parsed["total_lines"] == 600, "trailing metadata must survive the cut"
+        assert parsed["path"] == "/w/app.py"
+        assert "characters omitted" in parsed["text"], "the cut must still be announced"
+        assert len(delivered) <= 500
+
+    def test_a_dict_whose_bulk_is_unwindowable_is_still_parseable(self):
+        # No key here is in the windowable field list, so the payload cannot be
+        # fitted field-wise at all. It must still arrive as valid JSON rather
+        # than as a cut string — losing the structure is acceptable, handing the
+        # model something it cannot parse is not.
+        tool = _FakeSessionTool(
+            "lister",
+            [{"kind": "listing", "files": [f"pkg/mod_{i}.py" for i in range(500)]}],
+            max_result_chars=500,
+        )
+        loop = self._loop(tool)
+
+        _tq, _state, seen = _run_loop(
+            loop, [_tool_call("lister", {}), AIMessage(content="done")], [_spec()]
+        )
+
+        delivered = _tool_messages(seen[-1])[0]
+        parsed = json.loads(delivered)
+        assert parsed["truncated"] is True
+
+    def test_a_truncated_read_is_not_cached_as_authoritative(self, tmp_path):
+        # The dedup stub tells the model to reuse the earlier result. Caching a
+        # truncated read therefore points it at an incomplete payload AND
+        # refuses the re-read that would have completed it.
+        target = tmp_path / "big.py"
+        target.write_text("".join(f"x{i} = 1\n" for i in range(600)), encoding="utf-8")
+        tool = _FakeSessionTool(
+            "read_file",
+            [{"kind": "file", "path": str(target), "text": target.read_text(), "total_lines": 600}],
+            max_result_chars=500,
+        )
+        loop = self._loop(tool)
+
+        _run_loop(
+            loop,
+            [_tool_call("read_file", {"path": str(target)}), AIMessage(content="done")],
+            [_spec()],
+        )
+
+        assert loop._file_read_cache == {}
+
+    def test_a_complete_read_is_still_cached(self, tmp_path):
+        # The companion the negative above needs: an empty cache is also what a
+        # never-populated cache looks like, so the dedup path must be shown to
+        # work for the read that DID deliver the file.
+        target = tmp_path / "small.py"
+        target.write_text("x = 1\n", encoding="utf-8")
+        tool = _FakeSessionTool(
+            "read_file",
+            [{"kind": "file", "path": str(target), "text": target.read_text(), "total_lines": 1}],
+            max_result_chars=500,
+        )
+        loop = self._loop(tool)
+
+        _run_loop(
+            loop,
+            [_tool_call("read_file", {"path": str(target)}), AIMessage(content="done")],
+            [_spec()],
+        )
+
+        assert list(loop._file_read_cache) == [os.path.normpath(str(target))]
+
     def test_undeclared_session_tool_gets_the_class_default(self):
         loop = self._loop(_FakeSessionTool("plain", ["ok"]))
         assert loop._result_char_cap("plain") == DEFAULT_SESSION_TOOL_MAX_RESULT_CHARS
@@ -343,7 +656,7 @@ class TestToolResultTruth:
     """Every ``_safe_execute`` exit leaves a record, and it records what was read."""
 
     def _loop_with_events(self, events: list, session_tool=None) -> ToolUseLoop:
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as build:
             build.return_value = MagicMock()
             build.return_value.bind_tools.return_value = MagicMock()
             return ToolUseLoop(
@@ -538,7 +851,7 @@ class TestPollClassTools:
         """A loop holding a session tool that declares itself poll-class."""
         tool = _FakeSessionTool("agentic_search", ["processing"])
         tool.poll_when_args = ("run_id",)
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as build:
             build.return_value = MagicMock()
             build.return_value.bind_tools.return_value = MagicMock()
             loop = ToolUseLoop(
@@ -555,7 +868,7 @@ class TestPollClassTools:
         # END-TO-END through ``loop.run``: proves the declared exemption is
         # actually REACHED by the guard the loop constructs, not merely correct
         # in isolation. Identical repeated polls with an identical "processing"
-        # answer is the exact 100%-reproducible shape that used to halt.
+        # answer is the shape a naive repetition guard halts on, every time.
         loop, tool = self._search_loop()
         poll = _tool_call("agentic_search", {"run_id": "r1"})
         _tq, state, _seen = _run_loop(
@@ -581,7 +894,7 @@ class TestPollClassTools:
         polling_tool.poll_when_args = ("run_id",)
         waiter = _FakeSessionTool("await_thing", ["done"])
         waiter.poll_class = True
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as build:
             build.return_value = MagicMock()
             build.return_value.bind_tools.return_value = MagicMock()
             loop = ToolUseLoop(
@@ -646,7 +959,7 @@ class TestErrorEnvelopePermanence:
         # failure nudge never fires — an enveloped error renders as "ok".
         envelope = str({"error": {"code": "validation", "message": "bad args"}})
         tool = _FakeSessionTool("enveloping", [envelope])
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as build:
             build.return_value = MagicMock()
             build.return_value.bind_tools.return_value = MagicMock()
             loop = ToolUseLoop(
@@ -671,7 +984,7 @@ class TestErrorEnvelopePermanence:
             {"error": {"code": "forbidden", "message": "denied", "permanence": "permanent"}}
         )
         tool = _FakeSessionTool("gated", [envelope])
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as build:
             build.return_value = MagicMock()
             build.return_value.bind_tools.return_value = MagicMock()
             loop = ToolUseLoop(
@@ -701,7 +1014,7 @@ class TestLoopInjectedToolCeiling:
         if with_skills:
             skills = MagicMock()
             skills.list_auto_invocable.return_value = [MagicMock()]
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as build:
             build.return_value = MagicMock()
             build.return_value.bind_tools.return_value = MagicMock()
             return ToolUseLoop(
@@ -811,7 +1124,7 @@ class TestBlockedCodeOnRunState:
     """A clean-looking last turn must not launder an unrecovered blocker."""
 
     def _loop(self, tool) -> ToolUseLoop:
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as build:
             build.return_value = MagicMock()
             build.return_value.bind_tools.return_value = MagicMock()
             return ToolUseLoop(
@@ -859,7 +1172,7 @@ class TestBlockedCodeOnRunState:
         envelope = str({"error": {"code": "forbidden", "message": "denied"}})
         blocked = _FakeSessionTool("clone_repo", [envelope])
         other = _FakeSessionTool("take_notes", ["noted"])
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as build:
             build.return_value = MagicMock()
             build.return_value.bind_tools.return_value = MagicMock()
             loop = ToolUseLoop(
@@ -915,7 +1228,7 @@ class TestLlmCallLiveness:
     """A wedged model call must be visible while it is wedged."""
 
     def _loop(self) -> ToolUseLoop:
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as build:
             build.return_value = MagicMock()
             build.return_value.bind_tools.return_value = MagicMock()
             return ToolUseLoop(
@@ -960,7 +1273,7 @@ class TestPromiseGate:
 
     def _drive_root(self, hv, ctx, ainvoke):
         events: list = []
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as build:
             build.return_value = MagicMock()
             bound = MagicMock()
             bound.ainvoke = AsyncMock(side_effect=ainvoke)
@@ -1029,7 +1342,7 @@ class TestPromiseGate:
         assert calls["n"] == 1  # accepted on the first terminal, never refused
 
     def test_the_gate_is_bounded_for_a_model_that_will_not_wait(self):
-        from mewbo_core.tool_use_loop import _PROMISE_GATE_MAX_NUDGES
+        from mewbo_core.loop.tool_use_loop import _PROMISE_GATE_MAX_NUDGES
 
         hv = AgentHypervisor(max_concurrent=100)
         ctx = AgentContext.root(model_name="primary-model", max_depth=5, registry=hv)
@@ -1057,11 +1370,19 @@ class TestForcedChildSummary:
         hv = AgentHypervisor(max_concurrent=100)
         root = AgentContext.root(model_name="primary-model", max_depth=5, registry=hv)
         ctx = root.child() if depth_child else root
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as build:
             unbound = MagicMock()
             unbound.ainvoke = AsyncMock(return_value=AIMessage(content=summary_text))
             build.return_value = unbound
             bound = MagicMock()
+            # Deliberately NO usage: the strategy's result contract convicts an
+            # empty response only when reported usage proves zero output tokens,
+            # and never on absent usage. So the empty terminal this class covers
+            # — a child that did its work through tool writes — reaches the
+            # loop's forced-summary path exactly as before. An earlier version of
+            # this stub declared a ``finish_reason`` instead, which the adapter
+            # never sends on either path; it made the suite green over a rule the
+            # engine could not actually apply.
             bound.ainvoke = AsyncMock(return_value=AIMessage(content=main_text))
             del bound.astream
             unbound.bind_tools.return_value = bound

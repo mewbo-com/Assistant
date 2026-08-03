@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from flask import request
 from flask_restx import Namespace, Resource, fields
@@ -20,12 +20,12 @@ from mewbo_api.ide import (
 from mewbo_api.responses import ApiResponseKit
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from mewbo_core.session_runtime import SessionRuntime
+    from mewbo_core.loop.session_runtime import SessionRuntime
 
 ide_ns = Namespace("ide", description="Per-session Web IDE (code-server) management")
 
 # One DRY home for this namespace's error examples (every IDE route returns the
-# legacy ``{"message": ...}`` shape; the extend 409 returns a distinct
+# ``{"message": ...}`` shape; the extend 409 returns a distinct
 # ``max_lifetime`` body documented inline on that route). Built at module level
 # so the import-time decorators can see it; ``Ide`` prefix namespaces the
 # generated model names on the shared Api registry.
@@ -59,8 +59,6 @@ _ide_instance_model = ide_ns.model(
         "extensions": fields.Integer(
             example=0, description="How many times the deadline has been pushed."
         ),
-        "cpus": fields.Float(example=2.0),
-        "memory": fields.String(example="2g"),
         "password": fields.String(
             example="hunter2-9e2d47",
             description="code-server access password — returned on POST only.",
@@ -139,38 +137,201 @@ def _precheck(session_id: str) -> AuthResult:
     return None
 
 
-def _resolve_session_project(session_id: str) -> tuple[str, str] | None:
-    """Return ``(project_name, project_path)`` from the latest session context event."""
-    if _runtime is None:
-        return None
-    try:
-        events = _runtime.session_store.load_transcript(session_id)
-    except Exception as exc:  # pragma: no cover - storage-level failure
-        logger.warning("ide: failed to load transcript for {}: {}", session_id, exc)
-        return None
-    if not events:
-        return None
+class IdeWorkspaceUnavailable(Exception):
+    """A tier RECOGNISED the session and still cannot mount it.
 
-    project_name = ""
-    for event in reversed(events):
-        if event.get("type") != "context":
-            continue
+    Distinct from "no tier matched", which is the generic 409: this carries the
+    specific sentence for a session the server knows is IDE-eligible but whose
+    directory is missing or could not be produced. Without it the mount falls
+    through to the broker's generic ``workspace_denied`` 403, which is
+    undiagnosable from the console.
+    """
+
+
+class IdeWorkspace(BaseModel):
+    """The display name + on-disk directory an IDE container mounts.
+
+    Validated rather than a bare tuple because both fields are persisted on
+    ``IdeInstance`` and echoed to the console capsule, and because an empty
+    ``project_path`` would reach the container backend as a bind source that
+    docker materializes as an empty directory. ``extra="forbid"`` keeps a tier
+    from smuggling a field the mount path does not read.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    project_name: str = Field(min_length=1)
+    project_path: str = Field(min_length=1)
+
+
+class IdeMountTier(Protocol):
+    """One way a session earns a directory — structural, so a tier is any class.
+
+    A tier answers ``None`` when the session is simply not its kind, an
+    :class:`IdeWorkspace` when it binds, and raises
+    :class:`IdeWorkspaceUnavailable` when it recognises the session and still
+    cannot produce a directory.
+    """
+
+    def resolve(
+        self, session_id: str, runtime: SessionRuntime
+    ) -> IdeWorkspace | None:  # pragma: no cover - Protocol body
+        """Return this tier's mount for *session_id*, or ``None``."""
+        ...
+
+
+class ConfigProjectMount:
+    """Tier 1 — the session's context ``project`` names a configured project.
+
+    ``O(1)`` on the Mongo driver, ``O(one session)`` on the base store —
+    ``latest_event_of_type`` is bounded by the TYPE, so this reads the one event
+    it needs instead of a whole transcript to pull one string out of its tail.
+
+    Two narrowings that look optional and are not. A tail bounded by COUNT would
+    be cheaper still and wrong: the newest ``context`` event sits arbitrarily
+    far back after a long run, and missing it turns a launchable session into a
+    ``409``. And ``payload_key`` is what keeps this equivalent to the backwards
+    transcript scan it replaced — context events merge key-by-key, so the newest
+    one need not be the newest one MENTIONING a project (measured on the
+    deployed store: 15 of 204 such sessions).
+    """
+
+    def resolve(self, session_id: str, runtime: SessionRuntime) -> IdeWorkspace | None:
+        """Return the configured project's mount, or ``None`` to fall through."""
+        event = runtime.session_store.latest_event_of_type(
+            session_id, "context", payload_key="project"
+        )
+        if event is None:
+            return None
         payload = event.get("payload")
-        if isinstance(payload, dict):
-            candidate = payload.get("project")
-            if isinstance(candidate, str) and candidate.strip():
-                project_name = candidate.strip()
-                break
+        candidate = payload.get("project") if isinstance(payload, dict) else None
+        if not isinstance(candidate, str) or not candidate.strip():
+            return None
+        project_name = candidate.strip()
 
-    if not project_name:
+        from mewbo_core.config import get_config
+
+        project = get_config().projects.get(project_name)
+        if project is None or not project.path:
+            return None
+        return IdeWorkspace(project_name=project_name, project_path=project.path)
+
+
+class WikiCheckoutMount:
+    """Tier 2 — a wiki MAINTAINER session mounts its project's surviving checkout.
+
+    The binding is the server-stamped ``wiki:maintain:<slug>`` TAG, read through
+    ``WikiJobCtx.for_maintainer`` — the same resolver the wiki page-write tools
+    use, so a session this tier mounts is exactly a session those tools serve. A
+    context ``slug`` key is deliberately NOT accepted: any caller can write one
+    into a session's context, so trusting it would hand an IDE a checkout of a
+    project the caller was never given a session for.
+
+    The checkout itself comes from ``resolve_qa_clone_dir`` (via
+    ``for_maintainer``), never from re-deriving the clone-root layout here.
+
+    Cost: ``O(1)`` tag read, one project read, and ``O(collection)`` in the slug's
+    job count for the checkout walk.
+    """
+
+    def resolve(self, session_id: str, runtime: SessionRuntime) -> IdeWorkspace | None:
+        """Return the wiki checkout's mount, ``None``, or refuse with a sentence."""
+        try:
+            from mewbo_graph.plugins.wiki._ctx import WikiJobCtx, resolve_runtime
+        except ImportError:  # pragma: no cover - base install without the wiki extra
+            return None
+        wiki_runtime = resolve_runtime()
+        store = getattr(wiki_runtime, "wiki_store", None)
+        if store is None:
+            return None
+        ctx = WikiJobCtx.for_maintainer(session_id, runtime, store)
+        if ctx is None:
+            return None
+        if not ctx.clone_dir.is_dir():
+            raise IdeWorkspaceUnavailable(
+                f"wiki project '{ctx.slug}' has no checkout on disk — "
+                "re-index the project, then open the Web IDE again"
+            )
+        return IdeWorkspace(project_name=ctx.slug, project_path=str(ctx.clone_dir))
+
+
+class AppStagingMount:
+    """Tier 3 — an app's builder/maintainer session mounts that app's staging dir.
+
+    Staging is EPHEMERAL: an app's source lives in its manifest and reaches disk
+    only when something materializes it, so this tier MATERIALIZES on demand
+    through ``AppStagingArea`` — the one implementation ``get_app``'s ``stage``
+    operation also calls. Refusing instead would leave the feature working only
+    in the rare window after a stage and before a restart.
+
+    Cost: ``O(collection)`` in the number of stored apps for the session→app
+    scan, plus ``O(one app)`` for the write (the bundle is capped at submit).
+    """
+
+    def resolve(self, session_id: str, runtime: SessionRuntime) -> IdeWorkspace | None:
+        """Return the staging dir's mount, ``None``, or refuse with a sentence."""
+        from mewbo_api.apps.staging import AppStagingArea, AppStagingError
+        from mewbo_api.apps.store import get_app_store
+
+        area = AppStagingArea(session_id=session_id)
+        app = area.app_for_session(get_app_store())
+        if app is None:
+            return None
+        try:
+            bundle = area.materialize(app)
+        except AppStagingError as exc:
+            raise IdeWorkspaceUnavailable(
+                f"could not stage app '{app.app_id}' for the Web IDE: {exc}"
+            ) from exc
+        return IdeWorkspace(
+            project_name=app.title or app.app_id, project_path=bundle.directory
+        )
+
+
+class IdeWorkspaceResolver:
+    """Decides which directory a session's IDE container mounts.
+
+    An ordered tuple of tiers, each owning its own binding rule and its own
+    refusal — there is no tier discriminator to branch on here, so adding a
+    fourth surface means adding a tier class, never an arm in this method.
+
+    A tier's own failure (a dead store, a missing optional extra) is logged and
+    falls through to the next tier: a wiki outage must not stop a configured
+    project from opening. A deliberate refusal
+    (:class:`IdeWorkspaceUnavailable`) propagates — it is the answer.
+    """
+
+    def __init__(self, tiers: tuple[IdeMountTier, ...] | None = None) -> None:
+        """Bind the tier order; injectable so a test can drive one tier alone."""
+        self.tiers: tuple[IdeMountTier, ...] = tiers or (
+            ConfigProjectMount(),
+            WikiCheckoutMount(),
+            AppStagingMount(),
+        )
+
+    def resolve(self, session_id: str, runtime: SessionRuntime | None) -> IdeWorkspace | None:
+        """Return the first tier's mount, or ``None`` when no tier binds."""
+        if runtime is None:
+            return None
+        for tier in self.tiers:
+            try:
+                workspace = tier.resolve(session_id, runtime)
+            except IdeWorkspaceUnavailable:
+                raise
+            except Exception as exc:  # noqa: BLE001 - one tier must not sink the rest
+                logger.warning(
+                    "ide: {} failed for {}: {}", type(tier).__name__, session_id, exc
+                )
+                continue
+            if workspace is not None:
+                return workspace
         return None
 
-    from mewbo_core.config import get_config
 
-    project = get_config().projects.get(project_name)
-    if project is None or not project.path:
-        return None
-    return project_name, project.path
+# The one resolver the routes consult. A module-level handle is composition-root
+# state, not request state: the routes read it once per POST and a test points it
+# at a single tier by reassignment (the pre-existing pattern in this module).
+_resolver = IdeWorkspaceResolver()
 
 
 def _session_exists(session_id: str) -> bool:
@@ -193,8 +354,11 @@ class IdeResource(Resource):
             "one. Returns `201` on first create and `200` on reconnect; the response "
             "body is the IDE instance and — uniquely on this verb — includes the "
             "`password` so any browser tab can open the IDE. The session must exist "
-            "and carry a project in its context (else `404`/`409`). Idempotent: call "
-            "it again from another tab to reconnect."
+            "and resolve to a directory (else `404`/`409`): a configured project in "
+            "its context, the surviving checkout of the wiki project it maintains, or "
+            "the staging directory of the Mewbo App it maintains — which is "
+            "materialized on demand. Idempotent: call it again from another tab to "
+            "reconnect."
         )
     )
     @ide_ns.response(201, "IDE container created", _ide_instance_model)
@@ -210,12 +374,16 @@ class IdeResource(Resource):
         assert _manager is not None
         if not _session_exists(session_id):
             return {"message": "session not found"}, 404
-        resolved = _resolve_session_project(session_id)
-        if resolved is None:
-            return {"message": "session has no project in context"}, 409
-        project_name, project_path = resolved
         try:
-            instance, created = _manager.ensure(session_id, project_name, project_path)
+            workspace = _resolver.resolve(session_id, _runtime)
+        except IdeWorkspaceUnavailable as exc:
+            return {"message": str(exc)}, 409
+        if workspace is None:
+            return {"message": "session has no project in context"}, 409
+        try:
+            instance, created = _manager.ensure(
+                session_id, workspace.project_name, workspace.project_path
+            )
         except DockerUnavailable as exc:
             logger.warning("ide: docker unavailable: {}", exc)
             return {"message": "docker daemon unreachable"}, 503
@@ -350,4 +518,16 @@ class IdeExtendResource(Resource):
         return instance.to_dict(), 200
 
 
-__all__ = ["ExtendBody", "IdeExtendResource", "IdeResource", "ide_ns", "init_ide"]
+__all__ = [
+    "AppStagingMount",
+    "ConfigProjectMount",
+    "ExtendBody",
+    "IdeExtendResource",
+    "IdeResource",
+    "IdeWorkspace",
+    "IdeWorkspaceResolver",
+    "IdeWorkspaceUnavailable",
+    "WikiCheckoutMount",
+    "ide_ns",
+    "init_ide",
+]

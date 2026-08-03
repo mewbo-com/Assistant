@@ -23,10 +23,10 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from mewbo_core.agent_registry import parse_agent_file
-from mewbo_core.session_tools import SessionToolFactory, SessionToolRegistry
-from mewbo_core.skills import _parse_skill_file, activate_skill
-from mewbo_core.tool_registry import ToolSpec, filter_specs
+from mewbo_core.agents.agent_registry import parse_agent_file
+from mewbo_core.tooling.session_tools import SessionToolFactory, SessionToolRegistry
+from mewbo_core.tooling.skills import _parse_skill_file, activate_skill
+from mewbo_core.tooling.tool_registry import ToolSpec, filter_specs
 
 
 def _spec(tool_id: str, *, always_load: bool = False) -> ToolSpec:

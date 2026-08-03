@@ -263,7 +263,11 @@ def test_query_returns_rows():
     assert payload["documents"][0]["key"] == "k1"
     assert payload["documents"][0]["doc"] == {"subject": "hi"}
     assert payload["documents"][0]["updated_at"] == NOW.isoformat()
-    assert data_store.query_calls == [(APP_ID, "emails", {"subject": "hi"}, 10, None)]
+    # 11, not 10: the tool asks the store for `limit + 1` purely to decide
+    # `more_available` — the same probe `AppsRoutesController.read_data` uses on
+    # the REST path. It returns at most `limit`; only the store call is wider.
+    # A caller's `limit` is still capped at 1000 by the Pydantic validator.
+    assert data_store.query_calls == [(APP_ID, "emails", {"subject": "hi"}, 11, None)]
 
 
 def test_query_passes_sort():
@@ -271,7 +275,8 @@ def test_query_passes_sort():
     tool = _tool(FakeAppStore(_app()), data_store, FakeRunStore())
     _run(tool, {"operation": "query", "app_id": APP_ID, "collection": "emails",
                 "sort": "-received_at"})
-    assert data_store.query_calls == [(APP_ID, "emails", None, 100, "-received_at")]
+    # 101 = the default limit of 100 plus the `more_available` probe row.
+    assert data_store.query_calls == [(APP_ID, "emails", None, 101, "-received_at")]
 
 
 def test_delete_reports_existence():

@@ -18,7 +18,7 @@
  *   pages/jobs/credentials, so re-pointing it is a delete + recreate, not a PATCH.
  * - **No inline token field, ever.** Credential coverage is a read-only line
  *   sourced from the server's resolved `credential` (the ONE credential chain), with a
- *   deep link to Settings → Security & Access to change it.
+ *   deep link to Settings → Repositories to change it.
  * - **Errors land inline, never as a toast**: a 403 (developer-mode gate) pins to
  *   the graph-only switch, field-level 400s pin to their fields, anything else
  *   (e.g. a 409) fills the dialog banner. Success = close + list refresh.
@@ -55,6 +55,7 @@ import {
 import {
   Form,
   FormControl,
+  FormDescription,
   FormField,
   FormItem,
   FormLabel,
@@ -81,6 +82,7 @@ import {
   type ProjectSettingsField,
 } from "./api/types";
 import {
+  attachedServerNames,
   buildPatch,
   EMPTY_FORM,
   formFieldFor,
@@ -183,10 +185,10 @@ function CredentialLine({ credential }: { credential: ProjectSettingsCredential 
         </p>
       </div>
       <a
-        href="/settings"
+        href="/settings?facet=repositories"
         className="inline-flex items-center gap-1 text-2xs text-[hsl(var(--primary-text))] hover:underline"
       >
-        Manage in Settings → Security &amp; Access
+        Manage in Settings → Repositories
         <ExternalLink className="size-3" />
       </a>
     </div>
@@ -251,6 +253,9 @@ export function ProjectSettingsDialog({
   /** The server's edit-safety map is the sole gate — fail closed. */
   const canEdit = (field: ProjectSettingsField): boolean =>
     settings?.editable?.[field] === true;
+  // Names only — the entries never leave the server (they can carry
+  // credentials), so this is all the dialog can show and all it needs to.
+  const attachedNames = settings ? attachedServerNames(settings) : [];
 
   const credential: ProjectSettingsCredential = useMemo(() => {
     if (settings?.credential) return settings.credential;
@@ -559,6 +564,78 @@ export function ProjectSettingsDialog({
                   />
                 )}
               </div>
+
+              {canEdit("customInstructions") && (
+                <FormField
+                  control={form.control}
+                  name="customInstructions"
+                  render={({ field }) => (
+                    <FormItem className="space-y-1.5">
+                      <FormLabel>Indexing instructions</FormLabel>
+                      <FormDescription>
+                        Standing guidance for how this repository should be documented,
+                        appended to the indexer&apos;s playbook. It steers emphasis,
+                        audience and vocabulary; it cannot switch off grounding, and
+                        every page still cites its real sources.
+                      </FormDescription>
+                      <FormControl>
+                        <Textarea
+                          {...field}
+                          rows={5}
+                          placeholder={
+                            "This is a Kotlin Android client. Describe the Compose layer in UI terms, and name the config key each page reads."
+                          }
+                          className="w-full bg-[hsl(var(--muted))] border-[hsl(var(--border))] rounded-lg p-2.5 resize-none"
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              )}
+
+              {canEdit("mcpServers") && (
+                <FormField
+                  control={form.control}
+                  name="mcpServers"
+                  render={({ field }) => (
+                    <FormItem className="space-y-1.5">
+                      <FormLabel>External MCP servers</FormLabel>
+                      <FormDescription>
+                        Extra tools the indexer may call while documenting this
+                        repository, in the same JSON shape as an
+                        <span className="font-mono"> .mcp.json</span> file. An entry
+                        names a process or endpoint the indexing run will reach, so
+                        only add servers you trust.
+                        {attachedNames.length > 0 ? (
+                          <>
+                            {" "}
+                            Currently attached:{" "}
+                            <span className="font-mono">{attachedNames.join(", ")}</span>.
+                            Their configuration is not shown — it can contain
+                            credentials — so leave this empty to keep it, or paste a
+                            complete replacement.
+                          </>
+                        ) : (
+                          " Leave empty to attach none."
+                        )}
+                      </FormDescription>
+                      <FormControl>
+                        <Textarea
+                          {...field}
+                          rows={7}
+                          spellCheck={false}
+                          placeholder={
+                            '{\n  "schema-registry": {\n    "url": "https://registry.example.com/mcp"\n  }\n}'
+                          }
+                          className={textareaCls}
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              )}
 
               {canEdit("desc") && (
                 <FormField

@@ -315,3 +315,28 @@ export async function rearmApp(appId: string, input: RearmInput = {}): Promise<R
   });
   return readJson<RearmResult>(res);
 }
+
+/**
+ * `POST /api/apps/<id>/session` — open a session bound to this app.
+ *
+ * Get-or-create BY DEFAULT: an app already owns a durable maintainer session
+ * (the one a pipeline failure wakes for repair), and this hands it back,
+ * minting it only when the app has never submitted. The app tools resolve
+ * their target by session identity, so a plain new session would find no app
+ * — which is why this route exists rather than the caller creating a session
+ * itself. Passing `{requestNew: true}` (the composer's target picker, via
+ * `openTargetSession`) sends `{new_session: true}` on the wire instead —
+ * snake_case, matching every other field on this `/api/*` route — asking for
+ * a genuinely new session every call.
+ */
+export async function openAppSession(
+  appId: string,
+  opts: { requestNew?: boolean } = {},
+): Promise<{ session_id: string; created: boolean }> {
+  const res = await apiFetch(withBase(`/api/apps/${encodeURIComponent(appId)}/session`), {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: opts.requestNew ? JSON.stringify({ new_session: true }) : undefined,
+  });
+  return readJson<{ session_id: string; created: boolean }>(res);
+}

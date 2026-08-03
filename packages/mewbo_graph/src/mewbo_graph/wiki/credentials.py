@@ -7,9 +7,14 @@ validation and behaviour, so the rules below are stated ONCE here and mirrored
 nowhere:
 
 ``CredentialStore`` is an atomic class: all state lives in the injected
-``WikiStoreBase``; this class is the single read/write chokepoint with an
-identity ``_encode``/``_decode`` seam so encryption-at-rest is a one-line swap
-later. Keyed by :class:`CredentialScope` — either a full slug
+``WikiStoreBase``; this class is the single read/write chokepoint, and its
+identity ``_encode``/``_decode`` seam is the ONE place a cipher would land —
+nothing else in the tree reads a stored blob, so no other call site would
+change. The SEAM is the cheap part; encryption-at-rest is not. It additionally
+needs a key to exist somewhere, and this codebase has no key-management
+substrate to draw one from, plus a way to keep reading the plaintext blobs
+already written. Scope it as a project, not a swap.
+Keyed by :class:`CredentialScope` — either a full slug
 (``host/owner/repo``, repo-specific) or a bare host (``git.example.home``,
 shared by every repo on that host).
 
@@ -28,8 +33,9 @@ consumer (clone, ls-remote/branches, freshness, description fetch):
 The database and the ambient (built-in) git credential store are the only two
 sources of truth. There is deliberately no in-process token cache: the durable
 store is written at submission time and survives the process, so a cache adds
-a third source that can drift (that drift — a revoked stored token shadowing a
-valid ambient one, with no fallback — caused cascading re-index failures).
+a third source that can drift — and that drift, a revoked stored token
+shadowing a valid ambient one with no fallback, makes re-indexes fail in
+cascade.
 
 SECURITY: credentials are plaintext-at-rest in their own isolated store
 (mode 0600 on the JSON driver, dedicated collection on Mongo) but MUST be
@@ -43,9 +49,9 @@ from collections.abc import Iterator
 from datetime import datetime, timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import urlparse
 
 from mewbo_core.common import get_logger
+from mewbo_core.workspaces.repositories import RepositoryRef
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from mewbo_graph.wiki.types import RepoCredential
@@ -92,15 +98,17 @@ class CredentialScope(BaseModel):
     Frozen + validated at definition, so an invalid scope cannot exist: parsing
     a scope IS validating it. The three shapes a caller can throw at
     :meth:`from_repo_url` — an ``https://`` URL, an scp-style ``git@host:o/r``
-    remote, and a bare ``host/owner/repo`` slug — are normalised HERE and only
-    here (the FE mirrors the same rules in ``api/git.ts``; the backend keeps the
-    one authoritative definition the wire reflects).
+    remote, and a bare ``host/owner/repo`` slug — are recognised by the ONE
+    shared grammar in ``mewbo_core.workspaces.repositories.RepositoryRef.split_remote``;
+    what a scope does with those parts is defined HERE and only here (the FE
+    mirrors the same rules in ``api/git.ts``; the backend keeps the one
+    authoritative definition the wire reflects).
 
     **Depth is deliberately uncapped past ``host/owner/repo``.** A GitLab
     subgroup (``gitlab.com/group/subgroup/project``) is a legitimate 4-segment
-    slug, and the legacy ``owner/repo`` 2-segment slug is still stored in the
-    wild — so ``owner``/``repo`` read the LAST TWO segments (the rule
-    ``finalize._split_owner_repo`` has always used) rather than fixed indices.
+    slug, and a 2-segment ``owner/repo`` slug is stored in the wild too — so
+    ``owner``/``repo`` read the LAST TWO segments (the rule
+    ``finalize._split_owner_repo`` shares) rather than fixed indices.
     Rejecting deeper scopes would make a subgroup repo's credential
     unresolvable, silently downgrading its clone to anonymous.
     """
@@ -131,15 +139,30 @@ class CredentialScope(BaseModel):
 
     @model_validator(mode="after")
     def _reject_malformed(self) -> CredentialScope:
-        """Reject anything that is not a bare host or a slug — fail fast, loudly.
+        """Reject ONLY the genuinely broken — a scope that no lookup could ever key.
 
-        A malformed scope used to fail SILENTLY and late: it simply missed every
-        store lookup, so the chain fell through to anonymous and a private repo
-        died with an opaque git error. These are the shapes that are never a
-        scope: empty, whitespace-bearing, a URL (a scheme belongs in
-        :meth:`from_repo_url`, not a store key), an empty path segment
-        (``host//repo``), or an un-parsed scp remote (``git@host:o/r``) leaking
-        in as a key.
+        Unrejected, a malformed scope fails SILENTLY and late: it simply misses
+        every store lookup, so the chain falls through to anonymous and a private
+        repo dies with an opaque git error. Fail fast instead.
+
+        The rejected set is deliberately NARROW, because the store holds real
+        rows and an over-strict rule would make an existing credential
+        un-listable and un-deletable. Rejected: empty/whitespace-only, embedded
+        whitespace, a URL scheme (that belongs in :meth:`from_repo_url`, not a
+        store key), an empty interior segment (``host//repo``), and an un-parsed
+        scp remote (``git@host:o/r``) leaking in as a key.
+
+        NOT rejected, all first-class:
+
+        - **A bare host with no dot** — private TLDs (``.home``/``.local``) are
+          first-class, and a single-label hostname is legal. A no-slash scope IS
+          the shared-host shape (and a catalog project's slug, e.g.
+          ``my-workspace``, is shape-identical).
+        - **``host:port``** — a legal authority, and the FE's ``hostOf`` derives a
+          scope from ``u.host``, which KEEPS the port. Rejecting it would hide an
+          already-stored credential from the registry.
+        - **Any segment depth** — see the class docstring (GitLab subgroups,
+          2-segment ``owner/repo``).
         """
         value = self.value
         if not value:
@@ -153,11 +176,10 @@ class CredentialScope(BaseModel):
         segments = value.split("/")
         if not all(segments):
             raise ValueError(f"scope must not contain an empty segment: {value!r}")
-        host = segments[0]
-        if "@" in host or ":" in host:
+        if "@" in segments[0]:
             raise ValueError(
-                f"scope host is not a bare host (use from_repo_url to parse a "
-                f"remote): {value!r}"
+                f"scope host carries userinfo — parse the remote with "
+                f"from_repo_url instead of keying on it: {value!r}"
             )
         return self
 
@@ -216,25 +238,25 @@ class CredentialScope(BaseModel):
     def from_repo_url(cls, url: str) -> CredentialScope:
         """Parse a git remote — URL, scp-style, or bare slug — into a repo scope.
 
-        The ONE parser for all three shapes. The scp branch is reachable, not
-        defensive: the wizard accepts a ``git@host:owner/repo`` remote and, with
-        no slug chosen yet, that raw string arrives here as the resolution scope
-        (without it, the old string-splitting yielded a garbled ``git@host:owner``
-        host). Raises on anything that cannot be read as a remote.
+        The remote GRAMMAR is not re-implemented here: it delegates to
+        ``RepositoryRef.split_remote`` (core), the ONE place the three shapes
+        are recognised, shared with the api's ``RepoIdentity`` so the two cannot
+        disagree about what a remote means. The scp branch it covers is
+        reachable, not defensive: the wizard accepts a ``git@host:owner/repo``
+        remote and, with no slug chosen yet, that raw string arrives here as the
+        resolution scope, where naive string-splitting would yield a garbled
+        ``git@host:owner`` host.
+
+        What stays HERE is the PROJECTION, and it is deliberately this store's
+        own: a reference with no structural host keeps every token as a path
+        segment, so a lone ``git.example.com`` reads as a bare HOST scope. A
+        repository reference reads that same lone token as a repo NAME — the two
+        conventions are genuinely different and merging them would break one.
+        Raises on anything that cannot be read as a remote.
         """
-        raw = url.strip()
-        if "://" in raw:
-            parsed = urlparse(raw)
-            host = (parsed.hostname or "").lower()
-            path = parsed.path.strip("/")
-            return cls(value=f"{host}/{path}" if path else host)
-        first_seg = raw.split("/", 1)[0]
-        if ":" in first_seg:
-            # scp-style "[user@]host:owner/repo(.git)" — the host ends at the ':'.
-            authority, _, tail = raw.partition(":")
-            host = authority.rsplit("@", 1)[-1]
-            return cls(value=f"{host}/{tail}" if tail else host)
-        return cls(value=raw)
+        host, segments = RepositoryRef.split_remote(url)
+        parts = (host, *segments) if host else segments
+        return cls(value="/".join(parts))
 
     @classmethod
     def coerce(cls, value: str | CredentialScope | None) -> CredentialScope | None:
@@ -489,8 +511,8 @@ def resolve_chain(
     ``git credential fill`` subprocess (a 10s-capped fork) run ONLY when
     iteration actually advances to that tier. A consumer whose arg/stored
     candidate authenticates on the first attempt never pays for the ambient
-    probe (the old eager form did two store loads + the ambient fork on every
-    call, even a freshness check that a repo-scoped token satisfied immediately).
+    probe — an eager form would do two store loads plus the ambient fork on
+    every call, even a freshness check a repo-scoped token satisfies at once.
 
     Dedup key is ``RepoCredential.dedup_key`` (kind, value, username) so two
     credentials that share a value but differ in username (e.g. a GitLab

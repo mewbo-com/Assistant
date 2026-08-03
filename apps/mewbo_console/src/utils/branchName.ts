@@ -1,8 +1,8 @@
 /**
  * Client-side default-branch-name generation for a new worktree — shared by
  * the composer's `ConfigMenu` and the Settings `WorktreesPanel`, which both
- * offer the same "create from base" flow and previously carried byte-identical
- * copies of this trio.
+ * offer the same "create from base" flow and share this ONE copy of the trio
+ * rather than each carrying its own.
  *
  * Mirrors the Mewbo branch convention used by the API. Keeping this literal
  * here (rather than fetching it) avoids a round-trip just for a 6-char

@@ -1,4 +1,4 @@
-"""Contract tests for the declared-schedule union + the PipelineSpec floor (Phase 1).
+"""Contract tests for the declared-schedule union + the PipelineSpec floor.
 
 Covers the ``CronSchedule``/``AtSchedule`` discriminated union (validation at
 definition, discriminator parsing of the plugin's dumped shape), the
@@ -128,8 +128,8 @@ def test_at_schedule_to_trigger_spec_builds_one_shot_time_trigger():
 # ---------------------------------------------------------------------------
 # PipelineSpec floor — enforced at the SUBMIT boundary, never at parse
 # (the app store is append-only: pre-existing version snapshots hold pipelines
-# with no schedule/on_demand/trigger_ref and MUST keep parsing forever —
-# a parse-time floor 500'd every detail read of app-a2a5f299e0ad live)
+# with no schedule/on_demand/trigger_ref and MUST keep parsing forever, or a
+# parse-time floor 500s every detail read of such an app)
 # ---------------------------------------------------------------------------
 
 

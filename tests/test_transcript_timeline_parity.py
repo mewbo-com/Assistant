@@ -12,12 +12,12 @@ event logs plus the rows both implementations must produce, written from the
 documented rules rather than dumped from either implementation — an expectation
 generated from the code under test proves only that the code equals itself.
 
-WHAT THIS FILE ENFORCES TODAY: the Python side matches the corpus, and every
-role the Python side can emit has a case in the corpus (so adding a role without
-adding a case fails). WHAT IT DOES NOT: the TS side is not executed here. Until
-a vitest test replays this same file, TS drift is caught by review, not by a
-gate. The corpus is deliberately language-neutral so that test is a small
-addition rather than a second convention.
+WHAT THIS FILE ENFORCES: the Python side matches the corpus, and every role the
+Python side can emit has a case in the corpus (so adding a role without adding a
+case fails). The TS side is not executed here — it is gated separately by
+``apps/mewbo_console/src/__tests__/timelineParity.test.ts``, which replays this
+same corpus read off disk rather than a copy of it. Both gates have to run:
+green here says nothing about the console assembler, and vice versa.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, get_args
 
 import pytest
-from mewbo_core.transcript_timeline import TimelineEntry, TimelineRole, TranscriptTimeline
+from mewbo_core.session.transcript_timeline import TimelineEntry, TimelineRole, TranscriptTimeline
 
 CORPUS_PATH = Path(__file__).parent / "fixtures" / "transcript_timeline_corpus.json"
 

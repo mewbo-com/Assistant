@@ -28,7 +28,10 @@ import type {
   ProjectSettingsPatch,
   QaAnswer,
   QaEvent,
+  QaMode,
   RecoverableJob,
+  RefreshDecision,
+  RefreshMode,
   ResumeIndexingResponse,
   SourceExcerpt,
   WikiError,
@@ -375,9 +378,21 @@ export async function getAnswer(answerId: string): Promise<QaAnswer> {
  * a turn to that answer's session (reusing its context) instead of minting a
  * fresh answer. Omit it for a new conversation. ``undefined`` fields are
  * dropped by ``JSON.stringify``, so the body carries ``answerId`` only when set.
+ *
+ * ``mode`` selects the Q&A agent shape for a NEW conversation (server default
+ * ``fast`` when omitted); the backend ignores it on a continuation — a
+ * follow-up keeps the session's existing mode, so sending it there is
+ * harmless but has no effect.
  */
 export async function* streamAnswer(
-  input: { question: string; fromPageId: string; model: string; slug: string; answerId?: string },
+  input: {
+    question: string;
+    fromPageId: string;
+    model: string;
+    slug: string;
+    answerId?: string;
+    mode?: QaMode;
+  },
   options: { signal?: AbortSignal } = {},
 ): AsyncGenerator<QaEvent, void, unknown> {
   yield* sseStream<QaEvent>("/v1/wiki/qa", {
@@ -462,10 +477,29 @@ export async function listBranches(input: ListBranchesInput): Promise<ListBranch
 /**
  * Request a wiki refresh. ``POST /v1/wiki/projects/<slug>/refresh``.
  * No email collection — refresh is a single-click confirm now.
+ *
+ * ``jobId``/``refresh`` carry the new job id and the ``RefreshDecision``
+ * computed for THIS refresh — present as soon as the request is accepted, so
+ * a caller can explain a full rebuild's reason before the indexing screen's
+ * own snapshot poll has even landed. Typed optional (not required) so a
+ * backend still on the bare ``{queued}`` shape keeps satisfying the contract.
  */
-export async function requestWikiRefresh(slug: string): Promise<{ queued: boolean }> {
+export async function requestWikiRefresh(
+  slug: string,
+  mode: RefreshMode = "auto",
+): Promise<{ queued: boolean; jobId?: string; refresh?: RefreshDecision }> {
   if (!slug) throw makeError("validation", "slug is required");
-  return http<{ queued: boolean }>("POST", `/v1/wiki/projects/${encodeURIComponent(slug)}/refresh`, {});
+  // ``mode`` is sent EXPLICITLY rather than omitted. The server has always
+  // accepted it and defaults an absent body to ``auto``, but the client had no
+  // field for it at all, so a fingerprinted project — every healthy one, since
+  // the fingerprint is stamped by the first successful full index — could only
+  // ever reach the scoped path, which regenerates no documentation. There was no
+  // route from the UI to a doc-regenerating run, not even the deliberate one.
+  return http<{ queued: boolean; jobId?: string; refresh?: RefreshDecision }>(
+    "POST",
+    `/v1/wiki/projects/${encodeURIComponent(slug)}/refresh`,
+    { mode },
+  );
 }
 
 /**
@@ -482,5 +516,31 @@ export async function getProjectFreshness(
   return http<ProjectFreshness>(
     "GET",
     `/v1/wiki/projects/${encodeURIComponent(slug)}/freshness${qs}`,
+  );
+}
+
+/**
+ * Open a session for an indexed project.
+ * ``POST /v1/wiki/projects/<slug>/session``.
+ *
+ * Get-or-create BY DEFAULT, so calling it twice with no options returns the
+ * same conversation rather than accumulating a session per click — the
+ * gallery card's "open" affordance relies on exactly that. Passing
+ * ``{requestNew: true}`` (the composer's target picker, via
+ * ``openTargetSession``) sends ``{newSession: true}`` on the wire instead —
+ * camelCase, matching every other field on this camelCase route — asking the
+ * endpoint to mint a genuinely new session every time, which is why the two
+ * call sites disagree about what a second call does. 404 when the slug names
+ * no indexed project: a session pointed at nothing is worse than a refusal.
+ */
+export async function openProjectSession(
+  slug: string,
+  opts: { requestNew?: boolean } = {},
+): Promise<{ sessionId: string; created: boolean }> {
+  if (!slug) throw makeError("validation", "slug is required");
+  return http<{ sessionId: string; created: boolean }>(
+    "POST",
+    `/v1/wiki/projects/${encodeURIComponent(slug)}/session`,
+    opts.requestNew ? { newSession: true } : undefined,
   );
 }

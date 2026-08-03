@@ -24,9 +24,9 @@ import threading
 import time
 
 from mewbo_core.classes import TaskQueue
-from mewbo_core.orchestrator import Orchestrator
-from mewbo_core.session_runtime import SessionRuntime
-from mewbo_core.session_store import SessionStore
+from mewbo_core.loop.orchestrator import Orchestrator
+from mewbo_core.loop.session_runtime import SessionRuntime
+from mewbo_core.session.session_store import SessionStore
 
 
 def _wait_idle(runtime: SessionRuntime, session_id: str, timeout: float = 2.0) -> None:
@@ -45,7 +45,7 @@ def test_start_async_emscripten_with_running_loop_takes_loop_branch(tmp_path, mo
     an ``asyncio.Task`` (no daemon thread), and the task is stored on the
     ``RunHandle`` so ``RunRegistry`` holds a strong reference for the run's
     lifetime (fix: untracked-task GC)."""
-    import mewbo_core.session_runtime as sr
+    import mewbo_core.loop.session_runtime as sr
 
     store = SessionStore(root_dir=str(tmp_path))
     runtime = SessionRuntime(session_store=store)
@@ -145,7 +145,7 @@ def test_orchestrate_session_sync_collapses_to_async_entry_point(tmp_path, monke
     """``orchestrate_session`` now delegates to
     ``asyncio.run(orchestrate_session_async(...))``; verify the collapsed
     sync entry point still forwards params correctly end to end."""
-    import mewbo_core.task_master as tm
+    import mewbo_core.loop.task_master as tm
 
     captured: dict = {}
 

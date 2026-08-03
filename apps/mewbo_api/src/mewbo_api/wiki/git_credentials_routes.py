@@ -3,7 +3,7 @@
 A credential's *scope* is either a bare host (``git.example.home``, shared by
 every repo on that host) or a full slug (``host/owner/repo``, repo-specific) —
 see ``mewbo_graph.wiki.credentials`` for the resolution chain that consumes
-this store. MewboWiki is the first consumer (onboarding/clone/branches/
+this store. MewboWiki is the first consumer (indexing/clone/branches/
 freshness all read through ``resolve_chain``); task/vcs-pickup flows are
 expected next, which is why this lives at product-wide ``/v1/git/*`` rather
 than under ``/v1/wiki/*`` even though it is registered alongside the wiki
@@ -78,9 +78,9 @@ class CredentialValidateRequest(BaseModel):
 def _parse_scope(scope: str) -> CredentialScope | None:
     """Validate a ``<path:scope>`` route param, or ``None`` when it is malformed.
 
-    The boundary where a bad scope fails FAST. Previously a malformed scope was
-    accepted, written under a key nothing could ever resolve, and only surfaced
-    later as an opaque "the clone fell back to anonymous" mystery.
+    The boundary where a bad scope fails FAST. Accepting one would write the
+    credential under a key nothing can ever resolve, surfacing much later as an
+    opaque "the clone fell back to anonymous" mystery.
     """
     try:
         return CredentialScope.from_slug(scope)

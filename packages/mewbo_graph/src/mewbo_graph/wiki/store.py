@@ -21,8 +21,11 @@ from __future__ import annotations
 
 import abc
 import json
+import shutil
+import struct
 import threading
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
@@ -49,6 +52,7 @@ from .memory_types import (
     MemoryNode,
 )
 from .types import (
+    CommitScope,
     Embedding,
     GraphEdge,
     GraphNode,
@@ -81,6 +85,63 @@ _V = TypeVar("_V", bound=_HasVector)
 def _slug_to_path(slug: str) -> str:
     """Escape a slug so it maps safely to a single filesystem segment."""
     return slug.replace("/", "__")
+
+
+@dataclass(frozen=True)
+class PageClaim:
+    """Outcome of a job claiming one page id: the new count + whether it was new.
+
+    One answer rather than two reads. The read-then-increment this replaces
+    asked the store twice — "does this page exist" and then "bump the counter" —
+    so two page-writers landing together could both see "new" and over-count,
+    and a caller that saw "not new" had to go back for the count.
+    """
+
+    count: int
+    is_new: bool
+
+
+@dataclass(frozen=True)
+class JobPatch:
+    """The ``IndexingJob`` fields a caller NAMED, validated and nothing else.
+
+    The unit both drivers write, and what keeps two overlapping writers from
+    losing each other's changes: "set these fields" and "rewrite the document
+    that happens to hold them" are not the same operation. The second reverts
+    every field a CONCURRENT writer changed between this writer's read and its
+    write — a cancel landing between a progress writer's read and its write was
+    silently undone, and the job carried on running with no record that a cancel
+    had ever been asked for. Carrying only the named fields lets each backend
+    narrow its write to what the caller actually asked for, so writers touching
+    disjoint fields stop colliding at all.
+    """
+
+    fields: dict[str, Any]
+
+    @classmethod
+    def build(cls, job: IndexingJob, fields: Mapping[str, Any]) -> JobPatch:
+        """Validate *fields* against the WHOLE *job*, then keep only those keys.
+
+        Validation stays whole-document — an unknown key still fails
+        ``extra="forbid"`` and every value is still coerced by the field that
+        owns it — because what needed narrowing is the WRITE, not the check.
+
+        An explicit ``None`` is a VALUE here, never an omission: ``emit_phase``
+        clears the three ``phase_progress_*`` fields by naming them, so dropping
+        falsy values (as the ``PROJECT_UPDATABLE`` filter does, for a surface
+        whose ``None`` genuinely means "not supplied") would silently discard
+        the write the progress invariant depends on.
+        """
+        merged = job.model_dump(by_alias=False)
+        merged.update(fields)
+        coerced = IndexingJob.model_validate(merged).model_dump(by_alias=False)
+        return cls(fields={name: coerced[name] for name in fields})
+
+    def apply(self, job: IndexingJob) -> IndexingJob:
+        """Return *job* with this patch's fields set, re-validated as a whole."""
+        merged = job.model_dump(by_alias=False)
+        merged.update(self.fields)
+        return IndexingJob.model_validate(merged)
 
 
 # ---------------------------------------------------------------------------
@@ -117,15 +178,27 @@ class WikiStoreBase(abc.ABC):
     # ``repo_url``). Writing one here would either be silently clobbered at the
     # next finalize or make the record lie about what was actually indexed.
     # Settings that take effect on the NEXT index belong on ``ProjectSettings``.
-    PROJECT_UPDATABLE: frozenset[str] = frozenset({"desc"})
+    #
+    # ``resolution`` is the one member written by an INDEX rather than by a
+    # user edit: the graph phase is the only place that knows whether exact
+    # cross-file symbol resolution ran, and it runs while the project record
+    # for the previous index is still the current one. It is listed here
+    # because that write is a partial update of an existing row, not because
+    # the field is user-editable — nothing on the settings surface may set it.
+    PROJECT_UPDATABLE: frozenset[str] = frozenset({"desc", "resolution"})
 
     def update_project(self, slug: str, fields: dict[str, Any]) -> Project | None:
         """Apply a partial update to *slug*'s Project; return the new state.
 
+        Cost: ``O(one record)`` — one project read and one upsert of that same
+        record, regardless of how much the project has indexed.
+
         Returns ``None`` when the project is absent. Only keys in
         :data:`PROJECT_UPDATABLE` are honoured — an unknown or ``None`` value is
         ignored, so a caller can hand over a whole PATCH body without pre-filtering
-        (mirrors ``agentic_search.store.update_workspace``).
+        (mirrors ``agentic_search.store.update_workspace``). ``None`` meaning "not
+        supplied" is the OPPOSITE of ``update_job``'s rule, where a named ``None``
+        is a value to be written — do not carry one convention onto the other.
 
         Concrete on the base rather than per-backend: ``create_project`` is an
         UPSERT in both drivers, so read → ``model_copy`` → upsert needs no
@@ -161,8 +234,8 @@ class WikiStoreBase(abc.ABC):
     def get_project_settings(self, slug: str) -> ProjectSettings | None:
         """Return *slug*'s settings record, or None when it has never been written.
 
-        ``None`` is the NORMAL state for a project onboarded before this record
-        existed — the caller falls back to the legacy per-job submission scan.
+        ``None`` is a NORMAL state, not an error — the caller falls back to
+        the per-job submission scan.
         """
 
     @abc.abstractmethod
@@ -172,6 +245,36 @@ class WikiStoreBase(abc.ABC):
         Called on project delete so a re-created slug can't inherit the dead
         project's settings (the rule the freshness cache eviction already follows).
         """
+
+    def reap_slug(self, slug: str) -> dict[str, int]:
+        """Delete every family this store persists for *slug*; return the counts.
+
+        The exceptions are the three the delete-project ROUTE already owns
+        directly: ``wiki_projects``
+        (:meth:`delete_project`), ``wiki_settings`` (:meth:`delete_project_settings`),
+        and a git credential (``CredentialStore.delete`` — repo-scope ONLY; a
+        host-scoped credential is shared by every repo on that host and must
+        NEVER cascade off one project's delete, so this method never touches
+        credentials at all).
+
+        Everything else a completed or in-flight index could have written under
+        *slug* is deleted here: pages, the code graph (nodes/edges/embeddings),
+        the entity layer (entities/entity-edges/entity-embeddings/
+        recommendations), the memory layer (nodes/edges/embeddings), doc notes,
+        the file manifest, the recovery-attempt counter, every indexing job
+        (with its plan/resume/submission/session sidecars and its event log),
+        and every QA answer for this slug (with its event log). Without this, a
+        project delete orphans the large majority of what an index ever wrote —
+        it stays reachable by nothing, forever, and a slug reused later inherits
+        none of it (the same "clean slate" reasoning behind clearing settings/
+        credentials/the freshness cache above, extended to the rest of the store).
+
+        Returns per-family deleted-row counts (mirroring
+        :meth:`supersede_graph_artifacts`'s shape) so a caller can report exactly
+        what was removed. Idempotent: a second call for an already-reaped slug
+        finds nothing and returns all-zero counts.
+        """
+        raise NotImplementedError("Graph backend is not implemented on this driver")
 
     # Pages
 
@@ -268,13 +371,68 @@ class WikiStoreBase(abc.ABC):
     def get_job(self, job_id: str) -> IndexingJob | None:
         """Return the indexing job, or None if absent."""
 
-    @abc.abstractmethod
     def update_job(self, job_id: str, **fields: Any) -> IndexingJob:
-        """Partially update *job_id* with *fields*; return the updated record."""
+        """Partially update *job_id* with *fields*; return the updated record.
+
+        Concrete on the base because the rule both drivers owe their callers is
+        ONE rule: only the fields the caller NAMED are written. Persisting the
+        whole merged document instead turns every write into a read-modify-write
+        over every field, so two writers that overlap lose one another's changes
+        even when the fields they touch are disjoint. The phase tools write
+        progress on a 50ms-to-5s cadence while an HTTP thread writes ``status``,
+        so a cancel silently reverting to ``running`` needs no exotic timing to
+        reproduce.
+
+        The narrowing lives here; making the narrow write INDIVISIBLE is
+        per-backend (:meth:`_write_job_patch`), because a lock and a
+        field-scoped update are not the same cure.
+
+        Raises ``KeyError`` when the job is absent and ``ValidationError`` when
+        a field is unknown to the model or its value is wrong for it. Naming no
+        field at all is a read: there is nothing to narrow, so nothing is
+        written.
+        """
+        job = self.get_job(job_id)
+        if job is None:
+            raise KeyError(f"Job not found: {job_id}")
+        if not fields:
+            return job
+        return self._write_job_patch(job_id, JobPatch.build(job, fields))
+
+    @abc.abstractmethod
+    def _write_job_patch(self, job_id: str, patch: JobPatch) -> IndexingJob:
+        """Persist exactly *patch*'s fields onto *job_id*; return the STORED record.
+
+        The backend's one job here is to make "read the record, set these
+        fields, put it back" indivisible with respect to another writer, and to
+        leave every field the patch does not name exactly as that other writer
+        left it. Returns what is actually stored afterwards — concurrent writes
+        included — never the caller's locally merged guess at it. Raises
+        ``KeyError`` if the job vanished since the caller's read.
+        """
 
     @abc.abstractmethod
     def list_jobs(self, slug: str | None = None) -> list[IndexingJob]:
         """Return all jobs, optionally filtered to *slug*."""
+
+    def latest_job(
+        self, slug: str, *, statuses: Iterable[str] | None = None
+    ) -> IndexingJob | None:
+        """Return *slug*'s most recent job, ordered by ``phase_started_at``.
+
+        The ONE "what is the latest attempt for this slug" answer — a thin
+        convenience over :meth:`list_jobs`, which already returns newest-first
+        by ``phase_started_at`` (never ``job_id``, a ``uuid4`` hex that sorts
+        RANDOMLY with respect to when a job actually ran). *statuses* narrows
+        the candidates before taking the first, e.g. ``{"complete"}`` for a
+        freshness or QA-source baseline. Returns ``None`` when no job
+        (matching *statuses*, if given) exists.
+        """
+        candidates = self.list_jobs(slug=slug)
+        if statuses is not None:
+            wanted = set(statuses)
+            candidates = [j for j in candidates if j.status in wanted]
+        return candidates[0] if candidates else None
 
     @abc.abstractmethod
     def append_job_event(self, job_id: str, event: dict[str, Any]) -> int:
@@ -326,13 +484,69 @@ class WikiStoreBase(abc.ABC):
         """Return the persisted resume-plan dict, or None if the job isn't resuming."""
         return None
 
+    # Act sidecar (the scoped refresh's second stage). ONE record carrying the
+    # narrowed page-id work-list AND which stage the job reached, because the
+    # two are read together and a job cannot express the second anywhere else:
+    # ``refresh_decision`` is stamped once, before the run starts, so it can say
+    # WHICH path a refresh took but never HOW FAR it got. Without this a job
+    # that died in stage 2 re-ran clone + scan + the whole delta pass on resume.
+    # Concrete defaults (no-op / None) for the same reason the resume sidecar
+    # has them: a backend that never persists it degrades to re-driving stage 1,
+    # which is the behaviour that existed before — never a crash.
+
+    def save_act_plan(self, job_id: str, plan: dict[str, Any]) -> None:
+        """Persist the act-stage record for *job_id*; overwrites any previous one."""
+        raise NotImplementedError
+
+    def get_act_plan(self, job_id: str) -> dict[str, Any] | None:
+        """Return the persisted act-stage record, or None if stage 1 hasn't finished."""
+        return None
+
     @abc.abstractmethod
     def get_job_submitted_count(self, job_id: str) -> int:
         """Return the number of pages submitted so far for *job_id*."""
 
     @abc.abstractmethod
-    def increment_job_submitted_count(self, job_id: str) -> int:
-        """Atomically increment the submitted-pages counter; return new count."""
+    def claim_job_page(self, slug: str, job_id: str, page_id: str) -> PageClaim:
+        """Atomically record *page_id* as written by *job_id*; return the claim.
+
+        The submitted-pages counter belongs to the JOB, so its dedup key has to
+        be the job's OWN set of claimed ids. Keying on the slug instead — "does a
+        page with this id already exist for the slug" — answers yes for every
+        page a PREVIOUS index of the same repository wrote, so a refresh would
+        count zero new pages, emit no ``page_committed`` events, and leave the
+        progress bar dead for the whole re-index.
+
+        The returned count is the SIZE of that set, never a free-running
+        increment. A counter that only ever counts distinct pages cannot drift
+        past what the job actually wrote, where a read-then-``$inc`` can: a
+        resumed job whose counter carried over from an earlier attempt reports
+        90 pages written against a 50-page plan.
+
+        A job with no claim record seeds its set from page attribution
+        (:meth:`page_ids_for_job`) on first touch, so an interrupted index
+        resumes with its earlier pages counted rather than from zero.
+
+        Raises ``KeyError`` when *job_id* is unknown.
+        """
+
+    @abc.abstractmethod
+    def get_job_page_ids(self, slug: str, job_id: str) -> frozenset[str]:
+        """Return the page ids *job_id* wrote — its claim set, else attribution.
+
+        The fallback is what makes a PRE-EXISTING interrupted job resumable: its
+        meta carries a bare counter and no claim record, so reading the claim
+        alone reported nothing done and the resume regenerated every page it had
+        already written correctly — the exact waste the claim exists to prevent.
+        """
+
+    @abc.abstractmethod
+    def page_ids_for_job(self, slug: str, job_id: str) -> frozenset[str]:
+        """Page ids under *slug* whose stored attribution names *job_id*.
+
+        ``save_page`` stamps attribution independently of the claim record,
+        which is why this can answer for a job the claim record cannot.
+        """
 
     @abc.abstractmethod
     def save_job_submission(self, job_id: str, submission: dict[str, Any]) -> None:
@@ -407,12 +621,22 @@ class WikiStoreBase(abc.ABC):
         ``find_qa_by_session``). Mid-stream writers (``QaFinalizer``) MUST use
         this; ``save_qa`` is for creation only. (The JSON backend keeps session +
         events in separate files, so for it this is just an answer.json rewrite —
-        the divergence is why a JSON-only test missed the Mongo regression.)
+        the divergence is why a JSON-only test cannot catch the Mongo failure.)
         """
 
     @abc.abstractmethod
     def get_qa(self, answer_id: str) -> QaAnswer | None:
         """Return the QA answer, or None if absent."""
+
+    @abc.abstractmethod
+    def list_qa(self, status: str | None = None) -> list[QaAnswer]:
+        """Return all QA answers, optionally filtered to *status*.
+
+        Boot-time/offline use only (mirrors :meth:`list_jobs`) — an
+        unfiltered call reads every persisted answer, so a caller on an
+        interactive path must narrow with *status* rather than filtering the
+        full list in Python.
+        """
 
     @abc.abstractmethod
     def attach_qa_session(self, answer_id: str, session_id: str) -> None:
@@ -436,13 +660,13 @@ class WikiStoreBase(abc.ABC):
     ) -> list[dict[str, Any]]:
         """Return QA events with idx > *after_idx* (-1 returns all)."""
 
-    # Graph + embeddings (Phase 3 — raise NotImplementedError in v1)
+    # Graph + embeddings (raise NotImplementedError in v1)
     #
     # ``commit_sha``/``job_id`` are the per-job/commit attribution the store
     # stamps onto every artifact (see ``GraphNodeBase``). A caller that owns a
     # job passes them so the write is attributed to the commit it indexed; a
     # commit-less path (catalog ingest) omits them and the row is stamped
-    # ``None``. Keyword-only + defaulted so no legacy caller breaks.
+    # ``None``. Keyword-only + defaulted so a caller that owns no job can omit them.
 
     @staticmethod
     def _stamp_attribution(item: _M, commit_sha: str | None, job_id: str | None) -> _M:
@@ -466,8 +690,8 @@ class WikiStoreBase(abc.ABC):
         commit_sha: str | None = None,
         job_id: str | None = None,
     ) -> None:
-        """Upsert code-graph nodes (Phase 3)."""
-        raise NotImplementedError("Graph backend lands in Phase 3")
+        """Upsert code-graph nodes."""
+        raise NotImplementedError("Graph backend is not implemented on this driver")
 
     def upsert_edges(
         self,
@@ -477,8 +701,8 @@ class WikiStoreBase(abc.ABC):
         commit_sha: str | None = None,
         job_id: str | None = None,
     ) -> None:
-        """Upsert code-graph edges (Phase 3)."""
-        raise NotImplementedError("Graph backend lands in Phase 3")
+        """Upsert code-graph edges."""
+        raise NotImplementedError("Graph backend is not implemented on this driver")
 
     def upsert_embeddings(
         self,
@@ -488,29 +712,80 @@ class WikiStoreBase(abc.ABC):
         commit_sha: str | None = None,
         job_id: str | None = None,
     ) -> None:
-        """Upsert dense embedding vectors (Phase 3)."""
-        raise NotImplementedError("Embeddings lands in Phase 3")
+        """Upsert dense embedding vectors."""
+        raise NotImplementedError("Embeddings are not implemented on this driver")
+
+    def live_scope(self, slug: str) -> CommitScope:
+        """The generation *slug*'s readers should see: the project's own commit.
+
+        A project row carries the commit its last completed index built from,
+        so that — not the union of every commit ever indexed — is what "the
+        code as it is now" means. Lives here because the store is what holds
+        the project row; every graph reader already has one, so nobody has to
+        thread a commit sha through their own call chain to read correctly.
+
+        A project with no ``commit_sha`` (a commit-less catalog ingestion, or a
+        slug with no project row yet) has exactly one generation, so scoping it
+        could only be a way to get it wrong — the union and the live generation
+        are the same set, and ``every()`` says so without asserting a commit
+        that does not exist.
+
+        Cost: ``O(one record)``.
+        """
+        project = self.get_project(slug)
+        if project is None or project.commit_sha is None:
+            return CommitScope.every()
+        return CommitScope.at(project.commit_sha)
 
     def query_graph(
         self,
         slug: str,
         *,
+        scope: CommitScope,
         node_type: str | None = None,
         name_match: str | None = None,
         neighbors_of: str | None = None,
+        node_ids: Collection[str] | None = None,
     ) -> list[GraphNode]:
-        """Query the code graph (Phase 3)."""
-        raise NotImplementedError("Graph backend lands in Phase 3")
+        """Query the code graph for *slug*, restricted to *scope*'s generation.
+
+        *node_ids* fetches an explicit set by id. It exists so a caller holding
+        a bounded list of ids — the knowledge-graph view repairing entity
+        anchors that point into a superseded generation — can look exactly
+        those up instead of reading a whole generation to find a handful. An
+        empty collection returns nothing; ``None`` means "no id filter".
+
+        *scope* is REQUIRED and has no default on purpose. This store holds the
+        UNION of every commit ever indexed for a slug, so "which generation"
+        has no safe default — and a default of ``CommitScope.every()`` would be
+        precisely the fail-open filter the root guidance forbids: a caller that
+        forgot to scope would silently read every generation and still return
+        ``200``. Required means a missed call site is a typecheck failure
+        instead. See :class:`CommitScope` for why this is not a ``commit_sha``
+        parameter (``count_graph_nodes`` already owns that name with the
+        opposite meaning for ``None``).
+
+        Cost: ``O(nodes for the slug in scope)`` — a read of one project's
+        graph generation, not of all history.
+        """
+        raise NotImplementedError("Graph backend is not implemented on this driver")
 
     def count_graph_nodes(self, slug: str, *, commit_sha: str | None) -> int:
         """Count nodes for *slug* built by exactly *commit_sha* (``None`` matches None).
 
         The commit-scoped count the resume skip predicate keys on: "the graph
         for THIS commit is built" is ``count_graph_nodes(slug, commit_sha=X) >
-        0``. Distinct from ``len(query_graph(slug))``, which counts the UNION of
-        every commit and so can never answer that question.
+        0``.
+
+        ``commit_sha`` here is an EXACT match — ``None`` counts the rows stamped
+        NULL, it does not mean "any commit". :class:`CommitScope` exists to keep
+        that convention unambiguous on the read methods, which is why
+        ``query_graph`` takes a scope rather than re-using this parameter name
+        with the opposite sense; ``count_graph_nodes(slug, commit_sha=X)`` and
+        ``len(query_graph(slug, scope=CommitScope.at(X)))`` agree by
+        construction.
         """
-        raise NotImplementedError("Graph backend lands in Phase 3")
+        raise NotImplementedError("Graph backend is not implemented on this driver")
 
     def supersede_graph_artifacts(
         self, slug: str, *, keep_commit_sha: str
@@ -525,22 +800,83 @@ class WikiStoreBase(abc.ABC):
         Returns per-collection delete counts. Idempotent: a second call for the
         same *keep_commit_sha* finds nothing to reap.
         """
-        raise NotImplementedError("Graph backend lands in Phase 3")
+        raise NotImplementedError("Graph backend is not implemented on this driver")
 
-    def list_edges(self, slug: str) -> list[GraphEdge]:
-        """Return every edge for *slug* (graph-viewer endpoint)."""
-        raise NotImplementedError("Graph backend lands in Phase 3")
+    def restamp_graph_artifacts(
+        self, slug: str, *, from_commit: str, to_commit: str
+    ) -> dict[str, int]:
+        """Carry *from_commit*'s surviving artifacts forward onto *to_commit*.
+
+        Concrete-raising rather than ``@abc.abstractmethod``, matching its
+        sibling ``supersede_graph_artifacts`` and the rest of this graph family:
+        an abstract method here is inherited by every partial test double of
+        this base and stops it being instantiable at all, which turns a new
+        store capability into a broad, unrelated test failure.
+
+        The counterpart a SCOPED re-index needs and a full one does not. A full
+        index re-stamps every artifact by rewriting them all, so afterwards one
+        generation describes the whole slug and ``live_scope`` finds everything.
+        An incremental refresh re-stamps only what it re-parsed, so without this
+        the untouched majority keeps the PREVIOUS commit while the project row
+        advances — and since ``live_scope`` is ``at(project.commit_sha)``, every
+        reader (the graph view, the retriever, the agent graph tools) would see
+        only the handful of files that happened to change. Not deleted, not
+        erroring: invisible. That is the failure this method exists to prevent,
+        and it is the precondition the delta indexer's own unscoped reads name.
+
+        **The semantic is a claim, and it is a true one:** an artifact built
+        from a file that did NOT change describes *to_commit* just as accurately
+        as it described *from_commit*, so moving its stamp forward asserts
+        nothing false.
+
+        **Why this is a MOVE from a named generation rather than "stamp
+        everything".** The store can hold generations older than *from_commit* —
+        a supersede that never ran, or the field-absent rows the isolation
+        backfill exists for. Those describe code that is genuinely gone.
+        Blanket-stamping them onto *to_commit* would resurrect deleted symbols
+        into the live view, which is a worse bug than the one being fixed. Rows
+        stamped ``None`` are likewise left alone, matching
+        ``supersede_graph_artifacts``' preserve rule.
+
+        Returns per-family moved counts. Idempotent: a second call finds nothing
+        left at *from_commit*.
+
+        Cost: ``O(artifacts at from_commit)`` — an offline finalize step.
+        """
+        raise NotImplementedError
+
+    def list_edges(self, slug: str, *, scope: CommitScope) -> list[GraphEdge]:
+        """Return *slug*'s edges for *scope*'s generation (graph-viewer endpoint).
+
+        *scope* is required for the same reason as on ``query_graph`` — and it
+        must agree with the scope the nodes were read under, or the view is
+        assembled from edges whose endpoints belong to a different generation.
+        """
+        raise NotImplementedError("Graph backend is not implemented on this driver")
 
     def vector_search(
         self, slug: str, qvec: list[float], k: int = 10
     ) -> list[Embedding]:
-        """Nearest-neighbour vector search (Phase 3)."""
-        raise NotImplementedError("Embeddings lands in Phase 3")
+        """Nearest-neighbour vector search."""
+        raise NotImplementedError("Embeddings are not implemented on this driver")
 
     # Scoped graph deletes (used by the incremental GraphDeltaIndexer)
 
     def delete_nodes_by_file(self, slug: str, file: str) -> int:
-        """Delete every code node whose ``file`` equals *file*; return count."""
+        """Delete every code node in *file* AND its vectors; return the NODE count.
+
+        The embedding cascade is part of this method rather than a second call
+        the caller makes first, because :class:`Embedding` carries no ``file``
+        field: a vector is reachable only through the node it points at, so once
+        that node is deleted the vector can no longer be found by file, by
+        commit, or by anything else — it is simply unreachable, unreapable, and
+        still scoreable by :meth:`vector_search`. Cascading here makes "no
+        orphaned vectors" a property of the store instead of a call-ordering
+        discipline every future caller has to rediscover.
+
+        The return value stays the NODE count so the delete reads the same as
+        every other scoped delete on this class.
+        """
         raise NotImplementedError("Memory layer methods land in the memory store")
 
     def delete_edges_by_source_file(self, slug: str, file: str) -> int:
@@ -792,7 +1128,13 @@ class WikiStoreBase(abc.ABC):
     def save_entity_recommendation(
         self, slug: str, rec: EntityRecommendation
     ) -> None:
-        """Append a resolution-recommendation record (a prior for the next pass)."""
+        """Upsert a resolution-recommendation record (a prior for the next pass).
+
+        Keyed on ``rec.id`` (deterministic over action + sorted subjects + type),
+        NOT appended: these records are read back as priors by ``EntityResolver``,
+        so an unkeyed insert let a replayed enrich pass state the same prior
+        twice and re-weight the ladder purely by having run again.
+        """
         raise NotImplementedError
 
     def get_entity_recommendations(self, slug: str) -> list[EntityRecommendation]:
@@ -934,6 +1276,116 @@ class JsonWikiStore(WikiStoreBase):
         path.unlink()
         return True
 
+    # -- Whole-slug reap (see WikiStoreBase.reap_slug for the family list) ---
+
+    def reap_slug(self, slug: str) -> dict[str, int]:
+        """See ``WikiStoreBase.reap_slug``.
+
+        Counts are taken from each JSONL/file BEFORE its owning directory is
+        removed, so a family's number here means the same thing as the Mongo
+        driver's ``delete_many().deleted_count`` — one count per row, not "the
+        directory existed". Graph/entity/memory each live under ONE directory
+        (``_graph_dir``/``_memory_dir``), and pages under another
+        (``_pages_dir``), so counting + removing those collapses into directory
+        operations rather than per-file bookkeeping. Jobs and QA are id-keyed,
+        not slug-keyed: their ids are gathered FIRST, before anything is
+        deleted, then each owning directory is removed by id.
+        """
+        with self._lock:
+            job_ids = [j.job_id for j in self.list_jobs(slug)]
+            answer_ids = self._qa_answer_ids_for_slug(slug)
+
+            graph_dir = self._graph_dir(slug)
+            counts: dict[str, int] = {
+                "graph_nodes": self._count_jsonl_lines(graph_dir / "nodes.jsonl"),
+                "graph_edges": self._count_jsonl_lines(graph_dir / "edges.jsonl"),
+                "embeddings": self._count_jsonl_lines(graph_dir / "embeddings.jsonl"),
+            }
+            self._rmdir_if_exists(graph_dir)
+
+            mem_dir = self._memory_dir(slug)
+            counts.update({
+                "entities": self._count_jsonl_lines(mem_dir / "entities.jsonl"),
+                "entity_edges": self._count_jsonl_lines(mem_dir / "entity_edges.jsonl"),
+                "entity_embeddings": self._count_jsonl_lines(
+                    mem_dir / "entity_embeddings.jsonl"
+                ),
+                "entity_recommendations": self._count_jsonl_lines(
+                    mem_dir / "entity_recommendations.jsonl"
+                ),
+                "memory_nodes": self._count_jsonl_lines(mem_dir / "nodes.jsonl"),
+                "memory_edges": self._count_jsonl_lines(mem_dir / "edges.jsonl"),
+                "memory_embeddings": self._count_jsonl_lines(mem_dir / "embeddings.jsonl"),
+                "doc_notes": self._count_jsonl_lines(mem_dir / "docs.jsonl"),
+                "file_manifest": self._count_jsonl_lines(mem_dir / "manifest.jsonl"),
+            })
+            self._rmdir_if_exists(mem_dir)
+
+            pages_dir = self._pages_dir(slug)
+            counts["pages"] = (
+                sum(
+                    1
+                    for p in pages_dir.glob("*.json")
+                    if p.name not in ("_index.json", "_attribution.json")
+                )
+                if pages_dir.exists()
+                else 0
+            )
+            self._rmdir_if_exists(pages_dir)
+
+            recovery_path = self._recovery_path(slug)
+            counts["recovery"] = 1 if recovery_path.exists() else 0
+            if counts["recovery"]:
+                recovery_path.unlink()
+
+            counts["jobs"] = len(job_ids)
+            counts["job_events"] = sum(
+                self._count_jsonl_lines(self._event_path("jobs", jid)) for jid in job_ids
+            )
+            for job_id in job_ids:
+                self._rmdir_if_exists(self._job_dir(job_id))
+
+            counts["qa"] = len(answer_ids)
+            counts["qa_events"] = sum(
+                self._count_jsonl_lines(self._event_path("qa", aid)) for aid in answer_ids
+            )
+            for answer_id in answer_ids:
+                self._rmdir_if_exists(self._qa_dir(answer_id))
+
+        return counts
+
+    def _qa_answer_ids_for_slug(self, slug: str) -> list[str]:
+        """Scan ``qa/<answer_id>/answer.json`` for the ones belonging to *slug*.
+
+        QA answers are id-keyed, not slug-keyed, so there is no single directory
+        to remove wholesale the way graph/memory/pages allow — every answer_id
+        for this slug has to be found via its own record first.
+        """
+        qa_root = self.root_dir / "qa"
+        if not qa_root.exists():
+            return []
+        ids: list[str] = []
+        for qa_dir in qa_root.iterdir():
+            if not qa_dir.is_dir():
+                continue
+            answer = self._load_json(qa_dir / "answer.json", QaAnswer)
+            if answer is not None and answer.slug == slug:
+                ids.append(qa_dir.name)
+        return ids
+
+    @staticmethod
+    def _count_jsonl_lines(path: Path) -> int:
+        """Count non-empty lines in a JSONL file; 0 if the file is absent."""
+        if not path.exists():
+            return 0
+        return sum(1 for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip())
+
+    @staticmethod
+    def _rmdir_if_exists(path: Path) -> None:
+        """Remove a directory tree if present; no-op if it was already gone."""
+        if path.exists():
+            shutil.rmtree(path)
+
     # -- Pages ---------------------------------------------------------------
 
     def _pages_dir(self, slug: str) -> Path:
@@ -1053,26 +1505,41 @@ class JsonWikiStore(WikiStoreBase):
         """Return the indexing job, or None if absent."""
         return self._load_json(self._job_path(job_id), IndexingJob)
 
-    def update_job(self, job_id: str, **fields: Any) -> IndexingJob:
-        """Partially update *job_id* with *fields*; return the updated record."""
-        job = self.get_job(job_id)
-        if job is None:
-            raise KeyError(f"Job not found: {job_id}")
-        current = job.model_dump(by_alias=False)
-        current.update(fields)
-        updated = IndexingJob.model_validate(current)
-        self._save_json(self._job_path(job_id), updated)
+    def _write_job_patch(self, job_id: str, patch: JobPatch) -> IndexingJob:
+        """Re-read, apply and save the job file under the store lock.
+
+        The whole file is the unit of write here, so a field-scoped write is
+        only real if the read the merge is built on and the write that replaces
+        it cannot be interleaved — the lock has to span BOTH. That is why this
+        re-reads rather than applying the patch to the snapshot the caller
+        already validated against: the caller's read happened outside the lock
+        and may already be stale.
+
+        Every other read-modify-write in this class takes this lock; this path
+        was the omission, not the convention.
+        """
+        with self._lock:
+            job = self._load_json(self._job_path(job_id), IndexingJob)
+            if job is None:
+                raise KeyError(f"Job not found: {job_id}")
+            updated = patch.apply(job)
+            self._save_json(self._job_path(job_id), updated)
         return updated
 
     def list_jobs(self, slug: str | None = None) -> list[IndexingJob]:
-        """Return all jobs (sorted by ``job_id``), optionally filtered to *slug*.
+        """Return all jobs, newest first by ``phase_started_at``, filtered to *slug*.
 
         ``iterdir()`` yields entries in arbitrary, platform-dependent filesystem
-        order, so the list MUST be sorted before return — every consumer
-        (restart recovery, the submission scan in ``jobs.py``, the FE list)
-        relies on a stable order, and an unsorted return surfaced as a
-        Python-version-dependent recovery flake (the first stranded job per slug
-        is the one re-driven). ``job_id`` is the deterministic key.
+        order, so the list MUST be sorted before return, and NOT by ``job_id`` —
+        a ``uuid4`` hex sorts RANDOMLY with respect to when a job actually ran,
+        which is not merely unhelpful but ACTIVELY MISLEADING: at least one
+        caller (``resolve_qa_clone_dir``) assumes this method returns
+        most-recent-first and picks the FIRST ``complete`` hit, which under such
+        a sort could be an arbitrary old checkout on any slug with 2+ completed
+        jobs. ``phase_started_at`` is ISO-8601, so lexicographic ==
+        chronological; a job that never emitted a phase (no timestamp) sorts
+        last, never winning over one that has. :meth:`latest_job` is a thin
+        convenience over this order (narrow by status, take the first).
         """
         jobs_root = self.root_dir / "jobs"
         if not jobs_root.exists():
@@ -1086,7 +1553,7 @@ class JsonWikiStore(WikiStoreBase):
                 continue
             if slug is None or job.slug == slug:
                 jobs.append(job)
-        return sorted(jobs, key=lambda j: j.job_id)
+        return sorted(jobs, key=lambda j: j.phase_started_at or "", reverse=True)
 
     def append_job_event(self, job_id: str, event: dict[str, Any]) -> int:
         """Append *event* to the job event log; return the monotonic idx."""
@@ -1191,21 +1658,75 @@ class JsonWikiStore(WikiStoreBase):
         except Exception:
             return None
 
+    def _job_act_path(self, job_id: str) -> Path:
+        """Filesystem path for the act-stage sidecar file."""
+        return self._job_dir(job_id) / "act.json"
+
+    def save_act_plan(self, job_id: str, plan: dict[str, Any]) -> None:
+        """Persist the act-stage record for *job_id*; overwrites any previous one."""
+        path = self._job_act_path(job_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
+
+    def get_act_plan(self, job_id: str) -> dict[str, Any] | None:
+        """Return the persisted act-stage record, or None if stage 1 hasn't finished."""
+        path = self._job_act_path(job_id)
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
     def get_job_submitted_count(self, job_id: str) -> int:
         """Return the number of pages submitted so far for *job_id*."""
         meta = self._load_job_meta(job_id)
         return int(meta.get("submitted_pages", 0))
 
-    def increment_job_submitted_count(self, job_id: str) -> int:
-        """Atomically increment the submitted-pages counter; return new count."""
+    def claim_job_page(self, slug: str, job_id: str, page_id: str) -> PageClaim:
+        """Record *page_id* under *job_id*, under the lock; count = set size."""
+        if self.get_job(job_id) is None:
+            raise KeyError(f"Job not found: {job_id}")
         with self._lock:
             meta = self._load_job_meta(job_id)
-            count = int(meta.get("submitted_pages", 0)) + 1
-            meta["submitted_pages"] = count
+            claimed = self._claimed_ids(meta, slug, job_id)
+            if page_id in claimed:
+                return PageClaim(count=len(claimed), is_new=False)
+            claimed.append(page_id)
+            meta["submitted_page_ids"] = claimed
+            # Kept in step purely so ``get_job_submitted_count`` stays a cheap
+            # read; the SET is the authority, so the two can never disagree.
+            meta["submitted_pages"] = len(claimed)
             path = self._job_meta_path(job_id)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-            return count
+            return PageClaim(count=len(claimed), is_new=True)
+
+    def _claimed_ids(self, meta: dict[str, Any], slug: str, job_id: str) -> list[str]:
+        """The job's claimed ids, seeded from attribution when it has no record.
+
+        A MISSING key and an empty list are different answers: the first is a
+        job with no claim record (recover what it wrote from attribution), the
+        second is a job that has genuinely written nothing yet (and must not
+        adopt some other index's pages).
+        """
+        stored = meta.get("submitted_page_ids")
+        if stored is None:
+            return sorted(self.page_ids_for_job(slug, job_id))
+        return [str(p) for p in stored]
+
+    def get_job_page_ids(self, slug: str, job_id: str) -> frozenset[str]:
+        """Return the page ids *job_id* wrote (claim record, else attribution)."""
+        return frozenset(self._claimed_ids(self._load_job_meta(job_id), slug, job_id))
+
+    def page_ids_for_job(self, slug: str, job_id: str) -> frozenset[str]:
+        """Page ids whose attribution sidecar entry names *job_id*."""
+        return frozenset(
+            pid
+            for pid, meta in self._load_attribution(slug).items()
+            if isinstance(meta, dict) and meta.get("job_id") == job_id
+        )
 
     def _job_submission_path(self, job_id: str) -> Path:
         """Filesystem path for the submission sidecar file."""
@@ -1276,11 +1797,10 @@ class JsonWikiStore(WikiStoreBase):
         """Return every stored credential blob keyed by scope.
 
         The scope is read from the blob's ``scope`` field (stamped by
-        ``CredentialStore.save``) — authoritative and lossless. Only a legacy
-        blob written before that field existed falls back to inverting
-        :func:`_slug_to_path` (``__`` → ``/``), which corrupts a scope containing
-        a literal ``__``; malformed files are skipped. Read-only: never creates
-        the dir.
+        ``CredentialStore.save``) — authoritative and lossless. Only a blob
+        missing that field falls back to inverting :func:`_slug_to_path`
+        (``__`` → ``/``), which corrupts a scope containing a literal ``__``;
+        malformed files are skipped. Read-only: never creates the dir.
         """
         out: dict[str, dict[str, Any]] = {}
         cred_dir = self.root_dir / "credentials"
@@ -1364,6 +1884,27 @@ class JsonWikiStore(WikiStoreBase):
         """Return the QA answer, or None if absent."""
         return self._load_json(self._qa_path(answer_id), QaAnswer)
 
+    def list_qa(self, status: str | None = None) -> list[QaAnswer]:
+        """Return all QA answers, optionally filtered to *status*.
+
+        ``iterdir()`` order is arbitrary — this is a boot-time/offline scan
+        (mirrors :meth:`list_jobs`), never an interactive listing, so no
+        ordering guarantee is made or needed here.
+        """
+        qa_root = self.root_dir / "qa"
+        if not qa_root.exists():
+            return []
+        answers: list[QaAnswer] = []
+        for qa_dir in qa_root.iterdir():
+            if not qa_dir.is_dir():
+                continue
+            answer = self._load_json(qa_dir / "answer.json", QaAnswer)
+            if answer is None:
+                continue
+            if status is None or answer.status == status:
+                answers.append(answer)
+        return answers
+
     def attach_qa_session(self, answer_id: str, session_id: str) -> None:
         """Associate a Mewbo session_id with a QA answer."""
         path = self._qa_session_path(answer_id)
@@ -1435,8 +1976,8 @@ class JsonWikiStore(WikiStoreBase):
 
         ``GraphNode`` is a discriminated union (schema v2), so validation goes
         through :data:`GraphNodeAdapter` — the ``type`` discriminator picks
-        ``FileNode``/``ClassNode``/… ; legacy lines without ``subkind``/
-        ``attributes`` validate to the defaults. Mirrors ``_load_jsonl`` but
+        ``FileNode``/``ClassNode``/… ; a line without ``subkind``/
+        ``attributes`` validates to the defaults. Mirrors ``_load_jsonl`` but
         can't reuse it (the union is not a single ``BaseModel`` subclass).
         """
         if not path.exists():
@@ -1519,13 +2060,22 @@ class JsonWikiStore(WikiStoreBase):
         self,
         slug: str,
         *,
+        scope: CommitScope,
         node_type: str | None = None,
         name_match: str | None = None,
         neighbors_of: str | None = None,
+        node_ids: Collection[str] | None = None,
     ) -> list[GraphNode]:
-        """Query graph nodes for *slug* with optional filters."""
+        """See ``WikiStoreBase.query_graph``."""
         if neighbors_of is not None:
-            edges = self._load_jsonl(self._edges_path(slug), GraphEdge)
+            # The seed's own generation bounds the walk: an edge is only a
+            # neighbour relation if it belongs to the same generation as the
+            # nodes we are about to return, or the neighbourhood spans commits.
+            edges = [
+                e
+                for e in self._load_jsonl(self._edges_path(slug), GraphEdge)
+                if scope.matches(e.commit_sha)
+            ]
             related_ids: set[str] = set()
             for edge in edges:
                 if edge.source == neighbors_of:
@@ -1533,8 +2083,19 @@ class JsonWikiStore(WikiStoreBase):
                 elif edge.target == neighbors_of:
                     related_ids.add(edge.source)
             all_nodes = self._load_graph_nodes(self._nodes_path(slug))
-            return [n for n in all_nodes if n.node_id in related_ids]
-        nodes = self._load_graph_nodes(self._nodes_path(slug))
+            return [
+                n
+                for n in all_nodes
+                if n.node_id in related_ids and scope.matches(n.commit_sha)
+            ]
+        nodes = [
+            n
+            for n in self._load_graph_nodes(self._nodes_path(slug))
+            if scope.matches(n.commit_sha)
+        ]
+        if node_ids is not None:
+            wanted = set(node_ids)
+            nodes = [n for n in nodes if n.node_id in wanted]
         if node_type is not None:
             nodes = [n for n in nodes if n.type == node_type]
         if name_match is not None:
@@ -1542,9 +2103,13 @@ class JsonWikiStore(WikiStoreBase):
             nodes = [n for n in nodes if lower in n.name.lower()]
         return nodes
 
-    def list_edges(self, slug: str) -> list[GraphEdge]:
-        """Return every edge for *slug* (graph-viewer endpoint)."""
-        return self._load_jsonl(self._edges_path(slug), GraphEdge)
+    def list_edges(self, slug: str, *, scope: CommitScope) -> list[GraphEdge]:
+        """See ``WikiStoreBase.list_edges``."""
+        return [
+            e
+            for e in self._load_jsonl(self._edges_path(slug), GraphEdge)
+            if scope.matches(e.commit_sha)
+        ]
 
     def count_graph_nodes(self, slug: str, *, commit_sha: str | None) -> int:
         """Count *slug* nodes stamped exactly *commit_sha* (``None`` matches None)."""
@@ -1595,6 +2160,50 @@ class JsonWikiStore(WikiStoreBase):
             )
         return counts
 
+    def restamp_graph_artifacts(
+        self, slug: str, *, from_commit: str, to_commit: str
+    ) -> dict[str, int]:
+        """See ``WikiStoreBase.restamp_graph_artifacts``."""
+        counts: dict[str, int] = {}
+        with self._lock:
+            for key, path, loader in (
+                ("nodes", self._nodes_path(slug), self._load_graph_nodes),
+                ("edges", self._edges_path(slug),
+                 lambda p: self._load_jsonl(p, GraphEdge)),
+                ("embeddings", self._embeddings_path(slug),
+                 lambda p: self._load_jsonl(p, Embedding)),
+                ("entities", self._entities_path(slug),
+                 lambda p: self._load_jsonl(p, Entity)),
+                ("entity_edges", self._entity_edges_path(slug),
+                 lambda p: self._load_jsonl(p, EntityRelation)),
+                ("entity_embeddings", self._entity_embeddings_path(slug),
+                 lambda p: self._load_jsonl(p, EntityEmbedding)),
+            ):
+                counts[key] = self._restamp_jsonl(path, loader, from_commit, to_commit)
+        return counts
+
+    def _restamp_jsonl(
+        self, path: Path, loader: Any, from_commit: str, to_commit: str
+    ) -> int:
+        """Rewrite *path* moving ``from_commit`` rows to ``to_commit``; return #moved.
+
+        Graph nodes are ``frozen=True``, so a row is REPLACED via ``model_copy``
+        rather than mutated in place — the same reason hierarchy stamping happens
+        on the wire dict rather than on the node.
+        """
+        items = loader(path)
+        moved = 0
+        out = []
+        for it in items:
+            if it.commit_sha == from_commit:
+                out.append(it.model_copy(update={"commit_sha": to_commit}))
+                moved += 1
+            else:
+                out.append(it)
+        if moved:
+            self._write_jsonl(path, out)
+        return moved
+
     def _retain_jsonl(
         self, path: Path, loader: Any, keep_commit_sha: str
     ) -> int:
@@ -1623,13 +2232,19 @@ class JsonWikiStore(WikiStoreBase):
     # -- Scoped graph deletes (incremental retract) --------------------------
 
     def delete_nodes_by_file(self, slug: str, file: str) -> int:
-        """Delete every code node whose ``file`` equals *file*; return count."""
+        """Delete *file*'s code nodes AND their vectors; return the NODE count."""
         with self._lock:
             nodes = self._load_graph_nodes(self._nodes_path(slug))
             keep = [n for n in nodes if n.file != file]
             removed = len(nodes) - len(keep)
-            if removed:
-                self._write_jsonl(self._nodes_path(slug), keep)
+            if not removed:
+                return 0
+            self._write_jsonl(self._nodes_path(slug), keep)
+            doomed = {n.node_id for n in nodes if n.file == file}
+            vectors = self._load_jsonl(self._embeddings_path(slug), Embedding)
+            kept_vectors = [e for e in vectors if e.node_id not in doomed]
+            if len(kept_vectors) != len(vectors):
+                self._write_jsonl(self._embeddings_path(slug), kept_vectors)
             return removed
 
     def delete_edges_by_source_file(self, slug: str, file: str) -> int:
@@ -1989,11 +2604,16 @@ class JsonWikiStore(WikiStoreBase):
     def save_entity_recommendation(
         self, slug: str, rec: EntityRecommendation
     ) -> None:
-        """Append a resolution-recommendation record (a prior for the next pass)."""
+        """Upsert a recommendation for *slug*; dedup by id (a replay converges)."""
         with self._lock:
-            recs = self._load_jsonl(self._entity_recs_path(slug), EntityRecommendation)
-            recs.append(rec)
-            self._write_jsonl(self._entity_recs_path(slug), recs)
+            existing = {
+                r.id: r
+                for r in self._load_jsonl(
+                    self._entity_recs_path(slug), EntityRecommendation
+                )
+            }
+            existing[rec.id] = rec
+            self._write_jsonl(self._entity_recs_path(slug), list(existing.values()))
 
     def get_entity_recommendations(self, slug: str) -> list[EntityRecommendation]:
         """Return every persisted entity recommendation for *slug*."""
@@ -2007,6 +2627,33 @@ class JsonWikiStore(WikiStoreBase):
 def _strip_mongo_meta(doc: dict[str, Any]) -> dict[str, Any]:
     """Remove MongoDB internal fields (_id) before Pydantic validation."""
     return {k: v for k, v in doc.items() if not k.startswith("_")}
+
+
+# ``wiki_embeddings`` carries each vector twice: the canonical ``vector`` list
+# ``Embedding`` declares, and ``vec_f32`` — the same numbers as a packed
+# little-endian float32 buffer. The duplication is what makes cosine search
+# interactive, and the reason is the BSON array encoding rather than the
+# arithmetic: every element of a 3072-d array carries its own index key plus an
+# 8-byte double, so one document costs ~42 KB and scoring one project's 61,774
+# vectors meant pulling ~2.6 GB off the wire and decoding it into ~190 million
+# Python floats before the first comparison. Measured on that project, the two
+# legs cost 34.1 s of fetch and 23.4 s of scoring; the same vectors as a packed
+# buffer are ~12 KB each and reach NumPy through a single ``frombuffer`` with no
+# per-element Python object at all, taking the whole search to 3.9 s.
+#
+# NumPy alone does NOT fix this — measured at 42.9 s, because the BSON decode is
+# the floor and only scoring got faster. The storage change is the load-bearing
+# half.
+#
+# float32 is not a precision compromise worth worrying about: against the
+# float64 path over that same project the top-30 was IDENTICAL, with a maximum
+# score delta of 2.4e-07.
+_VEC_F32 = "vec_f32"
+
+
+def _pack_f32(vector: Sequence[float]) -> bytes:
+    """Pack *vector* as the little-endian float32 buffer stored at ``_VEC_F32``."""
+    return struct.pack(f"<{len(vector)}f", *vector)
 
 
 def _clean_for_model(doc: dict[str, Any], model_cls: type) -> dict[str, Any]:
@@ -2040,8 +2687,8 @@ class MongoWikiStore(WikiStoreBase):
     - ``wiki_qa``           (answer_id PK; includes ``event_count``)
     - ``wiki_qa_events``    ((answer_id, idx) compound; append-only)
 
-    Phase-3 collections (graph/embeddings) are not created here — the
-    methods raise ``NotImplementedError`` inherited from ``WikiStoreBase``.
+    Graph/embeddings collections are not created here — the methods raise
+    ``NotImplementedError`` inherited from ``WikiStoreBase``.
     """
 
     def __init__(
@@ -2163,8 +2810,8 @@ class MongoWikiStore(WikiStoreBase):
         try:
             return ProjectSettings.model_validate(_strip_mongo_meta(doc))
         except Exception:
-            # A hand-edited / pre-schema document must not break the read path —
-            # the caller then falls back to the legacy per-job submission scan,
+            # A hand-edited / off-schema document must not break the read path —
+            # the caller then falls back to the per-job submission scan,
             # exactly as it does for a project that has no record at all.
             logging.warning("Skipping malformed wiki_settings document for {}", slug)
             return None
@@ -2172,6 +2819,66 @@ class MongoWikiStore(WikiStoreBase):
     def delete_project_settings(self, slug: str) -> bool:
         """Delete *slug*'s settings document; return True if one existed."""
         return self._col("wiki_settings").delete_one({"slug": slug}).deleted_count > 0
+
+    # -- Whole-slug reap (see WikiStoreBase.reap_slug for the family list) ---
+
+    def reap_slug(self, slug: str) -> dict[str, int]:
+        """See ``WikiStoreBase.reap_slug``.
+
+        ``wiki_job_events``/``wiki_qa_events`` carry only their owning id
+        (``job_id``/``answer_id``), never ``slug`` — so those ids are read from
+        ``wiki_jobs``/``wiki_qa`` FIRST, before either collection is touched,
+        and the two event collections are then swept by id.
+        """
+        job_ids = [
+            str(d["job_id"])
+            for d in self._col("wiki_jobs").find({"slug": slug}, {"job_id": 1})
+        ]
+        answer_ids = [
+            str(d["answer_id"])
+            for d in self._col("wiki_qa").find({"slug": slug}, {"answer_id": 1})
+        ]
+
+        counts: dict[str, int] = {}
+        for key, coll in (
+            ("graph_nodes", "wiki_graph_nodes"),
+            ("graph_edges", "wiki_graph_edges"),
+            ("embeddings", "wiki_embeddings"),
+            ("entities", "wiki_entities"),
+            ("entity_edges", "wiki_entity_edges"),
+            ("entity_embeddings", "wiki_entity_embeddings"),
+            ("entity_recommendations", "wiki_entity_recommendations"),
+            ("memory_nodes", "wiki_memory_nodes"),
+            ("memory_edges", "wiki_memory_edges"),
+            ("memory_embeddings", "wiki_memory_embeddings"),
+            ("doc_notes", "wiki_doc_notes"),
+            ("file_manifest", "wiki_file_manifest"),
+            ("pages", "wiki_pages"),
+            ("recovery", "wiki_recovery"),
+            ("jobs", "wiki_jobs"),
+            ("qa", "wiki_qa"),
+        ):
+            counts[key] = int(self._col(coll).delete_many({"slug": slug}).deleted_count)
+
+        counts["job_events"] = (
+            int(
+                self._col("wiki_job_events")
+                .delete_many({"job_id": {"$in": job_ids}})
+                .deleted_count
+            )
+            if job_ids
+            else 0
+        )
+        counts["qa_events"] = (
+            int(
+                self._col("wiki_qa_events")
+                .delete_many({"answer_id": {"$in": answer_ids}})
+                .deleted_count
+            )
+            if answer_ids
+            else 0
+        )
+        return counts
 
     # -- Pages ---------------------------------------------------------------
 
@@ -2249,34 +2956,53 @@ class MongoWikiStore(WikiStoreBase):
             return None
         return IndexingJob.model_validate(_clean_for_model(doc, IndexingJob))
 
-    def update_job(self, job_id: str, **fields: Any) -> IndexingJob:
-        """Partially update *job_id* with *fields*; return the updated record."""
-        job = self.get_job(job_id)
-        if job is None:
-            raise KeyError(f"Job not found: {job_id}")
-        current = job.model_dump(by_alias=False)
-        current.update(fields)
-        updated = IndexingJob.model_validate(current)
-        self._col("wiki_jobs").update_one(
+    def _write_job_patch(self, job_id: str, patch: JobPatch) -> IndexingJob:
+        """``$set`` exactly the patch's fields in ONE server-side update.
+
+        No lock, and none would help: the API runs several worker processes, so
+        a process-local lock proves nothing about the writer next door. Mongo's
+        per-document atomicity is the mechanism instead — a ``$set`` naming only
+        these fields leaves every field it does not name exactly as another
+        writer left it, which removes the lost update without any locking at
+        all. A ``$set`` of the whole dumped model instead is what makes two
+        writers collide on fields neither has touched.
+
+        Returning the AFTER document is part of the same property: the caller
+        gets what is actually stored, a concurrent writer's fields included,
+        rather than a locally merged guess that would report them reverted.
+        """
+        from pymongo import ReturnDocument
+
+        doc = self._col("wiki_jobs").find_one_and_update(
             {"job_id": job_id},
-            {"$set": updated.model_dump(by_alias=False)},
+            {"$set": patch.fields},
+            return_document=ReturnDocument.AFTER,
         )
-        return updated
+        if doc is None:
+            raise KeyError(f"Job not found: {job_id}")
+        return IndexingJob.model_validate(_clean_for_model(doc, IndexingJob))
 
     def list_jobs(self, slug: str | None = None) -> list[IndexingJob]:
-        """Return all jobs (sorted by ``job_id``), optionally filtered to *slug*.
+        """Return all jobs, newest first by ``phase_started_at``, filtered to *slug*.
 
-        Mongo ``find()`` has no inherent order; sort by ``job_id`` so the result
-        is deterministic and matches the JSON backend — restart recovery and the
-        submission scan depend on a stable per-slug order.
+        Mongo ``find()`` has no inherent order, and sorting by ``job_id`` for
+        reproducibility would not fix that: ``job_id`` is a ``uuid4`` hex, which
+        sorts RANDOMLY with respect to when a job actually ran, and at least one
+        caller (``resolve_qa_clone_dir``) assumes this returns most-recent-first
+        and picks the FIRST ``complete`` hit — under such a sort an arbitrary
+        old checkout. Sorted in Python
+        rather than via a Mongo-side ``.sort()`` so both drivers apply the
+        IDENTICAL rule (ISO-8601 ``phase_started_at``, so lexicographic ==
+        chronological; a job with no timestamp sorts last) instead of relying
+        on each backend's own null-ordering semantics to happen to agree.
         """
         query: dict[str, Any] = {}
         if slug is not None:
             query["slug"] = slug
         jobs: list[IndexingJob] = []
-        for doc in self._col("wiki_jobs").find(query).sort("job_id", 1):
+        for doc in self._col("wiki_jobs").find(query):
             jobs.append(IndexingJob.model_validate(_clean_for_model(doc, IndexingJob)))
-        return jobs
+        return sorted(jobs, key=lambda j: j.phase_started_at or "", reverse=True)
 
     def append_job_event(self, job_id: str, event: dict[str, Any]) -> int:
         """Append *event* to the job event log; return the monotonic idx."""
@@ -2362,6 +3088,21 @@ class MongoWikiStore(WikiStoreBase):
         val = doc.get("resume_plan")
         return val if isinstance(val, dict) else None
 
+    def save_act_plan(self, job_id: str, plan: dict[str, Any]) -> None:
+        """Persist the act-stage record on the job doc; overwrites any previous one."""
+        self._col("wiki_jobs").update_one(
+            {"job_id": job_id},
+            {"$set": {"act_plan": plan}},
+        )
+
+    def get_act_plan(self, job_id: str) -> dict[str, Any] | None:
+        """Return the persisted act-stage record, or None if stage 1 hasn't finished."""
+        doc = self._col("wiki_jobs").find_one({"job_id": job_id}, {"act_plan": 1})
+        if doc is None:
+            return None
+        val = doc.get("act_plan")
+        return val if isinstance(val, dict) else None
+
     def get_job_submitted_count(self, job_id: str) -> int:
         """Return the number of pages submitted so far for *job_id*."""
         doc = self._col("wiki_jobs").find_one({"job_id": job_id}, {"submitted_pages": 1})
@@ -2369,18 +3110,78 @@ class MongoWikiStore(WikiStoreBase):
             return 0
         return int(doc.get("submitted_pages", 0))
 
-    def increment_job_submitted_count(self, job_id: str) -> int:
-        """Atomically increment the submitted-pages counter; return new count."""
+    def claim_job_page(self, slug: str, job_id: str, page_id: str) -> PageClaim:
+        """Claim + count in ONE conditional update, so racing writers can't double-count."""
         from pymongo import ReturnDocument
 
+        self._seed_claim_record(slug, job_id)
         doc = self._col("wiki_jobs").find_one_and_update(
-            {"job_id": job_id},
-            {"$inc": {"submitted_pages": 1}},
+            {"job_id": job_id, "submitted_page_ids": {"$ne": page_id}},
+            {"$addToSet": {"submitted_page_ids": page_id}},
             return_document=ReturnDocument.AFTER,
         )
         if doc is None:
-            raise KeyError(f"Job not found: {job_id}")
-        return int(doc.get("submitted_pages", 1))
+            # No match means one of two things, and they are not
+            # interchangeable: the id is already claimed (a re-submit — the
+            # common case), or the job does not exist (a programming error every
+            # other job-keyed write raises on). Read once more to tell them
+            # apart rather than reporting a missing job as a quiet no-op claim.
+            doc = self._col("wiki_jobs").find_one(
+                {"job_id": job_id}, {"submitted_page_ids": 1}
+            )
+            if doc is None:
+                raise KeyError(f"Job not found: {job_id}")
+            return PageClaim(count=len(doc.get("submitted_page_ids") or []), is_new=False)
+        count = len(doc.get("submitted_page_ids") or [])
+        # Mirrored, never authoritative — the SET is the count, so the cheap
+        # ``get_job_submitted_count`` read can never disagree with it.
+        self._col("wiki_jobs").update_one(
+            {"job_id": job_id}, {"$set": {"submitted_pages": count}}
+        )
+        return PageClaim(count=count, is_new=True)
+
+    def _seed_claim_record(self, slug: str, job_id: str) -> None:
+        """Give a pre-claim job its claim set from attribution, once.
+
+        ``{"submitted_page_ids": {"$ne": <id>}}`` matches a document that lacks
+        the field ENTIRELY, so without this a job written before claims existed
+        would claim its way up from zero while its already-written pages sat
+        unaccounted — reporting a fraction of its real progress and, on resume,
+        regenerating pages it had already produced correctly.
+
+        Idempotent and race-safe: the filter requires the field to be absent, so
+        a second caller seeding concurrently either writes the same derived list
+        or does nothing.
+        """
+        seed = self.page_ids_for_job(slug, job_id)
+        if not seed:
+            return
+        self._col("wiki_jobs").update_one(
+            {"job_id": job_id, "submitted_page_ids": {"$exists": False}},
+            {"$set": {"submitted_page_ids": sorted(seed)}},
+        )
+
+    def get_job_page_ids(self, slug: str, job_id: str) -> frozenset[str]:
+        """Return the page ids *job_id* wrote (claim record, else attribution)."""
+        doc = self._col("wiki_jobs").find_one(
+            {"job_id": job_id}, {"submitted_page_ids": 1}
+        )
+        if doc is None:
+            return frozenset()
+        ids = doc.get("submitted_page_ids")
+        if ids is None:
+            return self.page_ids_for_job(slug, job_id)
+        return frozenset(str(p) for p in ids)
+
+    def page_ids_for_job(self, slug: str, job_id: str) -> frozenset[str]:
+        """Page ids whose stored attribution column names *job_id*."""
+        return frozenset(
+            str(d["page_id"])
+            for d in self._col("wiki_pages").find(
+                {"slug": slug, "job_id": job_id}, {"page_id": 1}
+            )
+            if d.get("page_id")
+        )
 
     def save_job_submission(self, job_id: str, submission: dict[str, Any]) -> None:
         """Persist the wizard submission dict for *job_id* (token must be absent)."""
@@ -2423,8 +3224,7 @@ class MongoWikiStore(WikiStoreBase):
 
         Prefers the blob's own ``scope`` field (stamped by
         ``CredentialStore.save``, matching the JSON driver's precedence); falls
-        back to the document's ``slug`` key for a legacy blob written before that
-        field existed.
+        back to the document's ``slug`` key for a blob missing that field.
         """
         out: dict[str, dict[str, Any]] = {}
         for doc in self._col("wiki_credentials").find({}, {"slug": 1, "blob": 1}):
@@ -2485,6 +3285,14 @@ class MongoWikiStore(WikiStoreBase):
         if doc is None:
             return None
         return QaAnswer.model_validate(_clean_for_model(doc, QaAnswer))
+
+    def list_qa(self, status: str | None = None) -> list[QaAnswer]:
+        """Return all QA answers, optionally filtered to *status* (server-side)."""
+        query: dict[str, Any] = {} if status is None else {"status": status}
+        return [
+            QaAnswer.model_validate(_clean_for_model(doc, QaAnswer))
+            for doc in self._col("wiki_qa").find(query)
+        ]
 
     def attach_qa_session(self, answer_id: str, session_id: str) -> None:
         """Associate a Mewbo session_id with a QA answer."""
@@ -2621,22 +3429,34 @@ class MongoWikiStore(WikiStoreBase):
         self._ensure_graph_indexes()
         col = self._col("wiki_embeddings")
         for item in items:
-            doc = self._stamp_attribution(item, commit_sha, job_id).model_dump(by_alias=False)
+            stamped = self._stamp_attribution(item, commit_sha, job_id)
+            doc = stamped.model_dump(by_alias=False)
+            # Written alongside the canonical list so ``vector_search`` can skip
+            # the BSON-array decode entirely — see ``_VEC_F32``.
+            doc[_VEC_F32] = _pack_f32(stamped.vector)
             col.update_one({"slug": slug, "node_id": item.node_id}, {"$set": doc}, upsert=True)
 
     def query_graph(
         self,
         slug: str,
         *,
+        scope: CommitScope,
         node_type: str | None = None,
         name_match: str | None = None,
         neighbors_of: str | None = None,
+        node_ids: Collection[str] | None = None,
     ) -> list[GraphNode]:
-        """Query graph nodes for *slug* with optional filters."""
+        """See ``WikiStoreBase.query_graph``."""
         import re
 
+        commit = scope.filter_fields()
         if neighbors_of is not None:
-            edge_query = {"slug": slug, "$or": [{"source": neighbors_of}, {"target": neighbors_of}]}
+            # The seed's own generation bounds the walk — see the JSON driver.
+            edge_query = {
+                "slug": slug,
+                "$or": [{"source": neighbors_of}, {"target": neighbors_of}],
+                **commit,
+            }
             related_ids: set[str] = set()
             for edge_doc in self._col("wiki_graph_edges").find(edge_query):
                 src = edge_doc.get("source")
@@ -2648,10 +3468,12 @@ class MongoWikiStore(WikiStoreBase):
             if not related_ids:
                 return []
             cursor = self._col("wiki_graph_nodes").find(
-                {"slug": slug, "node_id": {"$in": list(related_ids)}}
+                {"slug": slug, "node_id": {"$in": list(related_ids)}, **commit}
             )
             return [GraphNodeAdapter.validate_python(_strip_mongo_meta(d)) for d in cursor]
-        query: dict[str, Any] = {"slug": slug}
+        query: dict[str, Any] = {"slug": slug, **commit}
+        if node_ids is not None:
+            query["node_id"] = {"$in": list(node_ids)}
         if node_type is not None:
             query["type"] = node_type
         if name_match is not None:
@@ -2659,9 +3481,9 @@ class MongoWikiStore(WikiStoreBase):
         cursor = self._col("wiki_graph_nodes").find(query)
         return [GraphNodeAdapter.validate_python(_strip_mongo_meta(d)) for d in cursor]
 
-    def list_edges(self, slug: str) -> list[GraphEdge]:
-        """Return every edge for *slug* (graph-viewer endpoint)."""
-        cursor = self._col("wiki_graph_edges").find({"slug": slug})
+    def list_edges(self, slug: str, *, scope: CommitScope) -> list[GraphEdge]:
+        """See ``WikiStoreBase.list_edges``."""
+        cursor = self._col("wiki_graph_edges").find({"slug": slug, **scope.filter_fields()})
         return [GraphEdge.model_validate(_strip_mongo_meta(d)) for d in cursor]
 
     def count_graph_nodes(self, slug: str, *, commit_sha: str | None) -> int:
@@ -2697,12 +3519,51 @@ class MongoWikiStore(WikiStoreBase):
             counts[key] = int(self._col(coll).delete_many(stale).deleted_count)
         return counts
 
+    def restamp_graph_artifacts(
+        self, slug: str, *, from_commit: str, to_commit: str
+    ) -> dict[str, int]:
+        """See ``WikiStoreBase.restamp_graph_artifacts``.
+
+        An EXACT ``commit_sha`` match, deliberately not the ``$nin`` shape
+        ``supersede_graph_artifacts`` uses: supersede asks "everything except
+        the keeper", which would here sweep up older generations and
+        field-absent rows and stamp genuinely dead code as live.
+        """
+        self._ensure_graph_indexes()
+        self._ensure_memory_indexes()
+        prior = {"slug": slug, "commit_sha": from_commit}
+        patch = {"$set": {"commit_sha": to_commit}}
+        counts: dict[str, int] = {}
+        for key, coll in (
+            ("nodes", "wiki_graph_nodes"),
+            ("edges", "wiki_graph_edges"),
+            ("embeddings", "wiki_embeddings"),
+            ("entities", "wiki_entities"),
+            ("entity_edges", "wiki_entity_edges"),
+            ("entity_embeddings", "wiki_entity_embeddings"),
+        ):
+            counts[key] = int(self._col(coll).update_many(prior, patch).modified_count)
+        return counts
+
     def vector_search(self, slug: str, qvec: list[float], k: int = 10) -> list[Embedding]:
-        """Return top-k embeddings for *slug* by cosine similarity (in-memory scoring)."""
+        """Return top-k embeddings for *slug* by cosine similarity.
+
+        Cost: ``O(embeddings for the slug)`` — every stored vector is still
+        scored, so this remains the documented scale seam. What the packed path
+        removes is the per-element Python cost of getting there: it reads only
+        ``node_id`` + the ``_VEC_F32`` buffer, scores the whole project as one
+        NumPy matrix product, and materialises exactly *k* ``Embedding`` models.
+
+        Falls back to the pure-Python scan when NumPy is absent or any row
+        lacks ``_VEC_F32`` — never to a PARTIAL result.
+        """
         from .embedder import Embedder
 
+        packed = self._vector_search_packed(slug, qvec, k)
+        if packed is not None:
+            return packed
         pool = [
-            Embedding.model_validate(_strip_mongo_meta(d))
+            Embedding.model_validate(_clean_for_model(d, Embedding))
             for d in self._col("wiki_embeddings").find({"slug": slug})
         ]
         if not pool:
@@ -2711,11 +3572,72 @@ class MongoWikiStore(WikiStoreBase):
         scored.sort(key=lambda t: t[1], reverse=True)
         return [emb for emb, _ in scored[:k]]
 
+    def _vector_search_packed(
+        self, slug: str, qvec: list[float], k: int
+    ) -> list[Embedding] | None:
+        """Top-k over the packed ``_VEC_F32`` buffers, or ``None`` if unusable.
+
+        ``None`` means "this path cannot answer" — the caller falls back. It is
+        returned rather than a short result whenever ANY row is missing or
+        mis-sized, because scoring the subset that happens to be packed would
+        silently search part of a project and still look like a complete answer.
+        """
+        try:
+            import numpy as np  # noqa: PLC0415
+        except ImportError:  # pragma: no cover - numpy ships with the retrieval extra
+            return None
+        if not qvec:
+            return None
+        width = len(qvec) * 4
+        col = self._col("wiki_embeddings")
+        ids: list[str] = []
+        bufs: list[bytes] = []
+        for d in col.find({"slug": slug}, {"node_id": 1, _VEC_F32: 1}):
+            buf = d.get(_VEC_F32)
+            if not isinstance(buf, bytes | bytearray) or len(buf) != width:
+                return None
+            ids.append(str(d["node_id"]))
+            bufs.append(bytes(buf))
+        if not ids:
+            return None
+        mat = np.frombuffer(b"".join(bufs), dtype="<f4").reshape(len(ids), len(qvec))
+        q = np.asarray(qvec, dtype=np.float32)
+        norms = np.linalg.norm(mat, axis=1) * float(np.linalg.norm(q))
+        sims = np.divide(
+            mat @ q, norms, out=np.zeros(len(ids), dtype=np.float32), where=norms != 0
+        )
+        # STABLE sort, matching the pure-Python path's ``sorted(..., reverse=True)``.
+        # This project's vectors do produce exact score ties, and an unstable sort
+        # reorders them — the two paths would then disagree on identical data.
+        order = np.argsort(-sims, kind="stable")[:k]
+        top = [ids[int(i)] for i in order]
+        rank = {node_id: r for r, node_id in enumerate(top)}
+        found = [
+            Embedding.model_validate(_clean_for_model(d, Embedding))
+            for d in col.find({"slug": slug, "node_id": {"$in": top}})
+        ]
+        found.sort(key=lambda e: rank[e.node_id])
+        return found
+
     # -- Scoped graph deletes (incremental retract) --------------------------
 
     def delete_nodes_by_file(self, slug: str, file: str) -> int:
-        """Delete every code node whose ``file`` equals *file*; return count."""
+        """Delete *file*'s code nodes AND their vectors; return the NODE count."""
+        # Read the ids BEFORE the delete — the same node→file join
+        # ``delete_edges_by_source_file`` does, for the same reason: after the
+        # nodes are gone nothing relates a vector back to a file.
+        doomed = [
+            d["node_id"]
+            for d in self._col("wiki_graph_nodes").find(
+                {"slug": slug, "file": file}, {"node_id": 1}
+            )
+        ]
+        if not doomed:
+            return 0
         result = self._col("wiki_graph_nodes").delete_many({"slug": slug, "file": file})
+        self._col("wiki_embeddings").delete_many(
+            {"slug": slug, "node_id": {"$in": doomed}}
+        )
         return int(result.deleted_count)
 
     def delete_edges_by_source_file(self, slug: str, file: str) -> int:
@@ -2782,6 +3704,16 @@ class MongoWikiStore(WikiStoreBase):
         self._col("wiki_entity_recommendations").create_index(
             [("slug", ASCENDING)],
             name="ix_entity_recs_slug", background=True,
+        )
+        # Backs the keyed recommendation upsert. Deliberately NOT unique, unlike
+        # its entity/edge siblings: recommendations were appended unkeyed for
+        # long enough that a live collection can already hold duplicate rows,
+        # and a unique index build fails outright on those — taking every other
+        # index in this method down with it. The upsert converges new writes; a
+        # dedup of the historical rows is a migration, not an index.
+        self._col("wiki_entity_recommendations").create_index(
+            [("slug", ASCENDING), ("id", ASCENDING)],
+            name="ix_entity_recs_slug_id", background=True,
         )
         # Non-unique (slug, commit_sha) indexes back the commit-scoped count the
         # resume predicate keys on AND the per-commit supersede sweep, mirroring
@@ -3116,10 +4048,12 @@ class MongoWikiStore(WikiStoreBase):
     def save_entity_recommendation(
         self, slug: str, rec: EntityRecommendation
     ) -> None:
-        """Append a resolution-recommendation record (a prior for the next pass)."""
+        """Upsert a recommendation for *slug*; dedup by (slug, id)."""
         self._ensure_memory_indexes()
-        self._col("wiki_entity_recommendations").insert_one(
-            {"slug": slug, **rec.model_dump(by_alias=False)}
+        self._col("wiki_entity_recommendations").update_one(
+            {"slug": slug, "id": rec.id},
+            {"$set": {"slug": slug, **rec.model_dump(by_alias=False)}},
+            upsert=True,
         )
 
     def get_entity_recommendations(self, slug: str) -> list[EntityRecommendation]:

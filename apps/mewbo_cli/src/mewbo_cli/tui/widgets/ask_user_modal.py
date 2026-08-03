@@ -20,10 +20,31 @@ Dismiss value (returned via ``push_screen_wait``)::
 
     list[QuestionAnswerItem]  — one item per question, in order (answered)
     None                      — the user pressed esc without answering (declined)
+    ASK_USER_EXPIRED          — the modal's own timeout fired (timed_out)
 
 Free text WINS over a selection when both are present (the "Other" box is the
 always-available answer core guarantees). A submit with any question left
 unanswered is refused (a hint shows) rather than dismissing a half-answer.
+
+When ``args.notes_placeholder`` is set, an extra free-text box renders below
+the questions. Its cleaned value lands on the ``notes`` attribute rather than
+the dismiss value itself — widening the dismiss type would touch every caller
+of ``push_screen_wait`` for a field only the answered path ever populates, so
+the dispatcher reads ``modal.notes`` off the (still-live) modal instance right
+after ``push_screen_wait`` returns.
+
+When ``args.timeout_seconds`` is set, the modal arms its OWN ``set_timer`` in
+``on_mount`` rather than the dispatcher racing a deadline against the blocking
+bridge. The bridge (``question_dispatcher.py``) blocks a background thread
+inside `push_screen_wait`, which only ever returns once THIS screen calls
+``dismiss()`` — nothing external to the screen can unblock it, and cancelling
+an *awaiting* coroutine on the dispatcher side does not reach into that thread.
+Owning the timer here means expiry is just another Textual event, handled on
+the App's own loop exactly like a keypress, with no cross-thread signalling at
+all. ``ASK_USER_EXPIRED`` is a dedicated sentinel — not ``None`` — because
+``None`` already means "declined" (the user answered by a new message
+instead), which would misdescribe a question that merely ran out of time and
+stays open for a late answer.
 """
 
 from __future__ import annotations
@@ -31,7 +52,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from mewbo_core.ask_user import (
+from mewbo_core.tooling.ask_user import (
     AskUserQuestionArgs,
     QuestionAnswerItem,
     QuestionOption,
@@ -42,6 +63,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
+from textual.timer import Timer
 from textual.widgets import Button, Input, OptionList, SelectionList, Static
 
 from mewbo_cli.cli_icons import ICONS
@@ -82,13 +104,45 @@ def collect_answers(
     return items
 
 
-class AskUserModal(ModalScreen["list[QuestionAnswerItem] | None"]):
+def collect_notes(raw: str) -> str | None:
+    """Trim the optional notes field; blank collapses to ``None``, never ``""``.
+
+    Mirrors the render-side contract in ``AskUserQuestionArgs.render_answers``,
+    which also treats a stripped-empty notes string as absent.
+    """
+    trimmed = raw.strip()
+    return trimmed or None
+
+
+class AskUserExpired:
+    """Dismiss sentinel for the modal's own timeout — distinct from ``None``.
+
+    ``None`` already means "declined" (esc — the user answers by a new
+    message instead); reusing it for expiry would tell the model the same
+    lie for a question that merely ran out of time and stays open. A
+    dedicated identity, rather than a string/enum member, keeps the check at
+    the dispatcher a plain ``is`` comparison with no import of core's
+    ``QuestionOutcome`` literal into this widget module.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        """Render as the module-level constant name, for readable diffs/logs."""
+        return "ASK_USER_EXPIRED"
+
+
+ASK_USER_EXPIRED = AskUserExpired()
+
+
+class AskUserModal(ModalScreen["list[QuestionAnswerItem] | AskUserExpired | None"]):
     """Blocking answer surface for one ``ask_user_question`` tool call.
 
     Construct with the tool's :class:`AskUserQuestionArgs`; mount via
     ``push_screen_wait`` to block the run's worker thread until the user
     resolves it. Dismiss value is ``list[QuestionAnswerItem]`` (answered, one
-    per question in order) or ``None`` (``esc`` — declined).
+    per question in order), ``None`` (``esc`` — declined), or
+    ``ASK_USER_EXPIRED`` (the modal's own ``timeout_seconds`` timer fired).
     """
 
     DEFAULT_CSS = """
@@ -132,6 +186,9 @@ class AskUserModal(ModalScreen["list[QuestionAnswerItem] | None"]):
     .ask-question Input {
         margin-bottom: 1;
     }
+    #ask-modal-notes {
+        margin-bottom: 1;
+    }
     #ask-modal-buttons {
         height: 3;
         align: center middle;
@@ -168,6 +225,18 @@ class AskUserModal(ModalScreen["list[QuestionAnswerItem] | None"]):
         # OptionSelected wins). Multi-select reads ``SelectionList.selected``
         # live at submit; free text reads the ``Input`` value live.
         self._single_choice: dict[int, int] = {}
+        # Populated at submit time only; stays ``None`` on a declined dismiss.
+        # The dispatcher reads this attribute directly off the (still-live)
+        # instance after ``push_screen_wait`` returns — see the module docstring.
+        self.notes: str | None = None
+        # Set by ``action_submit`` before it dismisses; the dispatcher reads it
+        # to resolve a submit-versus-expiry race in the user's favour.
+        self.submitted: list[QuestionAnswerItem] | None = None
+        # Armed in ``on_mount`` when the call is bounded; ``None`` otherwise.
+        self._timeout_timer: Timer | None = None
+        # Guards ``_settle`` against a double dismiss when the timer's own
+        # callback and a keybinding both land in the same event-loop tick.
+        self._resolved = False
 
     # ------------------------------------------------------------------
     # Composition
@@ -183,6 +252,9 @@ class AskUserModal(ModalScreen["list[QuestionAnswerItem] | None"]):
             with VerticalScroll(id="ask-modal-body"):
                 for qi, question in enumerate(self._args.questions):
                     yield from self._compose_question(qi, question)
+                if self._args.notes_placeholder:
+                    yield Static("Notes (optional)", classes="ask-q-header")
+                    yield Input(placeholder=self._args.notes_placeholder, id="ask-modal-notes")
             yield Static(self._hint_text(), id="ask-modal-hint", markup=True)
             with Horizontal(id="ask-modal-buttons"):
                 yield Button("(ctrl+s) Submit", id="btn-submit", variant="success")
@@ -212,13 +284,20 @@ class AskUserModal(ModalScreen["list[QuestionAnswerItem] | None"]):
             yield Input(placeholder=self._other_placeholder(question), id=f"other-{qi}")
 
     def on_mount(self) -> None:
-        """Focus the first question's option list (or its Other field)."""
+        """Focus the first question's option list (or its Other field); arm the timeout.
+
+        The timer lives HERE, on the App's own event loop, rather than as a
+        deadline raced from the dispatcher's side of the blocking bridge — see
+        the module docstring for why that split matters.
+        """
         for wid in ("#opts-0", "#other-0"):
             try:
                 self.query_one(wid).focus()
-                return
+                break
             except Exception:  # noqa: BLE001 — best-effort initial focus
                 continue
+        if self._args.timeout_seconds is not None:
+            self._timeout_timer = self.set_timer(self._args.timeout_seconds, self._expire)
 
     # ------------------------------------------------------------------
     # Selection capture
@@ -260,16 +339,51 @@ class AskUserModal(ModalScreen["list[QuestionAnswerItem] | None"]):
     # ------------------------------------------------------------------
 
     def action_submit(self) -> None:
-        """Collect the answers; dismiss when complete, else flag the gap."""
+        """Collect the answers; dismiss when complete, else flag the gap.
+
+        The collected result is recorded on ``self.submitted`` BEFORE settling,
+        so a submit landing in the same event-loop tick as the deadline is still
+        readable by the dispatcher even if ``_expire`` wins the race to actually
+        dismiss. Without that, an answer the user genuinely typed could be
+        discarded by the expiry path — the api dispatcher already holds the
+        matching law ("the user's answer always wins" over a withdraw), and the
+        two dispatchers should not disagree about whose input outranks a clock.
+        """
         result = self._collect()
         if result is None:
             self._flag_incomplete()
             return
-        self.dismiss(result)
+        self.notes = self._read_notes()
+        self.submitted = result
+        self._settle(result)
 
     def action_decline(self) -> None:
         """Dismiss with ``None`` (esc / Decline — the user answers by message)."""
-        self.dismiss(None)
+        self._settle(None)
+
+    def _expire(self) -> None:
+        """Timer callback: dismiss with the timeout sentinel.
+
+        Runs on the App's own event loop (``set_timer`` wraps the callback in
+        ``call_next``), so this is an ordinary Textual event handler — not a
+        cross-thread call — exactly like ``action_submit``/``action_decline``.
+        """
+        self._settle(ASK_USER_EXPIRED)
+
+    def _settle(self, result: list[QuestionAnswerItem] | AskUserExpired | None) -> None:
+        """Cancel the timeout timer and dismiss exactly once.
+
+        Guards against the narrow race where both a keybinding action and the
+        timer's own callback land in the same tick — whichever runs first wins
+        the dismiss, and the other becomes a harmless no-op instead of a double
+        ``dismiss()`` call on an already-popped screen.
+        """
+        if self._resolved:
+            return
+        self._resolved = True
+        if self._timeout_timer is not None:
+            self._timeout_timer.stop()
+        self.dismiss(result)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Enter in a text field attempts a submit (a hint shows if incomplete)."""
@@ -308,6 +422,16 @@ class AskUserModal(ModalScreen["list[QuestionAnswerItem] | None"]):
             states.append(_QuestionInput(selected_indexes=indexes, other_text=other))
         return collect_answers(self._args.questions, states)
 
+    def _read_notes(self) -> str | None:
+        """Read the optional notes field; absent entirely when never composed."""
+        if not self._args.notes_placeholder:
+            return None
+        try:
+            raw = self.query_one("#ask-modal-notes", Input).value
+        except Exception:  # noqa: BLE001 — a missing field reads as no notes
+            return None
+        return collect_notes(raw)
+
     @staticmethod
     def _qi_of(widget: object | None) -> int | None:
         """Return the question index a widget belongs to via its ``opts-<qi>`` id."""
@@ -335,12 +459,21 @@ class AskUserModal(ModalScreen["list[QuestionAnswerItem] | None"]):
         return "Other (type a free-text answer instead)…"
 
     def _hint_text(self) -> str:
-        """The base key-hint line shown under the questions."""
-        return (
-            "[dim]arrow keys + digits [b]1-4[/b] to pick · type in "
-            "[b]Other[/b] for free text · [b]ctrl+s[/b] submit · "
-            "[b]esc[/b] decline[/dim]"
-        )
+        """The base key-hint line shown under the questions.
+
+        A bounded call gets one understated, static budget line appended —
+        never a live countdown (that would need a timer widget this modal
+        doesn't otherwise carry).
+        """
+        parts = [
+            "arrow keys + digits [b]1-4[/b] to pick",
+            "type in [b]Other[/b] for free text",
+            "[b]ctrl+s[/b] submit",
+            "[b]esc[/b] decline",
+        ]
+        if self._args.timeout_seconds is not None:
+            parts.append(f"times out in {self._args.timeout_seconds}s")
+        return f"[dim]{' · '.join(parts)}[/dim]"
 
     def _refresh_hint(self) -> None:
         """Reset the hint to its base text (clears an incomplete-warning flash)."""
@@ -360,4 +493,4 @@ class AskUserModal(ModalScreen["list[QuestionAnswerItem] | None"]):
             pass
 
 
-__all__ = ["AskUserModal", "collect_answers"]
+__all__ = ["ASK_USER_EXPIRED", "AskUserExpired", "AskUserModal", "collect_answers", "collect_notes"]

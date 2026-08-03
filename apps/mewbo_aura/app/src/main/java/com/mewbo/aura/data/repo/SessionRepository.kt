@@ -123,6 +123,36 @@ class SessionRepository @Inject constructor(
         return true
     }
 
+    /**
+     * Pin ([pinned] true) or unpin the session. `true` on HTTP success, flipping the cached drawer
+     * row in place so the rail re-sections instantly — same degrade-to-`false` idiom as
+     * [renameSession]/[archiveSession].
+     *
+     * The REQUESTED state is what gets written to the cache, not a state read back off the
+     * response: the acknowledgement's shape is deliberately over-tolerant
+     * ([com.mewbo.aura.data.api.PinSessionResponseDto]), so a body that omitted `pinned` would
+     * otherwise silently un-pin the row the server just pinned. `pinnedAt` is adopted only when the
+     * server actually sent one — the client never mints a timestamp, and the next
+     * [refreshSessions] carries server truth regardless.
+     */
+    suspend fun setPinned(sessionId: String, pinned: Boolean): Boolean {
+        val response = runCatching {
+            if (pinned) api.pinSession(sessionId) else api.unpinSession(sessionId)
+        }
+            .onFailure { if (it is CancellationException) throw it }
+            .getOrNull() ?: return false
+        _sessions.update { list ->
+            list.map {
+                if (it.sessionId == sessionId) {
+                    it.copy(pinned = pinned, pinnedAt = if (pinned) response.pinnedAt ?: it.pinnedAt else null)
+                } else {
+                    it
+                }
+            }
+        }
+        return true
+    }
+
     /** `true` on HTTP success, removing the row from the cached drawer list in place. */
     suspend fun archiveSession(sessionId: String): Boolean {
         val succeeded = runCatching { api.archiveSession(sessionId) }

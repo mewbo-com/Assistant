@@ -48,7 +48,7 @@ def _fast_sse(monkeypatch):
 @pytest.fixture
 def wiki_app(tmp_path: Path, monkeypatch, store, runtime):
     """Flask test app with wiki routes mounted and a temp JsonWikiStore."""
-    monkeypatch.setenv("MASTER_API_TOKEN", API_KEY)
+    monkeypatch.setenv("MEWBO_MASTER_API_TOKEN", API_KEY)
     # backend reads MASTER_API_TOKEN at import time; if another test imported it
     # earlier in the run, setenv is too late. Force the resolved attribute so
     # auth works regardless of collection/import order.
@@ -208,6 +208,93 @@ def test_qa_start_persists_scope_as_first_class_session_state(store, runtime):
     # meta event exposes the backing session id (addressable continuation)
     meta = store.load_qa_events(answer.answer_id)[0]
     assert meta["sessionId"] == "sess-qa-abc"
+
+
+# ---------------------------------------------------------------------------
+# Unit: mode selection — fast vs deep
+# ---------------------------------------------------------------------------
+
+
+def test_qa_start_fast_mode_selects_fast_tools_playbook_and_budget(store, runtime):
+    """mode='fast' dispatches QA_FAST_TOOLS + wiki-qa-fast.md's body + the
+    config-resolved fast step budget (default 15) — never QA_TOOLS/wiki-qa.md."""
+    from mewbo_api.wiki.jobs import QA_FAST_TOOLS
+
+    answer = WikiQaSession.start(
+        slug="org/repo",
+        question="Where is X defined?",
+        from_page_id="",
+        model="anthropic/claude-sonnet-4-6",
+        mode="fast",
+        runtime=runtime,
+    )
+    assert answer.mode == "fast"
+    assert store.get_qa(answer.answer_id).mode == "fast"
+    kw = runtime.start_async.call_args.kwargs
+    assert kw["allowed_tools"] == QA_FAST_TOOLS
+    assert kw["session_step_budget"] == 15
+    assert "no probe fleet" in kw["skill_instructions"]
+    assert "spawn_agent" not in kw["allowed_tools"]
+    assert "check_agents" not in kw["allowed_tools"]
+
+
+def test_qa_start_deep_mode_is_byte_identical_to_before_mode_existed(store, runtime):
+    """mode='deep' (and the default) still dispatches QA_TOOLS/wiki-qa.md/
+    QA_SESSION_STEP_BUDGET — deep mode must not regress with mode's addition."""
+    from mewbo_api.wiki.jobs import QA_SESSION_STEP_BUDGET, QA_TOOLS
+
+    answer = WikiQaSession.start(
+        slug="org/repo",
+        question="How does the auth flow work end to end?",
+        from_page_id="",
+        model="anthropic/claude-sonnet-4-6",
+        mode="deep",
+        runtime=runtime,
+    )
+    assert answer.mode == "deep"
+    kw = runtime.start_async.call_args.kwargs
+    assert kw["allowed_tools"] == QA_TOOLS
+    assert kw["session_step_budget"] == QA_SESSION_STEP_BUDGET
+    assert "wiki-qa-probe" in kw["skill_instructions"]
+
+
+def test_qa_fast_step_budget_reads_config(store, runtime, monkeypatch):
+    """The fast budget is config-tunable, not hardcoded — a configured value wins.
+
+    ``_qa_step_budget`` imports ``get_config_value`` function-locally (a lazy
+    import, same pattern as the rest of this module), so the patch target is
+    the SOURCE (``mewbo_core.config.get_config_value``), not a module-level
+    alias in ``jobs.py`` — there isn't one to patch.
+    """
+    def _fake_get_config_value(*path, default=None):
+        if path == ("wiki", "qa_fast_step_budget"):
+            return 7
+        return default
+
+    monkeypatch.setattr(
+        "mewbo_core.config.get_config_value", _fake_get_config_value,
+    )
+    WikiQaSession.start(
+        slug="org/repo", question="Q", from_page_id="", model="m", mode="fast", runtime=runtime,
+    )
+    assert runtime.start_async.call_args.kwargs["session_step_budget"] == 7
+
+
+def test_qa_follow_up_keeps_fast_mode_without_a_mode_kwarg(store, runtime):
+    """A follow-up on a fast-mode answer keeps dispatching fast — the caller
+    never passes mode; it is read off the prior answer."""
+    from mewbo_api.wiki.jobs import QA_FAST_TOOLS
+
+    first = WikiQaSession.start(
+        slug="org/repo", question="Where is X?", from_page_id="", model="m",
+        mode="fast", runtime=runtime,
+    )
+    runtime.is_running.return_value = False
+    WikiQaSession.follow_up(
+        first.answer_id, "And where is Y?", runtime=runtime,
+    )
+    kw = runtime.start_async.call_args.kwargs  # the follow-up's call (most recent)
+    assert kw["allowed_tools"] == QA_FAST_TOOLS
 
 
 # ---------------------------------------------------------------------------
@@ -557,6 +644,56 @@ def test_post_qa_requires_auth(client):
     assert resp.status_code == 401
 
 
+def test_post_qa_unknown_mode_returns_400_naming_the_field(client):
+    """An unrecognised mode value is a 400 naming 'mode', never a silent fallback."""
+    c, _ = client
+    resp = c.post(
+        "/v1/wiki/qa",
+        json=_valid_qa_body(mode="bogus"),
+        headers={"X-Api-Key": API_KEY},
+    )
+    assert resp.status_code == 400
+    data = resp.get_json()
+    assert data["code"] == "validation"
+    assert "mode" in data.get("fields", {})
+
+
+def test_post_qa_unknown_field_returns_400(client):
+    """extra='forbid' now reaches this route — a client-side typo is a clean 400."""
+    c, _ = client
+    resp = c.post(
+        "/v1/wiki/qa",
+        json=_valid_qa_body(unexpectedField="x"),
+        headers={"X-Api-Key": API_KEY},
+    )
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "validation"
+
+
+def test_post_qa_omitted_mode_defaults_to_fast_end_to_end(client):
+    """Omitting mode entirely defaults the persisted answer to 'fast'."""
+    c, store = client
+    body = _valid_qa_body()
+    body.pop("mode", None)
+    resp = c.post("/v1/wiki/qa", json=body, headers={"X-Api-Key": API_KEY})
+    assert resp.status_code == 200
+    answer_id = _answer_id_from_sse(resp)
+    assert store.get_qa(answer_id).mode == "fast"
+
+
+def test_post_qa_explicit_deep_mode_round_trips(client):
+    """An explicit mode='deep' is honoured and persisted, not overridden to fast."""
+    c, store = client
+    resp = c.post(
+        "/v1/wiki/qa",
+        json=_valid_qa_body(mode="deep"),
+        headers={"X-Api-Key": API_KEY},
+    )
+    assert resp.status_code == 200
+    answer_id = _answer_id_from_sse(resp)
+    assert store.get_qa(answer_id).mode == "deep"
+
+
 # ---------------------------------------------------------------------------
 # Route: POST /v1/wiki/qa with answerId (continuation)
 # ---------------------------------------------------------------------------
@@ -742,6 +879,18 @@ def test_get_qa_snapshot_returns_answer(client):
     assert data["answerId"] == "ans-snap-001"
     assert "summarySources" in data
     assert "blocks" in data
+
+
+def test_get_qa_snapshot_reports_mode(client):
+    """GET /v1/wiki/qa/<id> reports mode — the additive QaAnswer.mode field."""
+    c, store = client
+    _seed_qa(store, "ans-snap-mode")
+    store.update_qa_fields(
+        store.get_qa("ans-snap-mode").model_copy(update={"mode": "fast"})
+    )
+    resp = c.get("/v1/wiki/qa/ans-snap-mode", headers={"X-Api-Key": API_KEY})
+    assert resp.status_code == 200
+    assert resp.get_json()["mode"] == "fast"
 
 
 def test_get_qa_snapshot_resolves_summary_graph_refs(client):

@@ -23,5 +23,12 @@ test("front — console home landing", async ({ page, demo }) => {
     page.getByText(SEED.session.authRefactorTitle).first(),
   ).toBeVisible();
 
+  // Membership alone ("one seeded title is present") passes whether the list
+  // shows 1 row or 18 — the exact prod failure this bundle's origin
+  // reclassification once caused, where 1 of 100 sessions survived the
+  // default filter. Pin the CARDINALITY: all 18 seeded sessions are default-
+  // visible origins, so exactly 18 rows must render.
+  await expect(page.getByTestId("session-row")).toHaveCount(18);
+
   await demo.capturePage("front");
 });

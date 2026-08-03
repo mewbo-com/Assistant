@@ -69,9 +69,10 @@ function useRailMeta(): RailMeta | null {
  *  Geometry, spacing, resting type and the focus ring come from the SHARED rail
  *  kit (`railRowCls` + `FOCUS_RING` in `nav-rail/rows.tsx`) — the same constants
  *  `RailRow` composes, so this row cannot drift from its Wiki/Search/Apps
- *  neighbours again. It used to re-spell them, and duly fell out of sync: it sat
- *  at `h-8` against the rail's `h-7` after a density change, rendering Tasks
- *  recents 4px taller than the rows directly above them.
+ *  neighbours. Re-spelling the constants locally instead of importing them is
+ *  exactly how a row drifts: it sat at `h-8` against the rail's `h-7` after a
+ *  density change, rendering Tasks recents 4px taller than the rows directly
+ *  above them.
  *
  *  Only COLOUR is supplied here, and that is the kit's design, not a shortfall:
  *  the assistant-ui primitive splits a row across `Root` (which owns the

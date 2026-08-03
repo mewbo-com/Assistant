@@ -21,15 +21,11 @@ import com.mewbo.aura.ui.theme.AuraColors
 import com.mewbo.aura.ui.theme.AuraMotion
 import com.mewbo.aura.ui.theme.LocalAssistantExtras
 
-// AGSL (RuntimeShader, API 33+). A full-bleed top wash: gold blended to green across the width
-// (pixel-sampled from four real-device captures — supersedes the Rev C "purple↔amber"
-// eyeballed estimate, which no capture ever showed), fading to nothing by
-// [AuraColors.auroraWashTopFadeHeightFraction] of the screen height (§3.3, S1). The color "drift"
-// (M4: "drifting hue slowly") is approximated cheaply by sliding the gold/green blend boundary
-// left-right over time rather than a full HSV hue rotation — visually reads as the gradient
-// breathing/living, at a fraction of the shader cost. The shared [GlslNoise.ditherPremul] breaks 8-bit
-// banding on the smooth vertical falloff (the one place this brief calls out banding risk
-// explicitly; reconfirmed zero banding in every real capture, so this stays mandatory).
+// AGSL (RuntimeShader, API 33+). A full-bleed top wash: gold blended to green across the width,
+// fading to nothing by [AuraColors.auroraWashTopFadeHeightFraction] of the screen height. The
+// color drift slides the gold/green blend boundary left-right over time rather than a full HSV
+// hue rotation - reads as the gradient breathing, at a fraction of the shader cost. The shared
+// [GlslNoise.ditherPremul] breaks 8-bit banding on the smooth vertical falloff.
 private val AURORA_WASH_SHADER_SRC = """
 uniform float2 iResolution;
 uniform float iTime;
@@ -53,11 +49,8 @@ half4 main(float2 fragCoord) {
 
     float alpha = clamp(verticalFade * iIntensity, 0.0, 1.0);
 
-    // Mandatory dither (Rule 3), via the ONE shared primitive, on the PREMULTIPLIED colour (see
-    // [GlslNoise.ditherPremul]: dithering before the `* alpha` scales the perturbation by alpha and
-    // neuters it exactly where the falloff is flattest). This replaces a hand-rolled
-    // `valueNoise(fragCoord * 0.5)` at 3/255 — value noise is spatially CORRELATED, which is the one
-    // thing a dither must never be: it smears banding into blotches instead of breaking it.
+    // Dither applies to the PREMULTIPLIED colour ([GlslNoise.ditherPremul]) - dithering before the
+    // `* alpha` would scale the perturbation by alpha and neuter it where the falloff is flattest.
     return half4(ditherPremul(col * alpha, alpha, fragCoord), alpha);
 }
 """
@@ -68,10 +61,9 @@ half4 main(float2 fragCoord) {
  * of silently missing a case here.
  */
 internal object AuroraWashUniformMath {
-    // AuraMotion names the edge glow's hue-rotation rate (M1/M2) explicitly; the wash's own M4
-    // "drifting hue slowly" has no separate named Hz, so Streaming reuses that same atmospheric
-    // rate; Thinking and Resting each derive a deliberately subtler fraction of it (calmer reads
-    // for "not actively generating" — Resting is the calmest of the three, an ambient idle state).
+    // Streaming reuses the edge glow's own hue-rotation rate (AuraMotion.edgeHueRotationHz);
+    // Thinking and Resting each derive a subtler fraction of it - calmer reads for "not actively
+    // generating," with Resting the calmest as an ambient idle state.
     private const val THINKING_DRIFT_FRACTION = 0.7f
     private const val RESTING_DRIFT_FRACTION = 0.4f
 
@@ -89,31 +81,29 @@ internal object AuroraWashUniformMath {
         AuroraState.Streaming -> AuraMotion.edgeHueRotationHz
     }
 
-    /** Ramping in (entering Thinking/Streaming, M3) and fading out (settling to Hidden, M4) use
-     * different named durations - direction is fully determined by the target alone: intensity
-     * only ever targets 0 (fade-out) or 1 (ramp-in), never a partial value. */
+    /** Ramping in (entering Thinking/Streaming) and fading out (settling to Hidden) use different
+     * named durations - direction is fully determined by the target alone: intensity only ever
+     * targets 0 (fade-out) or 1 (ramp-in), never a partial value. */
     fun transitionSpec(targetIntensity: Float): AnimationSpec<Float> =
         tween(if (targetIntensity > 0f) AuraMotion.thinkingRampMs else AuraMotion.settleFadeMs)
 }
 
 /**
- * Full-bleed top wash (§3.3, S1, M3/M4): gold-to-green gradient (measured) fading to
- * canvas by [AuraColors.auroraWashTopFadeHeightFraction], with slow hue drift while active — active
- * for [AuroraState.Resting] (landing/idle: real captures show it visibly present at rest, not
- * only during generation) as well as [AuroraState.Thinking]/[AuroraState.Streaming]. Renders BEHIND
- * content and never tints text/icons/touch targets (§3.3 rule) — callers place it as the
- * bottom-most layer in a `Box`. Draws nothing once fully settled to [AuroraState.Hidden] (skips the
- * shader entirely, not just alpha-zeroed).
+ * Full-bleed top wash: gold-to-green gradient fading to canvas by
+ * [AuraColors.auroraWashTopFadeHeightFraction], with slow hue drift while active - active for
+ * [AuroraState.Resting] (idle) as well as [AuroraState.Thinking]/[AuroraState.Streaming]. Renders
+ * BEHIND content and never tints text/icons/touch targets - callers place it as the bottom-most
+ * layer in a `Box`. Draws nothing once fully settled to [AuroraState.Hidden] (skips the shader
+ * entirely, not just alpha-zeroed).
  */
 @Composable
 fun AuroraWashTop(state: AuroraState, modifier: Modifier = Modifier) {
     val extras = LocalAssistantExtras.current
     val target = AuroraWashUniformMath.targetIntensity(state)
-    // kept as an un-destructured State<Float> (no `by`) - see
-    // AuroraEdgeGlow.kt's identical fix for the full rationale (composable-scope `by` reads
+    // Kept as an un-destructured State<Float> (no `by`) - a composable-scope `by` read would
     // subscribe this composable to recompose on every animation frame; onDrawBehind's `.value`
-    // read below doesn't). The render-or-not decision routes through derivedStateOf instead, which
-    // only recomposes when the boolean itself flips.
+    // read below doesn't. The render-or-not decision routes through derivedStateOf, which only
+    // recomposes when the boolean itself flips.
     val intensity: State<Float> = animateFloatAsState(
         targetValue = target,
         animationSpec = if (extras.reducedMotion) snap() else AuroraWashUniformMath.transitionSpec(target),

@@ -1,9 +1,8 @@
 """Editable wiki-project settings — the read/validate/write façade.
 
-Post-onboarding CRUD for a wiki project's settings (model, ref, depth, language,
-scope filters, dev-mode, description). Before this, those were captured once by
-the wizard and effectively immutable: there was no PATCH route under
-``/v1/wiki/*`` and no write target that survived a reindex.
+CRUD for an already-indexed wiki project's settings (model, ref, depth, language,
+scope filters, dev-mode, description) — the ONE write target for them that
+survives a reindex, reached through ``PATCH /v1/wiki/projects/<slug>``.
 
 **The architectural fact this module is built around.** Two records back a "wiki
 project", and only one of them is editable:
@@ -20,7 +19,7 @@ project", and only one of them is editable:
 
 Everything except ``desc`` therefore **takes effect on the next index**, not
 immediately — this façade never triggers one (the user drives that with the
-existing Refresh action), so a settings edit is free and can't be used to bypass
+Refresh action), so a settings edit is free and can't be used to bypass
 the per-IP indexing rate limiter.
 
 Paradigm: :class:`WikiProjectSettings` is an atomic class (the
@@ -102,6 +101,20 @@ class ProjectSettingsPatch(BaseModel):
     # that policy, while an omitted key leaves whatever is on file untouched
     # (:meth:`changes`).
     fallback_models: list[str] | None = Field(default=None, alias="fallbackModels")
+    # Operator-authored indexing guidance and the external MCP servers attached
+    # to the next index. Same pinned cross-package contract as
+    # ``fallback_models`` — identical name and type on ``WizardSubmission``,
+    # ``ProjectSettings`` and here, and the validators below DELEGATE to the
+    # domain model's rules rather than restating them, so a value this route
+    # accepts is exactly a value the record can hold.
+    #
+    # ``mcpServers`` is settable HERE and at onboarding, and nowhere else. That
+    # is load-bearing rather than a UX choice: an MCP server entry names a
+    # process to spawn, so a per-run or agent-reachable write path would be an
+    # arbitrary-execution seam. Both routes that accept it already sit behind
+    # ``@guard.requires("wiki.admin")``.
+    custom_instructions: str | None = Field(default=None, alias="customInstructions")
+    mcp_servers: dict[str, dict] | None = Field(default=None, alias="mcpServers")
     desc: str | None = None
     # Accepted, but IDENTITY-GUARDED (see WikiProjectSettings._guard_identity):
     # only a re-normalisation of the SAME repo is allowed. Re-pointing a slug at
@@ -130,6 +143,18 @@ class ProjectSettingsPatch(BaseModel):
         if v is None:
             return None
         return [item.strip() for item in v if item and item.strip()]
+
+    @field_validator("custom_instructions")
+    @classmethod
+    def _check_instructions(cls, v: str | None) -> str | None:
+        """The domain model's rule, including its length cap and its reason."""
+        return WizardSubmission.check_custom_instructions(v)
+
+    @field_validator("mcp_servers")
+    @classmethod
+    def _check_servers(cls, v: dict[str, dict] | None) -> dict[str, dict] | None:
+        """The domain model's rule — see :meth:`_check_instructions`."""
+        return WizardSubmission.check_mcp_servers(v)
 
     def changes(self) -> dict[str, Any]:
         """The fields the client EXPLICITLY sent, by python name.
@@ -178,6 +203,8 @@ class WikiProjectSettings:
             "repo_url",
             "platform",
             "fallback_models",
+            "custom_instructions",
+            "mcp_servers",
         }
     )
 
@@ -190,6 +217,8 @@ class WikiProjectSettings:
         "graph_only": "graphOnly",
         "repo_url": "repoUrl",
         "fallback_models": "fallbackModels",
+        "custom_instructions": "customInstructions",
+        "mcp_servers": "mcpServers",
     }
 
     @classmethod
@@ -246,6 +275,21 @@ class WikiProjectSettings:
             "files": list(settings.files),
             "graphOnly": settings.graph_only,
             "fallbackModels": settings.fallback_models,
+            "customInstructions": settings.custom_instructions,
+            # NAMES ONLY — never the entries. This route is gated on
+            # ``wiki.read`` while the PATCH that sets the field is
+            # ``wiki.admin``, and a standard MCP entry carries credentials in its
+            # ``env`` block (``{"gh": {"command": "npx", "env": {"GITHUB_TOKEN":
+            # "ghp_…"}}}``). Echoing the stored value verbatim therefore handed
+            # any reader a secret an admin set — the same mistake ``token`` is
+            # popped out of the job sidecar to avoid, and the opposite of the
+            # rule the ``credential`` field below already follows.
+            #
+            # The field is WRITE-ONLY as a result, exactly like an ``x-secret``
+            # config field: the console renders these names read-only and sends a
+            # replacement only when the operator types a fresh full config, so a
+            # redacted read can never be PATCHed back over the real one.
+            "mcpServers": sorted(settings.mcp_servers) if settings.mcp_servers else [],
             # The override if one is set, else what the project is actually
             # displaying today — so the edit form is never blank on a project
             # whose description came from the platform fetch.
@@ -311,8 +355,8 @@ class WikiProjectSettings:
         what a refresh does can never disagree:
 
         1. the slug-keyed :class:`ProjectSettings` record (the PATCH target);
-        2. the newest per-job submission sidecar (a project onboarded before that
-           record existed — the first PATCH materialises a record from it);
+        2. the newest per-job submission sidecar (a project first indexed before
+           that record existed — the first PATCH materialises a record from it);
         3. the ``Project`` record's own fields (nothing recorded how it was indexed).
         """
         settings = self._store.get_project_settings(slug)
@@ -439,7 +483,7 @@ class WikiProjectSettings:
                         f"repoUrl would re-point {current_scope.value!r} at "
                         f"{new_scope.value!r} — the slug is this project's identity "
                         "(pages, graph, credentials and freshness are all keyed by "
-                        "it). Delete the project and onboard the new repository "
+                        "it). Delete the project and index the new repository "
                         "instead."
                     ),
                     fields={"repoUrl": "would change repository identity"},
@@ -450,7 +494,7 @@ class WikiProjectSettings:
     def _identity_of(self, settings: ProjectSettings) -> CredentialScope | None:
         """The (host, owner, repo) identity a project is currently pinned to.
 
-        Prefers the configured ``repo_url`` and falls back to the slug — a legacy
+        Prefers the configured ``repo_url`` and falls back to the slug — a
         project may carry no URL while its slug still names the repo.
         """
         if settings.repo_url:

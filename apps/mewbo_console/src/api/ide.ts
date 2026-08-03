@@ -16,8 +16,6 @@ export interface IdeInstance {
   max_deadline: string;
   remaining_seconds: number;
   extensions: number;
-  cpus: number;
-  memory: string;
 }
 
 export interface IdeErrorBody {

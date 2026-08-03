@@ -9,7 +9,9 @@ from __future__ import annotations
 import mongomock
 import pytest
 from mewbo_graph.wiki.types import (
+    CommitScope,
     Frontmatter,
+    IndexFingerprint,
     IndexingJob,
     NavEntry,
     Project,
@@ -105,6 +107,43 @@ def test_project_crud_mongo() -> None:
     assert store.delete_project("org/repo") is False
     assert store.get_project("org/repo") is None
     assert len(store.list_projects()) == 1
+
+
+def test_project_crud_mongo_roundtrips_fingerprint() -> None:
+    """The nested ``IndexFingerprint`` survives the REAL Mongo
+    ``replace_one``/``find_one`` path, not just ``model_validate`` alone."""
+    store = _store()
+    fp = IndexFingerprint(
+        embedding_model="openai/text-embedding-3-small",
+        graph_schema_version="1",
+        grammar_pack_version="1.12.2",
+        resolver_available=True,
+    )
+    p = _project("org/repo").model_copy(update={"fingerprint": fp})
+    store.create_project(p)
+    got = store.get_project("org/repo")
+    assert got is not None
+    assert got.fingerprint == fp
+
+
+def test_project_crud_mongo_legacy_record_has_no_fingerprint() -> None:
+    """A pre-migration Mongo document (no ``fingerprint`` key at all) must
+    still load through the REAL ``find_one``/``model_validate`` path, with
+    ``fingerprint`` reading ``None`` rather than raising under
+    ``extra="forbid"``.
+
+    Inserted by hand, directly into the collection — bypassing
+    ``create_project`` entirely — so this proves the read path specifically,
+    not just the model layer (``test_types.py``) in isolation.
+    """
+    store = _store()
+    legacy = _project("org/repo").model_dump(by_alias=False)
+    legacy.pop("fingerprint", None)
+    store._col("wiki_projects").insert_one(legacy)
+
+    got = store.get_project("org/repo")
+    assert got is not None
+    assert got.fingerprint is None
 
 
 # ── 2. Page CRUD ───────────────────────────────────────────────────────────────
@@ -324,16 +363,18 @@ def test_upsert_and_query_nodes_mongo() -> None:
     store.upsert_nodes("x/y", nodes)
 
     # No filter
-    all_nodes = store.query_graph("x/y")
+    all_nodes = store.query_graph("x/y", scope=CommitScope.every())
     assert len(all_nodes) == 3
 
     # Filter by type
-    only_fns = store.query_graph("x/y", node_type="Function")
+    only_fns = store.query_graph("x/y", scope=CommitScope.every(), node_type="Function")
     assert len(only_fns) == 1
     assert only_fns[0].name == "foo"
 
     # Filter by name_match (substring, case-insensitive)
-    matched = store.query_graph("x/y", name_match="ba")  # matches "Bar"
+    matched = store.query_graph(
+        "x/y", scope=CommitScope.every(), name_match="ba"
+    )  # matches "Bar"
     assert len(matched) == 1
     assert matched[0].name == "Bar"
 
@@ -348,7 +389,7 @@ def test_upsert_nodes_overwrites_existing_mongo() -> None:
     n2 = make_graph_node(slug="x/y", node_id="n1", type="File", name="a.py",
                    file="a.py", range=(0, 100), docstring="v2")
     store.upsert_nodes("x/y", [n2])
-    result = store.query_graph("x/y")
+    result = store.query_graph("x/y", scope=CommitScope.every())
     assert len(result) == 1
     assert result[0].docstring == "v2"
 
@@ -370,7 +411,7 @@ def test_upsert_and_neighbors_via_edges_mongo() -> None:
         GraphEdge(slug="x/y", source="n1", target="n2", type="CONTAINS"),
         GraphEdge(slug="x/y", source="n2", target="n3", type="CALLS"),
     ])
-    neighbors = store.query_graph("x/y", neighbors_of="n2")
+    neighbors = store.query_graph("x/y", scope=CommitScope.every(), neighbors_of="n2")
     names = sorted([n.name for n in neighbors])
     assert names == ["a.py", "bar"]
 
@@ -398,6 +439,80 @@ def test_vector_search_empty_pool_returns_empty_mongo() -> None:
     assert hits == []
 
 
+# ── Packed-vector fast path (``_VEC_F32``) ─────────────────────────────────────
+# The packed path exists purely for speed, so the only thing worth asserting is
+# that it is INVISIBLE: same ranking as the pure-Python scan, on data that has
+# the property which actually broke an earlier attempt (exact score ties, where
+# an unstable sort silently reordered results).
+
+
+def _packed_corpus(store, n: int = 40) -> list[str]:
+    """Seed *n* embeddings, deliberately including duplicate vectors (⇒ ties)."""
+    from mewbo_graph.wiki.types import Embedding
+
+    items = [
+        Embedding(
+            slug="x/y",
+            node_id=f"n{i}",
+            # Every third node repeats a vector, so several nodes score IDENTICALLY.
+            vector=[float((i % 3) + 1), float(i % 5), 1.0],
+            model="m",
+            dim=3,
+        )
+        for i in range(n)
+    ]
+    store.upsert_embeddings("x/y", items)
+    return [it.node_id for it in items]
+
+
+def test_upsert_embeddings_writes_packed_buffer_mongo() -> None:
+    """The fast path is only reachable if the write path actually packs."""
+    from mewbo_graph.wiki.store import _VEC_F32
+
+    store = _store()
+    _packed_corpus(store, n=6)
+    docs = list(store._col("wiki_embeddings").find({"slug": "x/y"}))
+    assert docs, "expected seeded embeddings"
+    for d in docs:
+        assert isinstance(d.get(_VEC_F32), bytes | bytearray)
+        assert len(d[_VEC_F32]) == len(d["vector"]) * 4
+
+
+def test_packed_and_legacy_paths_rank_identically_mongo() -> None:
+    """Packed vs pure-Python must agree EXACTLY, ties included."""
+    store = _store()
+    _packed_corpus(store, n=40)
+    qvec = [1.0, 2.0, 1.0]
+
+    packed = store._vector_search_packed("x/y", qvec, 10)
+    assert packed is not None, "packed path should be usable on freshly written rows"
+
+    # Strip the buffers to force the SAME call down the legacy branch.
+    from mewbo_graph.wiki.store import _VEC_F32
+
+    store._col("wiki_embeddings").update_many({"slug": "x/y"}, {"$unset": {_VEC_F32: ""}})
+    assert store._vector_search_packed("x/y", qvec, 10) is None
+    legacy = store.vector_search("x/y", qvec=qvec, k=10)
+
+    assert [h.node_id for h in packed] == [h.node_id for h in legacy]
+
+
+def test_vector_search_falls_back_whole_project_on_partial_packing_mongo() -> None:
+    """One unpacked row must NOT yield a result scored over the packed subset."""
+    from mewbo_graph.wiki.store import _VEC_F32
+
+    store = _store()
+    _packed_corpus(store, n=12)
+    store._col("wiki_embeddings").update_one(
+        {"slug": "x/y", "node_id": "n7"}, {"$unset": {_VEC_F32: ""}}
+    )
+    assert store._vector_search_packed("x/y", [1.0, 2.0, 1.0], 5) is None
+    # The public entry point still answers, over the FULL project.
+    hits = store.vector_search("x/y", qvec=[1.0, 2.0, 1.0], k=12)
+    assert len(hits) == 12
+    assert "n7" in {h.node_id for h in hits}
+
+
 def test_graph_isolated_by_slug_mongo() -> None:
     from mewbo_graph.wiki.types import make_graph_node
 
@@ -406,10 +521,10 @@ def test_graph_isolated_by_slug_mongo() -> None:
                                          name="a", file="a", range=(0, 1))])
     store.upsert_nodes("c/d", [make_graph_node(slug="c/d", node_id="x", type="File",
                                          name="c", file="c", range=(0, 1))])
-    assert len(store.query_graph("a/b")) == 1
-    assert store.query_graph("a/b")[0].name == "a"
-    assert len(store.query_graph("c/d")) == 1
-    assert store.query_graph("c/d")[0].name == "c"
+    assert len(store.query_graph("a/b", scope=CommitScope.every())) == 1
+    assert store.query_graph("a/b", scope=CommitScope.every())[0].name == "a"
+    assert len(store.query_graph("c/d", scope=CommitScope.every())) == 1
+    assert store.query_graph("c/d", scope=CommitScope.every())[0].name == "c"
 
 
 # ── 10. attach_job_session / get_job_session ──────────────────────────────────

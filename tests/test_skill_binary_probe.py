@@ -8,7 +8,7 @@ spent steps on a not-found error it had no way to resolve.
 from __future__ import annotations
 
 import pytest
-from mewbo_core.skills import SkillBinaryProbe, SkillRegistry, _parse_skill_file
+from mewbo_core.tooling.skills import SkillBinaryProbe, SkillRegistry, _parse_skill_file
 
 
 @pytest.fixture(autouse=True)
@@ -28,7 +28,7 @@ def installed(monkeypatch):
         lookups.append(binary)
         return f"/usr/bin/{binary}" if binary in present else None
 
-    monkeypatch.setattr("mewbo_core.skills.shutil.which", _which)
+    monkeypatch.setattr("mewbo_core.tooling.skills.shutil.which", _which)
     return present, lookups
 
 
@@ -41,7 +41,9 @@ def _write_skill(root, name: str, frontmatter: str = "") -> None:
 
 def _registry(tmp_path, monkeypatch) -> SkillRegistry:
     # Keep the personal-skills scan off the developer's real home.
-    monkeypatch.setattr("mewbo_core.skills.Path.home", classmethod(lambda cls: tmp_path / "home"))
+    monkeypatch.setattr(
+        "mewbo_core.tooling.skills.Path.home", classmethod(lambda cls: tmp_path / "home")
+    )
     registry = SkillRegistry()
     registry.load(cwd=str(tmp_path))
     return registry

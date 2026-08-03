@@ -296,3 +296,60 @@ def test_mint_entity_unresolvable_anchor_skipped_silently(tmp_path, monkeypatch)
         ).content
     )["entity"]["id"]
     assert store.list_entity_edges(SLUG, source_id=eid) == []
+
+
+def test_mint_entity_refuses_to_re_enrich_on_a_resume(tmp_path, monkeypatch):
+    """``enrich`` had NO code-level skip — the rule was prose in the resume summary.
+
+    ``wiki_build_graph`` and ``wiki_commit_plan`` each short-circuit on their own
+    ``should_skip``; the enrich fan-out is the most expensive phase in the
+    pipeline and had nothing but an instruction telling the model not to re-run
+    it. A refused mint must also not stamp the phase: nothing started.
+    """
+    from mewbo_graph.wiki.resume import ResumePlan
+    from mewbo_graph.wiki.types import IndexingJob
+
+    store = JsonWikiStore(root_dir=tmp_path / "wiki")
+    store.create_job(IndexingJob(
+        jobId="j1", slug=SLUG, status="scanning",
+        scannedCount=0, totalCount=0, currentFile=None,
+    ))
+    _patch_ctx(monkeypatch, store)
+    plan = ResumePlan(skip=frozenset({"graph", "enrich"}), entity_count=42)
+    monkeypatch.setattr(
+        mod, "resolve_job_ctx", lambda sid, rt: _job_ctx_with_plan(store, plan)
+    )
+
+    payload = json.loads(
+        _run(mod.MintEntityTool("s1"), {"name": "Ada", "type": "person"}).content
+    )
+    assert "skipped" in payload
+    assert store.query_entities(SLUG) == []
+    phases = [e["name"] for e in store.load_job_events("j1") if e["type"] == "phase"]
+    assert phases == []
+
+
+def _job_ctx_with_plan(store, resume_plan):
+    """A job ctx carrying a resume plan — the shape ``resolve_job_ctx`` builds."""
+    return SimpleNamespace(
+        slug=SLUG, store=store, session_id="s1", job_id="j1", clone_dir=None,
+        resume_plan=resume_plan, commit_sha=None,
+    )
+
+
+def test_a_qa_session_mint_is_unaffected_by_any_resume_plan(tmp_path, monkeypatch):
+    """A QA ctx carries no resume plan at all, and minting there must still work."""
+    store = JsonWikiStore(root_dir=tmp_path / "wiki")
+    monkeypatch.setattr(mod, "_resolve_runtime", lambda: SimpleNamespace(wiki_store=store))
+    monkeypatch.setattr(mod, "resolve_job_ctx", lambda sid, rt: None)
+    monkeypatch.setattr(
+        mod, "resolve_qa_ctx",
+        lambda sid, rt: SimpleNamespace(slug=SLUG, store=store, session_id="s1"),
+    )
+    monkeypatch.setattr(mod, "_make_embedder", lambda: _FakeEmbedder())
+
+    payload = json.loads(
+        _run(mod.MintEntityTool("s1"), {"name": "Ada", "type": "person"}).content
+    )
+    assert payload["ok"] is True
+    assert len(store.query_entities(SLUG)) == 1

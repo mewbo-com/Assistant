@@ -35,17 +35,19 @@ A widget presents **one focused result from an agentic task** — a ranked list,
 
 ## Reusable components
 
-`components/` holds polished, atomic, copy-paste-ready `render_*`
-functions — GitHub repo cards, search engine result cards, stock ticker
-cards, and so on — each self-contained and scoped with its own
-stylesheet.  See [`components/README.md`](components/README.md) for the
-index, the copy-paste contract (no cross-file imports), and the
-component-author rules.
+`components/` holds polished, atomic, copy-paste-ready component
+classes — GitHub repo cards, search engine result cards, stock ticker
+cards, and so on — each self-contained and bracketed by
+`# ── <ClassName> ─` / `# ── end <ClassName> ─` markers. See
+[`components/README.md`](components/README.md) for the index, the
+copy-paste contract (no cross-file imports), and the component-author
+rules.
 
 ## How to use these examples
 1. Read the example closest to your target widget
 2. If the task needs a rich element, read `components/README.md` and copy
-   the relevant `render_*` function body + its helpers into your `app.py`
+   the relevant class block (banner markers included) into your `app.py`,
+   then call `ClassName(state).render()`
 3. Adapt `app.py` (keep the `open("data.json")` pattern)
 4. Build `data.json` with real data from the parent agent's tool calls
 5. Write both files to the widget directory the agent prompt specifies

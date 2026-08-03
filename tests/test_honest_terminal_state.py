@@ -4,8 +4,8 @@
 Three seams, one contract: a run that stopped short must SAY so.
 
 - ``session_runtime.summarize_session`` — the status derivation. ``unmet_goal``
-  and ``blocked`` are the two arms that used to fall through to ``completed``,
-  taking the recovery affordance with them.
+  and ``blocked`` are the two arms that must not fall through to ``completed``;
+  falling through takes the recovery affordance with them.
 - ``orchestrator`` — the completion payload, which must be able to CONTRADICT
   the status it ships beside, plus the promise-as-completion gate.
 - ``spawn_agent`` — the child terminal a parent is told about, the spawn-time
@@ -20,19 +20,25 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import get_args, get_type_hints
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from mewbo_core.agent_context import AgentContext
-from mewbo_core.classes import OrchestrationState, TaskQueue
+from mewbo_core.agents.agent_context import AgentContext
+from mewbo_core.agents.hypervisor import AgentHypervisor
+from mewbo_core.agents.spawn_agent import SettledStatus, SpawnAgentTool
+from mewbo_core.classes import (
+    CANCELLED_DONE_REASONS,
+    UNACHIEVED_DONE_REASONS,
+    OrchestrationState,
+    TaskQueue,
+)
 from mewbo_core.hooks import HookManager, OutcomeAssertion
-from mewbo_core.hypervisor import AgentHypervisor
-from mewbo_core.orchestrator import Orchestrator
+from mewbo_core.loop.orchestrator import Orchestrator
+from mewbo_core.loop.session_runtime import SessionRuntime
 from mewbo_core.permissions import PermissionDecision, PermissionPolicy
-from mewbo_core.session_runtime import SessionRuntime
-from mewbo_core.session_store import SessionStore
-from mewbo_core.spawn_agent import SpawnAgentTool
-from mewbo_core.tool_registry import ToolRegistry, ToolSpec
+from mewbo_core.session.session_store import SessionStore
+from mewbo_core.tooling.tool_registry import ToolRegistry, ToolSpec
 from pydantic import ValidationError
 
 # ---------------------------------------------------------------------------
@@ -630,7 +636,7 @@ class TestPromiseAsCompletion:
             ctx = AgentContext.root(model_name="model-a", registry=hv)
             tool = _spawn_tool(ctx)
             assert await tool.has_live_owned_runs() is False
-            from mewbo_core.hypervisor import AgentHandle
+            from mewbo_core.agents.hypervisor import AgentHandle
 
             await hv.register(
                 AgentHandle(
@@ -665,19 +671,55 @@ class TestChildTerminalProjection:
     )
     def test_stopped_short_projects_failed(self, done_reason):
         _tq, state = _settled(done_reason)
-        assert SpawnAgentTool._project_terminal_status(state) == "failed"
+        assert state.terminal_status() == "failed"
 
     def test_natural_completion_projects_completed(self):
         _tq, state = _settled("completed")
-        assert SpawnAgentTool._project_terminal_status(state) == "completed"
+        assert state.terminal_status() == "completed"
 
     def test_failed_ground_truth_check_beats_the_reason(self):
         _tq, state = _settled("completed", verified=False)
-        assert SpawnAgentTool._project_terminal_status(state) == "failed"
+        assert state.terminal_status() == "failed"
 
     def test_not_done_projects_failed(self):
         state = OrchestrationState(goal="task", done=False, done_reason=None)
-        assert SpawnAgentTool._project_terminal_status(state) == "failed"
+        assert state.terminal_status() == "failed"
+
+    @pytest.mark.parametrize("done_reason", ["canceled", "cancelled"])
+    def test_cancellation_projects_cancelled(self, done_reason):
+        """A stopped run is neither a success nor an error.
+
+        ``failed`` would report an error nobody hit; ``completed`` reports a
+        success nobody achieved. Both spellings are exercised because the loop
+        mints the one-L form while the lifecycle vocabulary uses the two-L one.
+        """
+        _tq, state = _settled(done_reason)
+        assert state.terminal_status() == "cancelled"
+
+    def test_cancellation_is_not_folded_into_the_unachieved_reasons(self):
+        """The two vocabularies answer different questions and must stay apart.
+
+        A cancelled run did not fall short of its goal — it was never allowed to
+        pursue one. Folding it in would make it project ``failed``, which is the
+        second wrong answer this seam has given.
+        """
+        assert not CANCELLED_DONE_REASONS & UNACHIEVED_DONE_REASONS
+
+    def test_projection_range_is_exactly_settled_status(self):
+        """Pins the projection's declared range against the terminal vocabulary.
+
+        ``_ChildSettled.status`` declares ``SettledStatus`` and returns this
+        projection verbatim, so a member added to one and not the other is a
+        type that lies. The projection could not say ``cancelled`` at all until
+        this seam was fixed, which is exactly the drift this pins.
+        """
+        projected = get_type_hints(OrchestrationState.terminal_status)["return"]
+        assert set(get_args(projected)) == set(get_args(SettledStatus))
+
+    def test_ground_truth_failure_outranks_cancellation(self):
+        """A contradicted claim is substantive; a stop is only a stop."""
+        _tq, state = _settled("canceled", verified=False)
+        assert state.terminal_status() == "failed"
 
 
 class TestHaltedChildIsNotStampedCompleted:
@@ -788,7 +830,7 @@ class TestSpawnModelFallback:
             from unittest.mock import patch
 
             with patch(
-                "mewbo_core.spawn_agent.get_config_value",
+                "mewbo_core.agents.spawn_agent.get_config_value",
                 side_effect=lambda *a, **kw: (
                     allowed if a == ("agent", "allowed_models") else kw.get("default", "")
                 ),
@@ -848,7 +890,7 @@ class TestRetryFiresOnStoppedShort:
         assert outcome.status == "failed"
 
     def test_default_off_is_exactly_one_attempt(self):
-        """Byte-identical to the historical path when nothing opts in."""
+        """Byte-identical to the ungated path when nothing opts in."""
         outcome, attempts = self._drive(None, _settled("halted_no_progress"))
         assert attempts == 1
         assert outcome.status == "failed"

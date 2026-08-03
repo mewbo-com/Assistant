@@ -9,7 +9,10 @@ from typing import Any
 from lsprotocol import types
 from mewbo_core.classes import AbstractTool, ActionStep
 from mewbo_core.common import MockSpeaker
-from mewbo_core.workspace import get_active_containment
+from mewbo_core.workspaces.workspace import (
+    get_active_containment,
+    get_active_project_root,
+)
 
 from mewbo_tools.core import resolve_safe_path
 from mewbo_tools.integration.lsp import get_lsp_manager, run_lsp_async
@@ -67,20 +70,31 @@ class LSPTool(AbstractTool):
         if not file_path:
             return MockSpeaker(content="file_path is required.")
 
-        # Resolve relative paths against CWD. Under an ACTIVE workspace
-        # containment, the LSP tool — which otherwise bypasses the
-        # path guard entirely — is jailed: route through ``resolve_safe_path`` so
-        # a navigation/diagnostics query outside the workspace is denied with the
-        # firebreak's "name what's allowed" error. With no active containment the
-        # resolution is byte-identical to the historical unguarded ``resolve()``,
-        # keeping the staged-off behaviour unchanged.
-        if get_active_containment() is not None:
-            try:
-                resolved = str(resolve_safe_path(file_path))
-            except ValueError as exc:
-                return MockSpeaker(content=f"Path not permitted: {exc}")
-        else:
-            resolved = str(Path(file_path).resolve())
+        # EVERY query goes through the path guard — there is no
+        # containment-off branch. ``diagnostics``/``hover`` return content derived
+        # from the file (``manager.open_file`` reads it and ships the text to the
+        # server), so an unguarded resolve here is an arbitrary-file read that
+        # neither the shell sandbox nor ``read_file`` would have permitted. A
+        # containment-only guard misses the session an operator actually drives:
+        # a root agent is always ``full_access`` and therefore never contained,
+        # which is the same reason path scoping hangs off the active PROJECT root
+        # rather than the containment tier.
+        #
+        # The *base* for a relative ``file_path`` follows whichever scope applies —
+        # the workspace root under containment, else the session's active project
+        # root — instead of ``resolve_safe_path``'s CWD fallback, which on a
+        # container deployment IS the harness. ``None`` (a direct library caller,
+        # a test) keeps the historical CWD base and the historical union of roots.
+        active_containment = get_active_containment()
+        base_root = (
+            active_containment.root
+            if active_containment is not None
+            else get_active_project_root()
+        )
+        try:
+            resolved = str(resolve_safe_path(file_path, root=base_root))
+        except ValueError as exc:
+            return MockSpeaker(content=f"Path not permitted: {exc}")
 
         manager = get_lsp_manager(os.getcwd())
 
@@ -254,7 +268,6 @@ class LSPTool(AbstractTool):
                 uri = loc.uri
                 rng = loc.range
 
-            # Convert file URI to path
             path = uri.replace("file://", "")
             line_num = rng.start.line + 1
             lines.append(f"{path}:{line_num}")

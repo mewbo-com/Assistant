@@ -270,7 +270,7 @@ class TestLSPToolRegistration:
 
         reset_config()
 
-        from mewbo_core.tool_registry import _default_registry
+        from mewbo_core.tooling.tool_registry import _default_registry
 
         registry = _default_registry()
         specs = registry.list_specs(include_disabled=True)
@@ -284,7 +284,7 @@ class TestLSPToolRegistration:
 
         reset_config()
 
-        from mewbo_core.tool_registry import _default_registry
+        from mewbo_core.tooling.tool_registry import _default_registry
 
         registry = _default_registry()
         specs = {s.tool_id: s for s in registry.list_specs(include_disabled=True)}

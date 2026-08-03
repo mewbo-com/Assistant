@@ -28,7 +28,7 @@ import pytest
 if shutil.which("git") is None:  # pragma: no cover
     pytest.skip("git not installed", allow_module_level=True)
 
-from mewbo_core.worktree import (
+from mewbo_core.workspaces.worktree import (
     WORKTREES_DIR,
     WorktreeBranchInUseError,
     WorktreeManager,
@@ -65,7 +65,7 @@ def _make_repo(tmp_path: Path) -> Path:
 
 def test_current_branch_returns_none_when_git_missing(monkeypatch) -> None:
     """FileNotFoundError from subprocess → None (git not on PATH)."""
-    import mewbo_core.worktree as wt_mod
+    import mewbo_core.workspaces.worktree as wt_mod
 
     def _raise_not_found(*args, **kwargs):
         raise FileNotFoundError("git not found")
@@ -82,7 +82,7 @@ def test_current_branch_returns_none_when_git_missing(monkeypatch) -> None:
             raise FileNotFoundError("git not found")
         return original_run(cmd, **kwargs)
 
-    monkeypatch.setattr("mewbo_core.worktree.subprocess.run", _patched_run)
+    monkeypatch.setattr("mewbo_core.workspaces.worktree.subprocess.run", _patched_run)
     result = WorktreeManager.current_branch("/any/path")
     assert result is None
 
@@ -112,7 +112,7 @@ def test_current_branch_returns_none_for_empty_stdout(monkeypatch) -> None:
             return SimpleNamespace(returncode=0, stdout="  \n", stderr="")
         return original_run(cmd, **kwargs)
 
-    monkeypatch.setattr("mewbo_core.worktree.subprocess.run", _patched_run)
+    monkeypatch.setattr("mewbo_core.workspaces.worktree.subprocess.run", _patched_run)
     result = WorktreeManager.current_branch("/any")
     assert result is None
 
@@ -131,7 +131,7 @@ def test_list_branches_returns_empty_on_subprocess_error(monkeypatch) -> None:
             raise subprocess.CalledProcessError(128, cmd, stderr="not a repo")
         return original_run(cmd, **kwargs)
 
-    monkeypatch.setattr("mewbo_core.worktree.subprocess.run", _patched_run)
+    monkeypatch.setattr("mewbo_core.workspaces.worktree.subprocess.run", _patched_run)
     result = WorktreeManager.list_branches("/not/a/repo")
     assert result == []
 
@@ -168,7 +168,7 @@ def test_list_worktrees_returns_empty_on_error(monkeypatch) -> None:
             raise subprocess.CalledProcessError(128, cmd)
         return original_run(cmd, **kwargs)
 
-    monkeypatch.setattr("mewbo_core.worktree.subprocess.run", _patched_run)
+    monkeypatch.setattr("mewbo_core.workspaces.worktree.subprocess.run", _patched_run)
     result = WorktreeManager.list_worktrees("/any")
     assert result == []
 
@@ -194,7 +194,7 @@ def test_list_worktrees_handles_no_trailing_blank_line(monkeypatch) -> None:
             return SimpleNamespace(returncode=0, stdout=porcelain, stderr="")
         return original_run(cmd, **kwargs)
 
-    monkeypatch.setattr("mewbo_core.worktree.subprocess.run", _patched_run)
+    monkeypatch.setattr("mewbo_core.workspaces.worktree.subprocess.run", _patched_run)
     result = WorktreeManager.list_worktrees("/repo")
     assert len(result) == 2
     assert result[0]["branch"] == "main"
@@ -208,7 +208,7 @@ def test_list_worktrees_handles_no_trailing_blank_line(monkeypatch) -> None:
 
 def test_create_calledprocesserror_with_branch_in_use_re(tmp_path: Path, monkeypatch) -> None:
     """CalledProcessError matching _BRANCH_IN_USE_RE raises WorktreeBranchInUseError."""
-    import mewbo_core.worktree as wt_mod
+    import mewbo_core.workspaces.worktree as wt_mod
 
     repo = _make_repo(tmp_path)
 
@@ -243,7 +243,7 @@ def test_create_calledprocesserror_with_branch_in_use_re(tmp_path: Path, monkeyp
             )
         return original_run(cmd, **kwargs)
 
-    monkeypatch.setattr("mewbo_core.worktree.subprocess.run", _fail_with_in_use)
+    monkeypatch.setattr("mewbo_core.workspaces.worktree.subprocess.run", _fail_with_in_use)
 
     with pytest.raises(WorktreeBranchInUseError) as exc_info:
         WorktreeManager.create(str(repo), "feature/auth")
@@ -260,7 +260,7 @@ def test_create_calledprocesserror_without_branch_in_use_re(tmp_path: Path, monk
             raise subprocess.CalledProcessError(128, cmd, stderr="some other git error")
         return original_run(cmd, **kwargs)
 
-    monkeypatch.setattr("mewbo_core.worktree.subprocess.run", _fail_generic)
+    monkeypatch.setattr("mewbo_core.workspaces.worktree.subprocess.run", _fail_generic)
     # Create new-branch first so it exists
     _run(str(repo), "branch", "new-branch")
 
@@ -290,7 +290,7 @@ def test_is_clean_false_when_status_fails(tmp_path: Path, monkeypatch) -> None:
             raise subprocess.CalledProcessError(128, cmd)
         return original_run(cmd, **kwargs)
 
-    monkeypatch.setattr("mewbo_core.worktree.subprocess.run", _fail_status)
+    monkeypatch.setattr("mewbo_core.workspaces.worktree.subprocess.run", _fail_status)
     result = WorktreeManager.is_clean(path)
     assert result is False
 
@@ -308,7 +308,7 @@ def test_is_clean_false_when_ahead_count_not_integer(tmp_path: Path, monkeypatch
             return SimpleNamespace(returncode=0, stdout="not-a-number\n", stderr="")
         return original_run(cmd, **kwargs)
 
-    monkeypatch.setattr("mewbo_core.worktree.subprocess.run", _patched_run)
+    monkeypatch.setattr("mewbo_core.workspaces.worktree.subprocess.run", _patched_run)
     result = WorktreeManager.is_clean(path)
     assert result is False
 
@@ -344,7 +344,7 @@ def test_remove_uses_fallback_repo_path_when_rev_parse_fails(tmp_path: Path, mon
             raise subprocess.CalledProcessError(128, cmd)
         return original_run(cmd, **kwargs)
 
-    monkeypatch.setattr("mewbo_core.worktree.subprocess.run", _patched_run)
+    monkeypatch.setattr("mewbo_core.workspaces.worktree.subprocess.run", _patched_run)
     # Should still succeed — uses wt.parent.parent.parent fallback
     WorktreeManager.remove(path)
     assert not Path(path).exists()
@@ -361,7 +361,7 @@ def test_remove_force_raises_on_repeated_failure(tmp_path: Path, monkeypatch) ->
             raise subprocess.CalledProcessError(1, cmd, stderr="locked worktree")
         return original_run(cmd, **kwargs)
 
-    monkeypatch.setattr("mewbo_core.worktree.subprocess.run", _fail_remove)
+    monkeypatch.setattr("mewbo_core.workspaces.worktree.subprocess.run", _fail_remove)
 
     with pytest.raises(RuntimeError, match="git worktree remove failed"):
         WorktreeManager.remove(path, force=True)
@@ -390,7 +390,7 @@ def test_remove_retries_with_force_on_first_failure(tmp_path: Path, monkeypatch)
             return original_run(["git", "-C", str(repo), "worktree", "prune"], **kwargs)
         return original_run(cmd, **kwargs)
 
-    monkeypatch.setattr("mewbo_core.worktree.subprocess.run", _patched_run)
+    monkeypatch.setattr("mewbo_core.workspaces.worktree.subprocess.run", _patched_run)
     # force=False so we take the retry path
     WorktreeManager.remove(path, force=False)
     # Two remove attempts: one without --force, one with --force
@@ -412,7 +412,7 @@ def test_prune_non_fatal_on_failure(monkeypatch) -> None:
             raise subprocess.CalledProcessError(1, cmd)
         return original_run(cmd, **kwargs)
 
-    monkeypatch.setattr("mewbo_core.worktree.subprocess.run", _fail_prune)
+    monkeypatch.setattr("mewbo_core.workspaces.worktree.subprocess.run", _fail_prune)
     # Must not raise
     WorktreeManager.prune("/any/repo")
 
@@ -447,7 +447,7 @@ def test_branches_in_use_handles_no_current_branch(tmp_path: Path, monkeypatch) 
             return SimpleNamespace(returncode=128, stdout="", stderr="HEAD is detached")
         return original_run(cmd, **kwargs)
 
-    monkeypatch.setattr("mewbo_core.worktree.subprocess.run", _patched_run)
+    monkeypatch.setattr("mewbo_core.workspaces.worktree.subprocess.run", _patched_run)
     in_use = WorktreeManager.branches_in_use(str(repo))
     # current_branch returns None → not added to in_use; no exception
     assert isinstance(in_use, set)

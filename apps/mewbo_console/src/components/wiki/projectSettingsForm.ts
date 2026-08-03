@@ -39,6 +39,48 @@ export const settingsSchema = z.object({
   dirs: z.string(),
   files: z.string(),
   graphOnly: z.boolean(),
+  /** Free-text operator guidance. The 4000-char cap mirrors the server's
+   *  validator, whose message explains the reason: the text is appended to the
+   *  prompt of EVERY page the indexer writes, so it is paid once per page. */
+  customInstructions: z
+    .string()
+    .max(4000, "Keep indexing instructions under 4000 characters"),
+  /** The `{name: {...}}` MCP server map, edited as raw JSON. WRITE-ONLY: it
+   *  always seeds EMPTY, because the GET returns names only (an entry carries
+   *  credentials in `env`). Empty therefore means "leave what is stored alone",
+   *  and `buildPatch` only sends the field once the operator has typed — so a
+   *  redacted read can never be PATCHed back over the real config.
+   *  A textarea rather than a structured editor because the value IS the
+   *  standard MCP config shape an operator already has on their clipboard from
+   *  `.mcp.json`; re-modelling its fields here would be a second, drifting copy
+   *  of a schema this console does not own. */
+  mcpServers: z.string().superRefine((text, ctx) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Not valid JSON" });
+      return;
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Expected an object mapping server names to their config',
+      });
+      return;
+    }
+    for (const [name, entry] of Object.entries(parsed as Record<string, unknown>)) {
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `"${name}" must be an object describing one MCP server`,
+        });
+        return;
+      }
+    }
+  }),
   desc: z.string().trim().max(240, "Keep the description under 240 characters"),
 });
 
@@ -55,6 +97,8 @@ export const FORM_FIELD_BY_WIRE: Record<ProjectSettingsField, keyof SettingsValu
   dirs: "dirs",
   files: "files",
   graphOnly: "graphOnly",
+  customInstructions: "customInstructions",
+  mcpServers: "mcpServers",
   desc: "desc",
 };
 
@@ -82,6 +126,8 @@ export const INDEX_TIME_FIELDS: Array<keyof ProjectSettingsPatch> = [
   "dirs",
   "files",
   "graphOnly",
+  "customInstructions",
+  "mcpServers",
 ];
 
 export const needsReindex = (patch: ProjectSettingsPatch): boolean =>
@@ -100,6 +146,8 @@ export const EMPTY_FORM: SettingsValues = {
   dirs: "",
   files: "",
   graphOnly: false,
+  customInstructions: "",
+  mcpServers: "",
   desc: "",
 };
 
@@ -119,12 +167,43 @@ export function seedFrom(s: ProjectSettings): SettingsValues {
     dirs: (git?.dirs ?? []).join("\n"),
     files: (git?.files ?? []).join("\n"),
     graphOnly: git?.graphOnly ?? false,
-    desc: s.desc ?? "",
+    customInstructions: git?.customInstructions ?? "",
+    // Deliberately NOT seeded from the DTO: the server sends names, not
+    // entries, so there is nothing here that could be round-tripped. Untouched
+    // means unchanged; see the field's comment in `settingsSchema`.
+    mcpServers: "",
   };
 }
 
 /** Newline-separated textarea value → trimmed, non-empty lines. Shared with
  *  `ConfigureWizard.tsx`'s scope step, which parses the same dirs/files shape. */
+/** The MCP-server textarea value as its wire shape. `null` = detach everything.
+ *  Only ever called on a value `settingsSchema` already validated, so a parse
+ *  failure here is unreachable rather than tolerated — it returns `null` so a
+ *  bug can never smuggle a half-parsed map onto the wire. */
+export function parseMcpServers(
+  text: string,
+): Record<string, Record<string, unknown>> | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, Record<string, unknown>>;
+    return Object.keys(parsed).length > 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The attached server NAMES the GET reported, for read-only display beside the
+ *  replace-only editor. Tolerates an older payload that still sent the full map
+ *  (an older server, or a cached response) by reading its keys rather than
+ *  rendering an object — the names are all this surface may show either way. */
+export function attachedServerNames(s: ProjectSettings): string[] {
+  const value = isCatalogSettings(s) ? null : s.mcpServers;
+  if (!value) return [];
+  return Array.isArray(value) ? [...value].sort() : Object.keys(value).sort();
+}
+
 export const splitLines = (text: string): string[] =>
   text.split("\n").map((l) => l.trim()).filter(Boolean);
 
@@ -154,6 +233,16 @@ export function buildPatch(
   if (dirty.dirs) patch.dirs = splitLines(values.dirs);
   if (dirty.files) patch.files = splitLines(values.files);
   if (dirty.graphOnly) patch.graphOnly = values.graphOnly;
+  // Emptying either field is an explicit "remove it" (null), distinct from
+  // omitting the key, which leaves whatever is stored alone — the same
+  // omit-vs-null rule `ref` and `fallbackModels` carry.
+  if (dirty.customInstructions) {
+    patch.customInstructions = values.customInstructions.trim() || null;
+  }
+  // Only once the operator has actually typed: the field seeds empty on every
+  // load, so sending it on anything less would clear a config the form was
+  // never shown.
+  if (dirty.mcpServers) patch.mcpServers = parseMcpServers(values.mcpServers);
   if (dirty.desc) patch.desc = values.desc.trim();
   return patch;
 }

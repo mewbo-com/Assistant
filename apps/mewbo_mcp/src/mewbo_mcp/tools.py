@@ -302,43 +302,44 @@ class SessionTools:
         since: str | None = None,
         limit: int = 20,
     ) -> dict[str, Any]:
-        """List sessions (newest-first, capped), projected compact.
+        """List sessions (pinned-first then newest-first, capped), projected compact.
 
-        Wires ``GET /api/sessions``, filters by ``project``/``status``/``since``
-        locally, returns at most ``limit`` rows (default 20, newest-first) so the
-        default response stays small. Each row is projected to
-        ``{session_id, title, project, status, done_reason, created_at, origin?,
-        archived?, recoverable, blocked_code?, failure_reason?, models_tried?}`` —
-        dropping the redundant ``running`` flag and the verbose raw ``context``
-        while SURFACING the ``project`` the filter matches on and the honest-
-        outcome facets a caller needs to know WHAT went wrong and whether it can
-        retry (the ``blocked``/``failure`` facets are omitted for an untroubled
-        session).
+        ``project`` is now a SERVER-side filter (``GET /api/sessions?project=``)
+        rather than a client-side scan — the API pushes it into the session
+        RECORD query (``mewbo_core.session.session_query.SessionQuery``), so a
+        session outside the requested project is never opened. ``status`` and
+        ``since`` stay client-side: neither is a document-level fact the store
+        can decide before reading a transcript, so there is nothing to push down.
 
-        ``project`` matches the underlying repo name/identity: a session matches
-        when ``project`` equals ``context.repo`` OR ``context.project`` (any
-        ``managed:`` prefix stripped — see :meth:`_row_project`).
+        Sorting mirrors the server: pinned sessions first, then newest-first
+        within each group. This has to be re-applied here rather than trusted
+        from the wire, because ``limit`` truncates AFTER sorting — reusing the
+        server's own recency-only order would let a pinned session that sorts
+        past the cutoff get truncated out, which is the opposite of what a pin
+        is for.
+
+        Each row is projected to ``{session_id, title, project, status,
+        done_reason, created_at, origin?, archived?, pinned?, recoverable,
+        blocked_code?, failure_reason?, models_tried?}`` — dropping the
+        redundant ``running`` flag and the verbose raw ``context`` while
+        SURFACING the ``project`` the filter matches on and the honest-outcome
+        facets a caller needs to know WHAT went wrong and whether it can retry
+        (the ``blocked``/``failure``/``pinned`` facets are omitted for an
+        untroubled, unpinned session).
         """
-        sessions = _dict_list(await self.client.get("/api/sessions"), "sessions")
+        params: dict[str, Any] | None = {"project": project} if project else None
+        sessions = _dict_list(await self.client.get("/api/sessions", params=params), "sessions")
 
         def _keep(s: dict[str, Any]) -> bool:
             if status and str(s.get("status")) != status:
                 return False
             if since and str(s.get("created_at") or "") < since:
                 return False
-            if project:
-                ctx = s.get("context")
-                if not isinstance(ctx, dict):
-                    return False
-                repo = str(ctx.get("repo") or "")
-                proj = str(ctx.get("project") or "")
-                proj_bare = proj[len("managed:") :] if proj.startswith("managed:") else proj
-                if project not in {repo, proj, proj_bare}:
-                    return False
             return True
 
         kept = [s for s in sessions if _keep(s)]
         kept.sort(key=lambda s: str(s.get("created_at") or ""), reverse=True)
+        kept.sort(key=lambda s: str(s.get("pinned_at") or ""), reverse=True)
         if isinstance(limit, int) and limit > 0:
             kept = kept[:limit]
         return {"sessions": [self._shape_session(s) for s in kept], "count": len(kept)}
@@ -367,7 +368,7 @@ class SessionTools:
         }
         # "terminated"/"terminated_at": read defensively via .get() — the
         # API's list route already forwards them, but nothing here assumes it.
-        for key in ("origin", "archived", "terminated", "terminated_at"):
+        for key in ("origin", "archived", "terminated", "terminated_at", "pinned", "pinned_at"):
             if s.get(key) is not None:
                 out[key] = s.get(key)
         # The honest-outcome facets: the row is core's ``summarize_session``
@@ -448,6 +449,15 @@ class SessionTools:
         attachments = self._shape_attachments(selected)
         if attachments:
             out["attachments"] = attachments
+        panels = [self._shape_generative_ui(e) for e in selected.generative_ui]
+        if panels:
+            out["generative_ui"] = panels
+        # Append-when-present, like every facet above. A reader that never sees a
+        # switch would attribute this turn's later steps to the project it opened
+        # in, and an MCP reader is an agent, so that becomes a wrong action rather
+        # than a confusing screen.
+        if selected.project_switches:
+            out["project_switches"] = list(selected.project_switches)
         if offset + self.FULL_STEPS_PAGE < len(all_steps):
             out["next_step_offset"] = offset + self.FULL_STEPS_PAGE
         return out
@@ -502,8 +512,8 @@ class SessionTools:
         Returns ``(turns, triggers, terminated, meta)`` where ``meta`` is the raw
         ``/events`` payload — it carries the API's authoritative
         ``status``/``done_reason``/``title``/``running`` so the overview never
-        has to reconstruct them from the timeline tail (the old source of the
-        ``status: null`` / title bugs). ``triggers``/``terminated`` are a
+        has to reconstruct them from the timeline tail — a reconstruction that
+        yields ``status: null`` and a missing title. ``triggers``/``terminated`` are a
         SEPARATE pass (:func:`extract_trigger_events`) over the same events —
         see ``timeline.py``'s module docstring for why.
 
@@ -582,8 +592,9 @@ class SessionTools:
             "running": running,
             "turn_count": len(turns),
             "step_count": total_steps,
-            # Two different quantities, both real, previously indistinguishable
-            # because only the first was reported. ``total_input_tokens`` sums
+            # Two different quantities, both real and both reported —
+            # reporting only one makes them indistinguishable.
+            # ``total_input_tokens`` sums
             # per-turn PEAKS (root peak + each sub-agent's peak) and measures
             # context pressure; ``total_billed_input_tokens`` sums EVERY call's
             # input and is what the per-call event log adds up to. On a
@@ -726,6 +737,25 @@ class SessionTools:
         return _as_dict(event.get("payload"))
 
     @classmethod
+    def _shape_generative_ui(cls, event: dict[str, Any]) -> dict[str, Any]:
+        """Project one ``generative_ui`` event to its text rendering.
+
+        Carries ``alt_text`` and drops ``spec`` — the component tree is a
+        renderer's input and an MCP caller has no renderer, so inlining it
+        would spend a caller's context on markup it cannot use. ``alt_text`` is
+        the whole point of the event carrying it: a surface reads the panel
+        without ever learning the component vocabulary. Capped like every other
+        inlined field, since a wide tree renders to proportionally wide text.
+        """
+        payload = cls._event_payload(event)
+        return {
+            "ui_id": payload.get("ui_id"),
+            "summary": payload.get("summary"),
+            "alt_text": cls._cap_field(payload.get("alt_text")),
+            "ts": event.get("ts"),
+        }
+
+    @classmethod
     def _step_summary(cls, event: dict[str, Any]) -> dict[str, Any]:
         """A cheap per-step preview: ``tool_id → summary`` (no full result)."""
         payload = cls._event_payload(event)
@@ -823,7 +853,7 @@ class WikiTools:
     def _data(el: dict[str, Any]) -> dict[str, Any]:
         """Cytoscape element payload — fields live under ``data`` (API wire shape).
 
-        Falls back to the element itself so a flat/legacy node still resolves.
+        Falls back to the element itself so a flat node still resolves.
         """
         inner = el.get("data")
         return inner if isinstance(inner, dict) else el
@@ -1015,7 +1045,7 @@ class WikiTools:
         )
 
     async def ask(
-        self, *, project: str, question: str, model: str | None = None
+        self, *, project: str, question: str, model: str | None = None, mode: str = "fast"
     ) -> dict[str, Any]:
         """Ask the wiki a question and return the rendered answer once settled.
 
@@ -1029,9 +1059,11 @@ class WikiTools:
         :meth:`get_answer` (the ``get_wiki_answer`` tool) to resume it.
 
         ``model`` is optional — when omitted the body carries no ``model`` and the
-        server defaults it (an empty string is never sent).
+        server defaults it (an empty string is never sent). ``mode`` is always
+        sent and defaults to ``fast`` (direct retrieval); ``deep`` runs the
+        hypervisor with probe fan-out. The server rejects any other value.
         """
-        body: dict[str, Any] = {"slug": project, "question": question}
+        body: dict[str, Any] = {"slug": project, "question": question, "mode": mode}
         if model:
             body["model"] = model
 

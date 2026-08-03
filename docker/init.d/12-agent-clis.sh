@@ -11,7 +11,7 @@
 #
 # Both ship static release binaries, so neither needs apt, a keyring, an apt
 # source list, or root — which is the whole reason they can live at runtime.
-# Versions are overridable from docker.env for a pin or a rollback.
+# Versions are overridable from .env for a pin or a rollback.
 
 GH_VERSION="${GH_VERSION:-2.96.0}"
 TEA_VERSION="${TEA_VERSION:-0.14.0}"

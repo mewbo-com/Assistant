@@ -10,7 +10,7 @@
  *      and any non-standard path the user actually typed).
  *   2. ``https://{host}/{owner}/{repo}`` built from the slug.
  *   3. None — render as plain text. We never fabricate a link from the
- *      platform name when the host is missing (legacy slugs only).
+ *      platform name when the host is missing.
  *
  * Click stops propagation so an enclosing tile's onClick doesn't fire
  * and double-navigate.

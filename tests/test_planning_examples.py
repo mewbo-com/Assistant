@@ -4,10 +4,10 @@ from contextlib import contextmanager
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableLambda
-from mewbo_core import planning as planning_module
 from mewbo_core.classes import Plan
-from mewbo_core.planning import Planner
-from mewbo_core.tool_registry import ToolRegistry, ToolSpec
+from mewbo_core.loop import planning as planning_module
+from mewbo_core.loop.planning import Planner
+from mewbo_core.tooling.tool_registry import ToolRegistry, ToolSpec
 
 
 def test_planner_examples_are_wrapped():

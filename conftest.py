@@ -53,6 +53,27 @@ from mewbo_core.config import (
 )
 
 
+_pytest_configs = Path(_pytest_home) / "configs"
+_pytest_configs.mkdir(parents=True, exist_ok=True)
+(_pytest_configs / "app.json").write_text("{}\n")
+os.environ.setdefault("MEWBO_CONFIG_DIR", str(_pytest_configs))
+set_app_config_path(_pytest_configs / "app.json")
+# Pin the config DIRECTORY at import time, for the same reason MEWBO_HOME is
+# pinned above and not by a fixture: ``mewbo_api.backend`` calls
+# ``get_config()`` at MODULE level, so the first import of it during collection
+# resolves a config before any fixture can redirect one. Left alone, the chain
+# walks up from CWD and finds the DEVELOPER'S OWN ``configs/app.json`` — a live,
+# secret-bearing file the suite has no business reading, and one whose values a
+# test would then silently assert against.
+#
+# It is set as an ENV VAR and not only via ``set_app_config_path`` because a
+# large part of this suite probes behaviour in SUBPROCESSES, and an in-process
+# override cannot reach them: each child re-runs the walk from its own CWD —
+# the repo root — and finds that same config again. The env var is the only
+# form of the redirect a child inherits. ``setdefault`` respects an
+# operator/CI-supplied value.
+
+
 @pytest.fixture(autouse=True)
 def app_config_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Write a fresh app config file and point the loader at it.

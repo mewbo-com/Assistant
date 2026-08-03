@@ -22,9 +22,9 @@ API_KEY = "test-master-token-timeline"
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     """Backend test client bound to a temp SessionStore runtime + known token."""
-    from mewbo_core.session_event_bus import reset_session_event_bus_for_tests
-    from mewbo_core.session_runtime import SessionRuntime
-    from mewbo_core.session_store import SessionStore
+    from mewbo_core.loop.session_runtime import SessionRuntime
+    from mewbo_core.session.session_event_bus import reset_session_event_bus_for_tests
+    from mewbo_core.session.session_store import SessionStore
 
     reset_session_event_bus_for_tests()  # isolate from leaked observers
 

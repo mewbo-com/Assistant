@@ -21,7 +21,7 @@ from jinja2 import Environment, PackageLoader, TemplateNotFound
 from loguru import logger as loguru_logger
 
 from mewbo_core.config import get_config_value
-from mewbo_core.secret_redaction import install_log_redaction, install_stdlib_log_bridge
+from mewbo_core.contracts.secret_redaction import install_log_redaction, install_stdlib_log_bridge
 
 
 class MockSpeaker(NamedTuple):
@@ -108,7 +108,7 @@ def set_cli_log_file(
 
     Adds an unfiltered loguru file sink at the active verbosity level. When
     ``quiet_console`` is set (the default), the stderr sink is removed so log
-    lines no longer interleave with the Rich/Textual UI — they go only to the
+    lines cannot interleave with the Rich/Textual UI — they go only to the
     file. ``overwrite`` truncates the file at startup instead of appending.
 
     Returns the absolute path actually written to.
@@ -222,11 +222,8 @@ def count_tokens(text: str, model: str = "gpt-4") -> int:
 
 def get_unique_timestamp() -> int:
     """Get a unique timestamp for the task queue."""
-    # Get the number of seconds since epoch (Jan 1, 1970) as a float
     current_timestamp = int(time.time())
-    # Convert it to string for uniqueness and consistency
     unique_timestamp = str(current_timestamp)
-    # Return the integer version of this string timestamp
     return int("".join(str(x) for x in map(int, unique_timestamp)))
 
 
@@ -235,11 +232,12 @@ def get_system_prompt(name: str = "action-planner") -> str:
 
     Routes through the central prompt registry when *name* has a ``file.*``
     entry (the standalone, ``system.txt``-sized prompts inventoried in
-    ``prompts/registry/files.yaml``). The historical ``.strip()`` is preserved
-    so the bytes are unchanged. Names the registry does not inventory (tool
-    prompts loaded by path) fall back to the legacy file read.
+    ``prompts/registry/files.yaml``), which the registry does not strip, so
+    this shim applies the ``.strip()`` its callers expect. Names the registry
+    does not inventory (tool prompts loaded by path) fall back to a raw file
+    read.
     """
-    from mewbo_core.prompt_registry import get_prompt_registry
+    from mewbo_core.llm.prompt_registry import get_prompt_registry
 
     registry = get_prompt_registry()
     prompt_id = f"file.{name}"
@@ -441,7 +439,7 @@ def get_git_context(cwd: str | None = None, max_status_chars: int = 2000) -> str
 
     recent_log = _run_git("log", "--oneline", "-n", "5")
 
-    from mewbo_core.prompt_registry import get_prompt_registry
+    from mewbo_core.llm.prompt_registry import get_prompt_registry
 
     return get_prompt_registry().render(
         "common.git_context",
@@ -455,7 +453,7 @@ def get_git_context(cwd: str | None = None, max_status_chars: int = 2000) -> str
 def discover_project_instructions(cwd: str | None = None) -> str | None:
     """Discover and load project instruction files. Uses hierarchical discovery.
 
-    Falls back to legacy AGENTS.md behavior when no hierarchical sources are found.
+    Falls back to a root ``AGENTS.md`` when no hierarchical sources are found.
     Files containing ``<!-- mewbo:noload -->`` on the first line are skipped.
 
     Additionally walks the subtree to build a lightweight index of nested
@@ -465,7 +463,6 @@ def discover_project_instructions(cwd: str | None = None) -> str | None:
     """
     sources = discover_all_instructions(cwd)
     if not sources:
-        # Fallback to legacy AGENTS.md behavior
         work_dir = Path(cwd) if cwd else Path.cwd()
         agents_md = work_dir / "AGENTS.md"
         if agents_md.is_file():
@@ -488,7 +485,7 @@ def discover_project_instructions(cwd: str | None = None) -> str | None:
         for src in subtree:
             rel = Path(src.path).relative_to(work_dir)
             lines.append(f"- {rel}")
-        from mewbo_core.prompt_registry import get_prompt_registry
+        from mewbo_core.llm.prompt_registry import get_prompt_registry
 
         heading = get_prompt_registry().render(
             "common.instruction_headings", has_root=bool(sources)

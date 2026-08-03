@@ -3,7 +3,7 @@
 
 The two agent-facing session tools (:mod:`submit_app`, :mod:`app_data`) are
 declared in ``.claude-plugin/plugin.json`` and BUILT through the ordinary
-:class:`~mewbo_core.session_tools.SessionToolRegistry` plugin path, which feeds a
+:class:`~mewbo_core.tooling.session_tools.SessionToolRegistry` plugin path, which feeds a
 constructor only ``session_id`` + ``event_logger`` — so their real collaborators
 have to be resolved some other way. Two resolution paths, matching how workstream
 A exposes each collaborator:
@@ -30,14 +30,26 @@ the two additive optional kwargs A confirmed (``upsert(collection_spec=)``,
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+
+from mewbo_core.common import get_logger
+from mewbo_core.session.session_store import SessionStoreBase, create_session_store
+
+logging = get_logger(name="apps.plugin.runtime")
 
 if TYPE_CHECKING:
-    from mewbo_api.apps.models import AppDataDoc, AppSpec, CollectionSpec, PipelineRun
+    from mewbo_api.apps.models import (
+        AppDataDoc,
+        AppSpec,
+        CollectionSpec,
+        PipelineResult,
+        PipelineRun,
+        PipelineSpec,
+    )
 
 
 # ------------------------------------------------------------------
-# Collaborator contracts (LOCAL Protocols — frozen signatures, spec §4 / ledger)
+# Collaborator contracts (LOCAL Protocols — frozen signatures)
 # ------------------------------------------------------------------
 
 
@@ -46,8 +58,8 @@ class AppSubmitter(Protocol):
     """The submit half of the app lifecycle — persists a builder's draft.
 
     The concrete implementation is ``AppLifecycle`` (workstream A, ``lifecycle.py``):
-    it persists spec v1, creates + tags the maintainer session, and — as of
-    Phase 1 — ARMS each pipeline's declared ``schedule`` (``PipelineSpec.schedule``,
+    it persists spec v1, creates + tags the maintainer session, and ARMS
+    each pipeline's declared ``schedule`` (``PipelineSpec.schedule``,
     a ``time.cron``/``time.at`` shape) directly onto the maintainer, stamping the
     resulting id into ``PipelineSpec.trigger_ref`` itself (PLATFORM-owned; the
     builder never sets it). An ``on_demand`` pipeline gets no trigger at all
@@ -63,7 +75,7 @@ class AppSubmitter(Protocol):
 
 @runtime_checkable
 class AppStore(Protocol):
-    """Read side of the app manifest store (spec §4A ``AppStoreBase``)."""
+    """Read side of the app manifest store (``AppStoreBase``)."""
 
     def get(self, app_id: str) -> AppSpec | None:
         """Return the app manifest for *app_id*, or ``None`` if there is none."""
@@ -82,7 +94,7 @@ class AppStore(Protocol):
 
 @runtime_checkable
 class AppDataStore(Protocol):
-    """The app-ID-keyed data plane (spec §2.5 / §4A ``AppDataStoreBase``).
+    """The app-ID-keyed data plane (``AppDataStoreBase``).
 
     ``upsert`` is idempotent by the compound ``(app_id, collection, key)`` and
     validates *doc* against ``collection_spec`` when one is supplied (raising
@@ -126,7 +138,7 @@ class AppDataStore(Protocol):
 
 @runtime_checkable
 class PipelineRunner(Protocol):
-    """Executes one CODE pipeline (Phase 2) — the ``run_pipeline`` tool's collaborator.
+    """Executes one CODE pipeline — the ``run_pipeline`` tool's collaborator.
 
     The concrete implementation (``pipeline_runner.py:AppPipelineRunner``) loads
     the pipeline's ``entrypoint`` file from the app bundle, builds the
@@ -171,8 +183,42 @@ class PipelineRunner(Protocol):
 
 
 @runtime_checkable
+class PipelineLedger(Protocol):
+    """Runs a CODE pipeline *and* records its provenance — ``run_pipeline``'s ledger seam.
+
+    The concrete implementation is ``AppPipelineRunTracker.record_code_run``
+    (``pipeline_tracker.py``), the single home for "run a code pipeline + record its
+    provenance". A model-driven ``run_pipeline`` invoke that went straight to
+    :class:`PipelineRunner` wrote NO ledger row at all, so nothing on ``get_app`` /
+    ``/system`` ever mentioned it: a maintainer asking "did my run land?" read the
+    ``last_run_status`` of some earlier run and took it for its own.
+
+    Only the kwargs this tool passes are declared — the concrete method carries more
+    (``trigger_id``, ``now``), which a structural Protocol admits since they default.
+    """
+
+    def record_code_run(
+        self,
+        app: AppSpec,
+        pipeline: PipelineSpec,
+        *,
+        params: dict[str, object],
+        kind: Literal["scheduled", "on_request"],
+        dispatch_failure: bool = True,
+        require_effect: bool = False,
+    ) -> tuple[PipelineRun, PipelineResult | None]:
+        """Execute *pipeline*, write ONE closed row, return ``(run, result)``.
+
+        NEVER raises: a failure closes the row ``failed`` (carrying whatever the run
+        had already written) and returns ``(run, None)`` with ``run.error`` naming
+        why, so the caller reads the outcome off the row rather than catching.
+        """
+        ...
+
+
+@runtime_checkable
 class PipelineRunStore(Protocol):
-    """The provenance ledger store (spec §2.8 / §4A ``PipelineRunStoreBase``).
+    """The provenance ledger store (``PipelineRunStoreBase``).
 
     ``get_open`` returns the currently-``running`` ledger entry for a pipeline —
     opened at trigger fire by :class:`~mewbo_api.apps.pipeline_tracker.AppPipelineRunTracker`
@@ -199,7 +245,7 @@ _SUBMITTER: AppSubmitter | None = None
 def register_app_submitter(submitter: AppSubmitter) -> None:
     """Push the concrete app submitter (the ``AppLifecycle``) — the API calls this once.
 
-    Mirrors ``mewbo_core.plugins.register_builtin_root``: the composition root
+    Mirrors ``mewbo_core.tooling.plugins.register_builtin_root``: the composition root
     supplies the concrete lifecycle; the plugin never imports up to find it. Last
     write wins (a re-register in a test swaps the fake cleanly). Stores are NOT
     pushed here — they have their own process-wide factories in
@@ -245,14 +291,81 @@ def current_pipeline_runner() -> PipelineRunner | None:
     return _PIPELINE_RUNNER
 
 
+# ------------------------------------------------------------------
+# The pipeline-ledger push seam (down-only — mirrors the runner seam above)
+# ------------------------------------------------------------------
+
+_PIPELINE_LEDGER: PipelineLedger | None = None
+
+
+def register_pipeline_ledger(ledger: PipelineLedger) -> None:
+    """Push the concrete run-ledger tracker — the API calls this once.
+
+    Mirrors :func:`register_pipeline_runner` exactly: the composition root supplies
+    the concrete ``AppPipelineRunTracker`` at startup; the plugin never imports up
+    to find it. Last write wins (a re-register in a test swaps the fake cleanly).
+    """
+    global _PIPELINE_LEDGER
+    _PIPELINE_LEDGER = ledger
+
+
+def current_pipeline_ledger() -> PipelineLedger | None:
+    """The wired ledger, or ``None`` when the deployment hasn't configured one.
+
+    A ``None`` return is the graceful-degradation signal ``run_pipeline`` turns into
+    its pre-ledger behaviour (execute through the runner, report ``run_key: None``) —
+    never a crash and never a refusal.
+    """
+    return _PIPELINE_LEDGER
+
+
+# ------------------------------------------------------------------
+# The session store — a process singleton, NOT a per-call construction
+# ------------------------------------------------------------------
+
+_SESSION_STORE: SessionStoreBase | None = None
+
+
+def session_tags_for(session_id: str) -> tuple[str, ...]:
+    """The tags stamped on *session_id*, or ``()`` when they cannot be read.
+
+    ``get_app`` resolves the app a session was OPENED against from its
+    server-stamped ``app:<id>`` tag (see
+    :meth:`~mewbo_api.apps.staging.AppStagingArea.app_for_session`), and the
+    plugin constructor is fed only ``session_id`` + ``event_logger`` — so the
+    store is reached here, through the same process-singleton discipline the
+    stores in ``mewbo_api.apps.store`` use.
+
+    **Never ``create_session_store()`` per call**: each construction opens a
+    fresh Mongo client and leaks its connection pool, the exact regression the
+    wiki ctx resolver documents. Every failure degrades to ``()``, which reads as
+    "no tag tier" and leaves the two id fields as the only binding — an
+    unavailable session backend must not crash an agent's tool call.
+
+    Cost: ``O(1)`` — one indexed tag read on both drivers.
+    """
+    global _SESSION_STORE
+    try:
+        if _SESSION_STORE is None:
+            _SESSION_STORE = create_session_store()
+        return tuple(_SESSION_STORE.tags_for_session(session_id))
+    except Exception as exc:  # noqa: BLE001 — a store failure must not crash the tool
+        logging.warning("apps plugin: session tag read failed for {}: {}", session_id, exc)
+        return ()
+
+
 __all__ = [
     "AppDataStore",
     "AppStore",
     "AppSubmitter",
+    "PipelineLedger",
     "PipelineRunStore",
     "PipelineRunner",
     "current_app_submitter",
+    "current_pipeline_ledger",
     "current_pipeline_runner",
     "register_app_submitter",
+    "register_pipeline_ledger",
     "register_pipeline_runner",
+    "session_tags_for",
 ]

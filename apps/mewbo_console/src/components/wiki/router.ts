@@ -4,13 +4,15 @@
  * browser back button works.
  *
  *   /wiki                          → LandingScreen (project gallery)
- *   /wiki/configure?url=...        → ConfigureWizard
+ *   /wiki/configure?url=...&repo=host/owner/repo
+ *                                  → ConfigureWizard
  *   /wiki/repo?slug=owner/name     → WelcomeScreen ("not indexed")
  *   /wiki/indexing?jobId=...       → IndexingScreen
  *   /wiki/p/:pageId                → WikiScreen
  *   /wiki/qa?q=...&page=...&model=...
  *                                  → QAScreen
  *   /wiki/graph?slug=...           → KnowledgeGraph3DScreen
+ *   /wiki/outline?slug=...         → GraphOutlineScreen
  */
 
 import { useLocation } from "wouter";
@@ -21,7 +23,15 @@ export type PlatformId = Platform["id"];
 
 export type WikiRoute =
   | { kind: "landing" }
-  | { kind: "configure"; url?: string }
+  /**
+   * `repo` names an already-registered repository (`host/owner/repo`) whose
+   * stored URL, platform and default branch seed the wizard. It exists so a
+   * settings row can offer "Generate wiki" without making the operator retype
+   * a URL the product already holds. Registering a repository stays inert:
+   * this route is how a user OPTS IN to indexing one, never a side effect of
+   * having registered it.
+   */
+  | { kind: "configure"; url?: string; repo?: string }
   | { kind: "welcome"; slug?: string; platform?: PlatformId }
   | { kind: "indexing"; jobId?: string; slug?: string; platform?: PlatformId }
   | { kind: "page"; pageId: string; slug?: string; platform?: PlatformId }
@@ -39,7 +49,14 @@ export type WikiRoute =
       answer?: string;
       platform?: PlatformId;
     }
-  | { kind: "graph"; slug?: string; platform?: PlatformId };
+  | { kind: "graph"; slug?: string; platform?: PlatformId }
+  /**
+   * The textual channel over the same graph payload — a focusable, announceable
+   * outline. Its own route rather than a panel inside `graph` because the
+   * spatial renderer blocks the main thread on a repo of any size, and a panel
+   * sharing that mount would inherit the freeze.
+   */
+  | { kind: "outline"; slug?: string; platform?: PlatformId };
 
 const PLATFORM_IDS: readonly PlatformId[] = [
   "github",
@@ -64,7 +81,11 @@ export function parseWikiRoute(path: string, queryString: string): WikiRoute {
   if (tail === "/" || tail === "") return { kind: "landing" };
 
   if (tail.startsWith("/configure")) {
-    return { kind: "configure", url: params.get("url") || undefined };
+    return {
+      kind: "configure",
+      url: params.get("url") || undefined,
+      repo: params.get("repo") || undefined,
+    };
   }
   if (tail.startsWith("/repo")) {
     return {
@@ -84,6 +105,13 @@ export function parseWikiRoute(path: string, queryString: string): WikiRoute {
   if (tail.startsWith("/graph")) {
     return {
       kind: "graph",
+      slug: params.get("slug") || undefined,
+      platform: parsePlatform(params.get("platform")),
+    };
+  }
+  if (tail.startsWith("/outline")) {
+    return {
+      kind: "outline",
       slug: params.get("slug") || undefined,
       platform: parsePlatform(params.get("platform")),
     };
@@ -119,10 +147,13 @@ export function buildHref(route: WikiRoute): string {
   switch (route.kind) {
     case "landing":
       return "/wiki";
-    case "configure":
-      return route.url
-        ? `/wiki/configure?url=${encodeURIComponent(route.url)}`
-        : "/wiki/configure";
+    case "configure": {
+      const params = new URLSearchParams();
+      if (route.url) params.set("url", route.url);
+      if (route.repo) params.set("repo", route.repo);
+      const qs = params.toString();
+      return `/wiki/configure${qs ? `?${qs}` : ""}`;
+    }
     case "welcome": {
       const params = new URLSearchParams();
       if (route.slug) params.set("slug", route.slug);
@@ -161,6 +192,13 @@ export function buildHref(route: WikiRoute): string {
       appendPlatform(params, route.platform);
       const qs = params.toString();
       return `/wiki/graph${qs ? `?${qs}` : ""}`;
+    }
+    case "outline": {
+      const params = new URLSearchParams();
+      if (route.slug) params.set("slug", route.slug);
+      appendPlatform(params, route.platform);
+      const qs = params.toString();
+      return `/wiki/outline${qs ? `?${qs}` : ""}`;
     }
   }
 }

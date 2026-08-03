@@ -159,10 +159,10 @@ export function TypewriterGreeting() {
   // `ProductHero`'s subtitle <p>, which owns all three so the Tasks subtitle is
   // styled identically to the static ones on Wiki and Search.
   //
-  // The caret blinks between full opacity and none. It used to idle at 0.7,
-  // which compounded onto the subtitle's already-muted colour and left the
-  // glyph under the AA contrast floor for its whole "on" phase — a caret is
-  // either there or it isn't.
+  // The caret blinks between full opacity and none — idling at partial
+  // opacity would compound onto the subtitle's already-muted colour and
+  // leave the glyph under the AA contrast floor for its whole "on" phase.
+  // A caret is either there or it isn't.
   return (
     <>
       {"Let's "}

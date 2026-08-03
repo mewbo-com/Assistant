@@ -7,7 +7,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Regression coverage for task fix-round-3 Important #3: `ChatViewModel.send()` used to set
+ * Regression coverage: `ChatViewModel.send()` used to set
  * `RunPhase.Sending` unconditionally, stomping a live `Streaming` phase on every steer into an
  * already-streaming run - and nothing downstream ever restored it, so the thinking spark and the
  * still-live streamed text rendered together for the rest of the steered turn.

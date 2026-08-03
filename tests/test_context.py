@@ -3,13 +3,14 @@
 import types
 
 from mewbo_core.config import set_config_override
-from mewbo_core.context import ContextBuilder, event_payload_text, render_event_lines
-from mewbo_core.session_store import SessionStore
+from mewbo_core.session.context import ContextBuilder, event_payload_text, render_event_lines
+from mewbo_core.session.session_store import SessionStore
 
 
 def _seed_long_session(store: SessionStore, *, original_task: str, extra_tool_results: int) -> str:
     """Create a transcript where the first user event predates ``recent_event_limit``
-    trailing tool_results — the shape that previously dropped the original task.
+    trailing tool_results — the shape that drops the original task unless it
+    is anchored.
     """
     session_id = store.create_session()
     store.append_event(session_id, {"type": "user", "payload": {"text": original_task}})
@@ -79,9 +80,10 @@ def test_select_context_events_keep_ids(monkeypatch, tmp_path):
             return DummyChain(self._result)
 
     monkeypatch.setattr(
-        "mewbo_core.context.ChatPromptTemplate", lambda *args, **kwargs: DummyPrompt(selection)
+        "mewbo_core.session.context.ChatPromptTemplate",
+        lambda *args, **kwargs: DummyPrompt(selection),
     )
-    monkeypatch.setattr("mewbo_core.context.build_chat_model", lambda **_k: object())
+    monkeypatch.setattr("mewbo_core.session.context.build_chat_model", lambda **_k: object())
     builder = ContextBuilder(SessionStore(root_dir=str(tmp_path)))
     events = [
         {"type": "user", "payload": {"text": "one"}},
@@ -114,9 +116,10 @@ def test_select_context_events_empty_keep_ids(monkeypatch, tmp_path):
             return DummyChain(self._result)
 
     monkeypatch.setattr(
-        "mewbo_core.context.ChatPromptTemplate", lambda *args, **kwargs: DummyPrompt(selection)
+        "mewbo_core.session.context.ChatPromptTemplate",
+        lambda *args, **kwargs: DummyPrompt(selection),
     )
-    monkeypatch.setattr("mewbo_core.context.build_chat_model", lambda **_k: object())
+    monkeypatch.setattr("mewbo_core.session.context.build_chat_model", lambda **_k: object())
     builder = ContextBuilder(SessionStore(root_dir=str(tmp_path)))
     events = [
         {"type": "user", "payload": {"text": "one"}},
@@ -150,9 +153,10 @@ def test_select_context_events_empty_candidates(monkeypatch, tmp_path):
             return DummyChain(self._result)
 
     monkeypatch.setattr(
-        "mewbo_core.context.ChatPromptTemplate", lambda *args, **kwargs: DummyPrompt(selection)
+        "mewbo_core.session.context.ChatPromptTemplate",
+        lambda *args, **kwargs: DummyPrompt(selection),
     )
-    monkeypatch.setattr("mewbo_core.context.build_chat_model", lambda **_k: object())
+    monkeypatch.setattr("mewbo_core.session.context.build_chat_model", lambda **_k: object())
     builder = ContextBuilder(SessionStore(root_dir=str(tmp_path)))
     events = [
         {"type": "user", "payload": ""},
@@ -331,14 +335,13 @@ def test_recovery_continue_rendered_context_contains_original_task(tmp_path):
     """End-to-end: after recovery, the rendered system-prompt context bullet
     list includes the original user task.
 
-    This is the regression test for the ccb8974d… session failure: long
-    transcripts triggered a recovery turn whose system prompt dropped the
-    original task. The anchor keeps it visible.
+    The regression this pins: on a long transcript the recovery turn's
+    system prompt dropped the original task. The anchor keeps it visible.
     """
     set_config_override(
         {"context": {"recent_event_limit": 4, "selection_enabled": False}, "llm": {}}
     )
-    from mewbo_core.session_runtime import SessionRuntime
+    from mewbo_core.loop.session_runtime import SessionRuntime
 
     store = SessionStore(root_dir=str(tmp_path))
     runtime = SessionRuntime(session_store=store)

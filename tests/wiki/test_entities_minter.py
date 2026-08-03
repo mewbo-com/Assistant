@@ -163,6 +163,89 @@ def test_flag_writes_needs_review_and_same_as_edge():
     assert edges and edges[0].type == "SAME_AS" and edges[0].target_id == ada.id
 
 
+def test_replaying_an_identical_mint_adds_no_second_mention():
+    """The resume invariant: a re-run must ADD nothing, not merely overwrite.
+
+    Every other field converged on a replay because the id is deterministic —
+    ``mentions`` did not, because each attempt stamped a fresh ``ts`` and
+    appended. A resumed index that re-ran its enrich fan-out therefore left each
+    entity reading as N times more attested than the source attests it.
+    """
+    s = FakeStore()
+    m = _minter(s)
+    first = m.upsert(Entity(name="Ada", type="person"), source="a.py", slug=SLUG)
+    second = m.upsert(Entity(name="Ada", type="person"), source="a.py", slug=SLUG)
+
+    assert first.id == second.id
+    rows = s.query_entities(SLUG)
+    assert len(rows) == 1
+    assert len(rows[0].mentions) == 1
+    # A DIFFERENT source is a different fact and still lands.
+    m.upsert(Entity(name="Ada", type="person"), source="b.py", slug=SLUG)
+    assert len(s.query_entities(SLUG)[0].mentions) == 2
+
+
+def test_a_replay_resolves_onto_itself_not_onto_a_neighbour():
+    """The subtler half: an identical call could write a DIFFERENT entity.
+
+    The ladder scores against CURRENT store state and excludes the candidate's
+    own id from its block set, so on the second pass the only entity a replay
+    cannot match is the one it created — leaving it free to merge into any
+    neighbour minted in between. A deterministic id has to mean the same call
+    always lands on the same node.
+    """
+    s = FakeStore()
+    ada = Entity(name="Ada Lovelace", type="person", description="first programmer")
+    neighbour = Entity(name="Grace Hopper", type="person")
+    # Both already stored, both embedded to the SAME vector the fake embedder
+    # returns for any query — so the ladder scores the neighbour at cosine 1.0.
+    s.upsert_entities(SLUG, [ada, neighbour])
+    s.upsert_entity_embeddings(
+        SLUG,
+        [
+            EntityEmbedding(
+                slug=SLUG, entity_id=e.id, vector=[1.0, 0.0], model="f", dim=2
+            )
+            for e in (ada, neighbour)
+        ],
+    )
+
+    survivor = _minter(s).upsert(
+        Entity(name="Ada Lovelace", type="person"), source="a.py", slug=SLUG
+    )
+
+    assert survivor.id == ada.id
+    # The neighbour is untouched — it neither absorbed the mention nor gained an alias.
+    got_neighbour = s.get_entity(SLUG, neighbour.id)
+    assert got_neighbour is not None
+    assert got_neighbour.mentions == []
+    assert got_neighbour.aliases == []
+
+
+def test_a_re_mint_unions_aliases_the_way_a_merge_does():
+    """A list field unioned on only ONE resolution path regresses on pass two.
+
+    A deterministic id means a re-index always re-resolves through the re-mint
+    fold, so aliases carried by the second call were dropped on the floor while
+    the merge path kept them.
+    """
+    s = FakeStore()
+    m = _minter(s)
+    m.upsert(
+        Entity(name="Ada", type="person", aliases=["A. Lovelace"]),
+        source="a.py",
+        slug=SLUG,
+    )
+    m.upsert(
+        Entity(name="Ada", type="person", aliases=["Countess Lovelace"]),
+        source="b.py",
+        slug=SLUG,
+    )
+    rows = s.query_entities(SLUG)
+    assert len(rows) == 1
+    assert set(rows[0].aliases) == {"A. Lovelace", "Countess Lovelace"}
+
+
 def test_mint_writes_embedding():
     s = FakeStore()
     m = _minter(s)

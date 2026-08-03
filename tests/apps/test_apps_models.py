@@ -176,7 +176,7 @@ def test_pipeline_spec_rejects_invalid_slug(name):
 
 
 def test_pipeline_spec_defaults():
-    # A pipeline must now declare HOW it runs (Phase 1) — on_demand here.
+    # A pipeline must declare HOW it runs — on_demand here.
     ps = PipelineSpec(name="ingest", wake_prompt="go check inbox", on_demand=True)
     assert ps.trigger_ref is None
     assert ps.schedule is None

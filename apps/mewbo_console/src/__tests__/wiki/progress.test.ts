@@ -149,9 +149,10 @@ describe("IndexingProgress.formatEta", () => {
 });
 
 describe("IndexingProgress.fromJob — ETA via phaseStartedAt", () => {
-  it("extrapolates per-page from elapsed time + pagesSubmitted", () => {
-    // 60s elapsed in pages phase, 3/10 pages done → 20s per page,
-    // 7 remaining → ~140s inPhase + finalize budget (~20s) = ~160s.
+  it("extrapolates per-page from elapsed time + pagesSubmitted, scoped to the pages phase alone", () => {
+    // 60s elapsed in pages phase, 3/10 pages done → 20s per page, 7 remaining
+    // → ~140s. No trailing-phase (finalize) budget is added anymore — see
+    // "no guessed ETA" below.
     const startedAt = new Date(Date.now() - 60_000).toISOString();
     const v = IndexingProgress.fromJob({
       ...baseJob,
@@ -164,6 +165,141 @@ describe("IndexingProgress.fromJob — ETA via phaseStartedAt", () => {
     expect(v.etaSeconds).not.toBeNull();
     const eta = v.etaSeconds ?? 0;
     expect(eta).toBeGreaterThan(120);
-    expect(eta).toBeLessThan(200);
+    expect(eta).toBeLessThan(160);
+  });
+});
+
+// ── Defect: pct pins + ETA lies for clone/graph/enrich/plan/finalize ──────
+// These phases used to fall back to a fixed PHASE_BUDGET_S guess (graph=90s,
+// enrich=90s — "sized for ~30 files, 25 pages") that never scaled with repo
+// size and never decreased. The fix: no fixed-budget fallback, no
+// trailing-phase summation, and a generic phaseProgressCurrent/
+// phaseProgressTotal/phaseProgressUnit sub-progress ladder for phases beyond
+// scan/pages — ONE mechanism, not a field pair per phase.
+
+describe("IndexingProgress — no fabricated ETA without a measured rate", () => {
+  it("reports no ETA for graph/enrich/clone/plan/finalize when phaseProgressCurrent is absent (old job, or before the BE emits it)", () => {
+    for (const phase of ["clone", "graph", "enrich", "plan", "finalize"] as const) {
+      const v = IndexingProgress.fromJob({
+        ...baseJob,
+        status: "scanning",
+        phase,
+        phaseStartedAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+      });
+      expect(v.etaSeconds, `phase=${phase}`).toBeNull();
+    }
+  });
+
+  it("a huge elapsed time in an unmeasurable phase still reports no ETA — never a stale, non-decreasing number", () => {
+    // This is the reported symptom: a real index sat at a frozen bar with a
+    // stale ETA for 25 minutes. No measured rate ⇒ no ETA, regardless of
+    // how long the phase has been running.
+    const v = IndexingProgress.fromJob({
+      ...baseJob,
+      status: "scanning",
+      phase: "graph",
+      phaseStartedAt: new Date(Date.now() - 25 * 60_000).toISOString(),
+    });
+    expect(v.etaSeconds).toBeNull();
+  });
+
+  it("does not add a trailing-phase guess on top of an otherwise-measured pages ETA", () => {
+    // Historically this summed a ~20s finalize budget on top of the real
+    // pages-phase estimate. The ETA is now scoped to the current phase only.
+    const startedAt = new Date(Date.now() - 100_000).toISOString();
+    const v = IndexingProgress.fromJob({
+      ...baseJob,
+      status: "finalizing",
+      phase: "pages",
+      totalPages: 10,
+      pagesSubmitted: 5,
+      phaseStartedAt: startedAt,
+    });
+    // rate = 100s/5 = 20s/page, 5 remaining → exactly 100s, no trailing add-on.
+    expect(v.etaSeconds).toBeCloseTo(100, 0);
+  });
+});
+
+describe("IndexingProgress — generic phaseProgressCurrent/phaseProgressTotal/phaseProgressUnit sub-progress", () => {
+  it("fills sub-progress + a unit-labeled status line for graph once phaseProgressCurrent/Total/Unit are present", () => {
+    const v = IndexingProgress.fromJob({
+      ...baseJob,
+      status: "scanning",
+      phase: "graph",
+      phaseProgressCurrent: 30,
+      phaseProgressTotal: 60,
+      phaseProgressUnit: "nodes",
+    });
+    expect(v.statusLine).toBe("30 of 60 nodes");
+    // 50% of [20,32] = 26.
+    expect(v.pct).toBe(26);
+  });
+
+  it("falls back to a generic unit label when phaseProgressUnit is absent", () => {
+    const v = IndexingProgress.fromJob({
+      ...baseJob,
+      status: "scanning",
+      phase: "graph",
+      phaseProgressCurrent: 30,
+      phaseProgressTotal: 60,
+    });
+    expect(v.statusLine).toBe("30 of 60 units");
+  });
+
+  it("shows a real status line even with no known total yet, without inventing a pct fraction", () => {
+    const v = IndexingProgress.fromJob({
+      ...baseJob,
+      status: "scanning",
+      phase: "enrich",
+      phaseProgressCurrent: 12,
+      phaseProgressTotal: null,
+      phaseProgressUnit: "entities",
+    });
+    expect(v.statusLine).toBe("12 entities processed");
+    // No total ⇒ sub stays 0 ⇒ pinned at the phase floor, same as before —
+    // but at least the line is honest instead of empty.
+    expect(v.pct).toBe(32);
+  });
+
+  it("extrapolates a real, measured ETA for enrich once phaseProgressCurrent/Total + phaseStartedAt are all present", () => {
+    // 40s elapsed, 4/20 entities done → 10s/entity, 16 remaining → 160s.
+    const startedAt = new Date(Date.now() - 40_000).toISOString();
+    const v = IndexingProgress.fromJob({
+      ...baseJob,
+      status: "scanning",
+      phase: "enrich",
+      phaseProgressCurrent: 4,
+      phaseProgressTotal: 20,
+      phaseStartedAt: startedAt,
+    });
+    expect(v.etaSeconds).not.toBeNull();
+    expect(v.etaSeconds ?? 0).toBeGreaterThan(140);
+    expect(v.etaSeconds ?? 0).toBeLessThan(170);
+  });
+
+  it("a phase that never populates phaseProgressCurrent (clone/plan/finalize) keeps the historical empty status line + floor pct", () => {
+    for (const phase of ["clone", "plan"] as const) {
+      const v = IndexingProgress.fromJob({ ...baseJob, status: "scanning", phase });
+      expect(v.statusLine, `phase=${phase}`).toBe("");
+    }
+  });
+
+  it("fromJob and fromStream agree on the generic sub-progress ladder", () => {
+    const job: IndexingJob = {
+      ...baseJob,
+      status: "scanning",
+      phase: "graph",
+      phaseProgressCurrent: 9,
+      phaseProgressTotal: 12,
+    };
+    const fromJob = IndexingProgress.fromJob(job);
+    const fromStream = IndexingProgress.fromStream({
+      job,
+      phase: "graph",
+      pagesSubmitted: 0,
+      totalPages: null,
+    });
+    expect(fromStream.pct).toBe(fromJob.pct);
+    expect(fromStream.statusLine).toBe(fromJob.statusLine);
   });
 });

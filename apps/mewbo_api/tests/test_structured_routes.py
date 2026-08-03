@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from mewbo_api import backend
-from mewbo_core.structured_response import StructuredResponseError
+from mewbo_core.loop.structured_response import StructuredResponseError
 
 _SCHEMA = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
 
@@ -148,7 +148,7 @@ def test_structured_post_model_override_applied_to_graph_first_responder(client,
     (yielding a NEW responder), so the agentic_search-owned builder is never
     edited yet the responder the route actually drives honours the override.
     """
-    from mewbo_core.structured_response import StructuredResponder
+    from mewbo_core.loop.structured_response import StructuredResponder
 
     built = StructuredResponder(
         runtime=MagicMock(),
@@ -438,9 +438,9 @@ def test_structured_synthesis_real_runner_session_backed(client, auth_headers, t
     ``GET /v1/structured/<run_id>`` resolve the same output.
     """
     from mewbo_api.realtime.recorder import FAST_STRUCTURED_TAG, RealtimeSessionRecorder
-    from mewbo_core.session_provenance import SessionOrigin
-    from mewbo_core.session_runtime import SessionRuntime
-    from mewbo_core.session_store import SessionStore
+    from mewbo_core.loop.session_runtime import SessionRuntime
+    from mewbo_core.session.session_provenance import SessionOrigin
+    from mewbo_core.session.session_store import SessionStore
 
     runtime = SessionRuntime(session_store=SessionStore(root_dir=str(tmp_path)))
 
@@ -481,11 +481,11 @@ def test_structured_synthesis_real_runner_session_backed(client, auth_headers, t
 def test_structured_synthesis_handle_resolves_before_write_behind(client, auth_headers, tmp_path):
     """The session record is materialised SYNCHRONOUSLY, so the run handle resolves
     immediately — GET never 404s while write-behind transcript persistence is still
-    pending (it only ever wrote the record inside persist() before this fix).
+    pending — writing the record only inside persist() would leave it unresolvable.
     """
     from mewbo_api.realtime.recorder import RealtimeSessionRecorder
-    from mewbo_core.session_runtime import SessionRuntime
-    from mewbo_core.session_store import SessionStore
+    from mewbo_core.loop.session_runtime import SessionRuntime
+    from mewbo_core.session.session_store import SessionStore
 
     runtime = SessionRuntime(session_store=SessionStore(root_dir=str(tmp_path)))
 

@@ -835,3 +835,80 @@ def test_markers_do_not_create_or_close_turns():
     assert len(turns) == 1
     assert turns[0].step_count == 1
     assert turns[0].assistant_text == "done"
+
+
+# ---------------------------------------------------------------------------
+# Project switches
+# ---------------------------------------------------------------------------
+
+_SWITCH_OK = (
+    '{"project": "beacon", "name": "beacon", "kind": "configured", '
+    '"cwd": "/srv/beacon", "repo": "git.example.com/acme/beacon", "branch": null, '
+    '"description": "Second project", "previous_project": null, '
+    '"previous_cwd": "/tmp/scratch", "project_instructions_found": true, '
+    '"bound_tools": 12, "skills": 3, "summary": "Switched to project \'beacon\'."}'
+)
+
+_SWITCH_REFUSED = (
+    "{'error': {'code': 'unavailable', 'message': \"Project 'ghost' points at "
+    "'/srv/ghost', which does not exist on this host.\"}}"
+)
+
+
+def test_completed_switch_is_surfaced_on_its_turn():
+    """A switch carries no turn metadata, so it must be read before that gate.
+
+    The gate skipping it is exactly how this surface came to report a session
+    that never moved, while every step after the switch ran somewhere else.
+    """
+    turns = build_timeline(
+        [
+            _user("fix the failing test in beacon"),
+            _tool_result("switch_project", ts="t3", success=True, result=_SWITCH_OK),
+            _assistant("fixed"),
+        ]
+    )
+    assert len(turns[0].project_switches) == 1
+    switch = turns[0].project_switches[0]
+    assert switch["project"] == "beacon"
+    assert switch["cwd"] == "/srv/beacon"
+    assert switch["repo"] == "git.example.com/acme/beacon"
+    assert switch["ts"] == "t3"
+
+
+def test_refused_switch_contributes_nothing():
+    """Nothing moved, so claiming a move would state the opposite of what happened."""
+    turns = build_timeline(
+        [
+            _user("go"),
+            _tool_result("switch_project", ts="t2", success=False, result=_SWITCH_REFUSED),
+            _assistant("could not"),
+        ]
+    )
+    assert turns[0].project_switches == []
+
+
+def test_ordinary_tool_results_are_not_switches():
+    """Every other tool_result stays trace-only."""
+    turns = build_timeline(
+        [
+            _user("go"),
+            _tool_result("read_file", ts="t1", success=True, result="x = 1"),
+            _assistant("ok"),
+        ]
+    )
+    assert turns[0].project_switches == []
+
+
+def test_repeated_switches_are_kept_in_order():
+    """A task spanning several projects is the point, not an edge case."""
+    second = _SWITCH_OK.replace('"beacon"', '"atlas"').replace("/srv/beacon", "/srv/atlas")
+    turns = build_timeline(
+        [
+            _user("reconcile beacon and atlas"),
+            _tool_result("switch_project", ts="t1", success=True, result=_SWITCH_OK),
+            _tool_result("switch_project", ts="t5", success=True, result=second),
+            _assistant("done"),
+        ]
+    )
+    assert [s["project"] for s in turns[0].project_switches] == ["beacon", "atlas"]

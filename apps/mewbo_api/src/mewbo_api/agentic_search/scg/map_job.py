@@ -18,9 +18,9 @@ snapshot landing card both ride).
 
 All durable state lives in the *agentic_search* store (the map-job record + its
 event log), NOT the SCG structure store — so it reuses the run-event-log +
-``RunSseGenerator`` plumbing verbatim (spec §16.2).
+``RunSseGenerator`` plumbing verbatim.
 
-Security stance (spec §6, mirrors the wiki clone-token cache):
+Security stance:
 
 * The whole feature is gated on ``scg.enabled`` (default off) — a disabled
   config refuses to start a map job.
@@ -87,7 +87,7 @@ class SourceNlContext(BaseModel):
     the system prompt / ``skill_instructions`` (the playbook is the only trusted
     extension). Every field is optional + length-capped at the boundary; an
     all-empty context renders nothing, so a bare ``POST /sources/<id>/map``
-    behaves exactly as before.
+    renders no context block at all.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -124,7 +124,7 @@ class SourceMapInput(BaseModel):
     source_id: str = Field(min_length=1)
     source_type: str = Field(min_length=1)
     descriptor: dict[str, object] | None = None
-    # Redacted auth descriptor ONLY — never a secret (spec §6).
+    # Redacted auth descriptor ONLY — never a secret.
     auth_scope: str | None = None
     # Untrusted NL context for the enrich step; None ⇒ no workspace prose.
     nl_context: SourceNlContext | None = None

@@ -24,9 +24,16 @@ uv run mewbo
 ## Common commands
 - `/help` list commands
 - `/plan on|off` toggle plan display
-- `/summarize` compact the session transcript
+- `/mode act|plan` set orchestration mode (no argument shows the current mode)
+- `/session` show the current session id
+- `/summary` show the current session summary
+- `/summarize` compact the session transcript (`/compact` is an alias)
 - `/status` show session status
+- `/tokens` show token usage and remaining context (`/budget` is an alias)
 - `/terminate` cancel the active run
+- `/retry` re-run the last user query after a failed run
+- `/continue` approve a pending plan, or resume after a failed run
+- `/edit [TEXT]` edit the last user message and re-run
 - `/tag NAME` tag a session
 - `/fork [TAG]` fork the current session
 - `/new` start a new session
@@ -39,6 +46,12 @@ uv run mewbo
 - `/models` switch models using a wizard
 - `/automatic` enable auto-approve for this session (prompts for confirmation)
 - `/quit` exit the CLI
+
+Interactive-TTY only (not available in the plain fallback):
+- `/context` show a token-attribution context breakdown
+- `/resume` open the session switcher (also `ctrl+s`)
+- `/rewind [N]` revert workspace + conversation to a checkpoint
+- `/keybindings` show the effective key bindings
 
 CLI flags:
 - `--config PATH` path to app config file (default: auto-discover via `CWD/configs/` → `$MEWBO_HOME/` → `~/.mewbo/`).

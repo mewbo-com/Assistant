@@ -19,7 +19,7 @@ interface AuraHaptics {
      * `beginTurn`). */
     fun transcriptAccepted()
 
-    /** Listening ended WITHOUT an accepted transcript [R4 2026-07-10]: cancel tap, silence
+    /** Listening ended WITHOUT an accepted transcript [R4]: cancel tap, silence
      * timeout, or a recognizer error — the a11y-mandated non-visual "mic is off" cue (the glow/
      * waveform alone are invisible to blind users). The accepted-Final path keeps
      * [transcriptAccepted] — the two moments must stay distinct. */

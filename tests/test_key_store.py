@@ -8,13 +8,13 @@ from unittest.mock import patch
 
 import mongomock
 import pytest
-from mewbo_core.key_store import (
+from mewbo_core.secrets.key_store import (
     KeyStore,
     KeyStoreBase,
     _hash_key,
     create_key_store,
 )
-from mewbo_core.key_store_mongo import MongoKeyStore
+from mewbo_core.secrets.key_store_mongo import MongoKeyStore
 
 # ---------------------------------------------------------------------------
 # Shared lifecycle suite — runs against every driver.
@@ -113,7 +113,7 @@ def test_file_default_path_uses_mewbo_home(tmp_path, monkeypatch):
 def test_factory_returns_file_store_for_json_driver(tmp_path, monkeypatch):
     """create_key_store() returns the file driver when storage.driver is json."""
     monkeypatch.setattr(
-        "mewbo_core.key_store.get_config_value",
+        "mewbo_core.secrets.key_store.get_config_value",
         lambda *_a, **_k: "json",
     )
     store = create_key_store(path=str(tmp_path / "api_keys.json"))
@@ -129,7 +129,7 @@ def test_factory_returns_file_store_for_json_driver(tmp_path, monkeypatch):
 def mongo_store():
     """A MongoKeyStore backed by mongomock."""
     with patch(
-        "mewbo_core.key_store_mongo.MongoClient",
+        "mewbo_core.secrets.key_store_mongo.MongoClient",
         mongomock.MongoClient,
     ):
         store = MongoKeyStore(
@@ -152,11 +152,11 @@ def test_mongo_lifecycle(mongo_store):
 def test_factory_returns_mongo_store_for_mongodb_driver(monkeypatch):
     """create_key_store() returns the Mongo driver when storage.driver is mongodb."""
     monkeypatch.setattr(
-        "mewbo_core.key_store.get_config_value",
+        "mewbo_core.secrets.key_store.get_config_value",
         lambda *_a, **_k: "mongodb",
     )
     with patch(
-        "mewbo_core.key_store_mongo.MongoClient",
+        "mewbo_core.secrets.key_store_mongo.MongoClient",
         mongomock.MongoClient,
     ):
         store = create_key_store()

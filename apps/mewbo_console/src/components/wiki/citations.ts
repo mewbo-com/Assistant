@@ -32,6 +32,15 @@ export interface Citation {
   isFileSource: boolean;
 }
 
+/**
+ * A ``wiki:``/``graph:`` provenance ref nested inside what is otherwise being
+ * treated as a file path — either bare (``wiki:<id>``) or behind a stray path
+ * prefix the model prepended (``src/wiki:<id>``). Anchored to the start or a
+ * path separator so an ordinary filename that merely CONTAINS the letters
+ * cannot match.
+ */
+const NESTED_PROVENANCE = /(?:^|\/)((?:wiki|graph):.+)$/;
+
 /** A valid DOM-id character set so ``getElementById`` round-trips cleanly. */
 function toDomToken(s: string): string {
   return s.replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -39,7 +48,7 @@ function toDomToken(s: string): string {
 
 /**
  * Stable DOM id for a file source (path + optional line range), shared by the
- * legacy {@link CitationRef.domId} and the discriminated {@link citationDomId}
+ * flat {@link CitationRef.domId} and the discriminated {@link citationDomId}
  * so a card and its inline ``src:`` chip always resolve to the same node.
  */
 function fileDomId(path: string, startLine: number | null, endLine: number | null): string {
@@ -138,6 +147,18 @@ export class CitationRef {
    * ``lines`` follows the same ``L<a>-<b>`` / ``a-b`` grammar as the URL frag.
    */
   static fromSrc(path: string, lines?: string): Citation {
+    // A provenance ref can arrive NESTED inside the ``src:`` href. The Q&A
+    // prompt tells the model both that citations ride ``src:`` hrefs and that
+    // ``wiki:``/``graph:`` ids are valid citation text, and it reconciles the
+    // two by writing ``src:wiki:<id>`` — sometimes with a stray ``src/`` path
+    // prefix bleeding in from the prompt's own path-shaped example. Trusting
+    // the wrapper turns the whole literal, colon and all, into a FILE path:
+    // it is then fetched from the source endpoint (404, twice, because the
+    // query client retries once), rendered as a dead "Source unavailable"
+    // card, and linked to a forge URL that cannot resolve. Recover the ref.
+    const nested = NESTED_PROVENANCE.exec(path);
+    if (nested) return CitationRef.parse(nested[1]);
+
     const { start, end } = lines ? CitationRef._parseRange(lines) : { start: null, end: null };
     return {
       raw: lines ? `${path}#L${lines.replace(/^L/, "")}` : path,
@@ -249,10 +270,9 @@ export function parseCitations(raws: Iterable<string>): ParsedCitation[] {
 }
 
 /**
- * Coerce a legacy flat {@link Citation} OR a {@link ParsedCitation} into the
+ * Coerce a flat {@link Citation} OR a {@link ParsedCitation} into the
  * discriminated form, so {@link SourceCard} renders either without its callers
- * (e.g. the not-yet-migrated QAScreen, which still feeds flat file citations)
- * having to change.
+ * (e.g. QAScreen, which still feeds flat file citations) having to change.
  */
 export function asParsedCitation(c: Citation | ParsedCitation): ParsedCitation {
   if ("kind" in c) return c;

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
 from mewbo_core import config as config_module
 from mewbo_core.config import (
     AppConfig,
@@ -280,6 +281,17 @@ class TestResolveMewboHome:
 class TestResolveConfigPath:
     """Tests for _resolve_config_path() priority chain."""
 
+    @pytest.fixture(autouse=True)
+    def _unpin_config_dir(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Exercise the WALK, which only runs when nothing pins the directory.
+
+        The suite pins ``MEWBO_CONFIG_DIR`` process-wide (see the root
+        ``conftest.py``) so that subprocess probes never read the developer's
+        own config. That pin deliberately outranks everything below, so these
+        tests have to clear it or they all assert against the pin instead.
+        """
+        monkeypatch.delenv("MEWBO_CONFIG_DIR", raising=False)
+
     def test_cwd_configs_dir_wins(self, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)
         configs_dir = tmp_path / "configs"
@@ -377,6 +389,11 @@ class TestRuntimeConfigDefaults:
 
 class TestGetConfigPathIntegration:
     """get_app_config_path / get_mcp_config_path use the resolution chain."""
+
+    @pytest.fixture(autouse=True)
+    def _unpin_config_dir(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Same reason as TestResolveConfigPath — these assert on the walk."""
+        monkeypatch.delenv("MEWBO_CONFIG_DIR", raising=False)
 
     def test_app_config_cwd_first(self, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)

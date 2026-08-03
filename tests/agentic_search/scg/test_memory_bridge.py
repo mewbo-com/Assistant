@@ -87,7 +87,7 @@ def capability_scg_store(tmp_path: Path) -> JsonScgStore:
     ``capability`` node), and the kind the deployed graph carried when connector
     insights were written edge-less: the resolver hard-coded ``entity_type`` and
     silently dropped every ``capability`` anchor. The seam test MUST seed this
-    shape — seeding ``entity_type`` (as the legacy fixture did) is exactly the
+    shape — seeding ``entity_type`` instead is exactly the
     stub that hid the bug.
     """
     store = JsonScgStore(root_dir=tmp_path / "scg")
@@ -272,14 +272,14 @@ def test_write_workspace_is_attribution_not_partition(bridge: ScgMemoryBridge) -
     assert "github Repo field id is bound" == note.content
 
 
-# ── capability-anchored deposits (the deployed MCP-tool-list bug) ─────
+# ── capability-anchored deposits ─────────────────────────────────────
 #
 # The REAL seam: an MCP-tool-list source maps every tool to a ``capability``
-# node, but the resolver used to hard-code ``ScgNode.make_id(source_key,
-# "entity_type")`` — deriving a node id that never existed for a capability —
-# so every connector anchor was dropped, no ANCHORS edge was written, and
+# node. Hard-coding ``ScgNode.make_id(source_key, "entity_type")`` in the
+# resolver derives a node id that never exists for a capability, so every
+# connector anchor is dropped, no ANCHORS edge is written, and
 # ``memory_vector_search`` (default ``exclude_invalidated=True``) silently
-# dropped the note on read. These tests pin the capability shape so the fix
+# drops the note on read. These tests pin the capability shape so that path
 # can't regress; they would all FAIL against the pre-fix resolver.
 
 

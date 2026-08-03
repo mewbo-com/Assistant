@@ -8,10 +8,10 @@ import { BrandMark } from "./BrandMark";
  *
  * It owns the brand mark, the title and the subtitle: their size, their colour,
  * their spacing, and the hero's vertical offset. That ownership is the whole
- * point. Each landing used to hand-roll this block, and they had drifted into
- * separate products — several mark sizes, several title sizes, and several
- * different distances from the top of the viewport. Anything page-specific
- * (composer, form, gallery) is `children` and hangs below the subtitle.
+ * point. Hand-rolling this block per landing is what drifts products apart —
+ * several mark sizes, several title sizes, and several different distances
+ * from the top of the viewport. Anything page-specific (composer, form,
+ * gallery) is `children` and hangs below the subtitle.
  *
  * So: no `className` escape hatch on purpose. A per-page override is exactly
  * the seam the drift came through.

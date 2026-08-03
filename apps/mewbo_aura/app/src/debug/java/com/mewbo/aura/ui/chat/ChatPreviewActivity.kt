@@ -206,7 +206,7 @@ private fun GreetingPreview(modifier: Modifier = Modifier) {
     Column(modifier = modifier.padding(top = 12.dp)) {
         Text(text = "Greeting screen (debug only) - spec §6.6, empty transcript", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 12.dp))
         ChatSurface(
-            state = ChatUiState(displayName = "Krishna", items = emptyList(), runPhase = RunPhase.Idle),
+            state = ChatUiState(displayName = "Ada", items = emptyList(), runPhase = RunPhase.Idle),
             callbacks = ChatCallbacks(onSend = { _, _ -> }, onStop = {}, onRetry = {}),
             modifier = Modifier.height(GreetingPreviewHeight),
         )
@@ -448,7 +448,8 @@ private object FakeChatState {
                 key = "assistant:alarm",
             ),
             // A PENDING ask-user question: a single-select with options + a free-text
-            // question, its own Submit. The interactive card the agent blocks on.
+            // question, its own Submit, an understated timeout hint, and a group-level notes field.
+            // The interactive card the agent blocks on.
             ChatItem.UserBubble(
                 text = "Help me wire up authentication",
                 ts = "2026-07-01T10:00:13Z",
@@ -471,6 +472,8 @@ private object FakeChatState {
                     UiQuestion(header = "Notes", question = "Anything else I should know?", options = emptyList(), multiSelect = false),
                 ),
                 resolution = null,
+                timeoutSeconds = 300,
+                notesPlaceholder = "Anything else for the agent?",
                 ts = "2026-07-01T10:00:14Z",
                 key = "question:q-preview-1",
             ),
@@ -494,8 +497,32 @@ private object FakeChatState {
                     answers = listOf(UiAnswer(selectedIndexes = listOf(0), text = null)),
                     answeredVia = "console",
                 ),
+                timeoutSeconds = null,
+                notesPlaceholder = null,
                 ts = "2026-07-01T10:00:16Z",
                 key = "question:q-preview-2",
+            ),
+            // A question whose RUN MOVED ON (timed out) — still interactive, honest banner, no residue.
+            ChatItem.UserBubble(text = "One more thing before you continue", ts = "2026-07-01T10:00:16Z", key = "user:q3"),
+            ChatItem.Question(
+                callId = "q-preview-3",
+                callToken = "tok-3",
+                questions = listOf(
+                    UiQuestion(
+                        header = "Deploy target",
+                        question = "Which environment should this ship to?",
+                        options = listOf(
+                            UiQuestionOption(label = "Staging", description = null),
+                            UiQuestionOption(label = "Production", description = null),
+                        ),
+                        multiSelect = false,
+                    ),
+                ),
+                resolution = QuestionResolution.RunMovedOn(outcome = "timed_out"),
+                timeoutSeconds = 120,
+                notesPlaceholder = null,
+                ts = "2026-07-01T10:00:17Z",
+                key = "question:q-preview-3",
             ),
             ChatItem.UserBubble(
                 text = "Can you also check flight prices?",

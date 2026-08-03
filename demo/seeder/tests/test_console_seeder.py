@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Unit tests for the ``widget_ready`` seed-event kind (demo-as-code).
+"""Unit tests for the console bundle's seed-event kinds (demo-as-code).
 
-Covers the newest member of ``SeedEventUnion``, :class:`WidgetReadyEvent`: its
+Covers :class:`WidgetReadyEvent`: its
 ``to_event()`` emits the exact FROZEN wire shape
 (``mewbo_core.builtin_plugins.widget_builder.submit_widget.WidgetReadyPayload``
 — ``files`` keyed by exactly ``app.py``/``data.json``, plus the now-shared
@@ -20,13 +20,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from mewbo_core.session_store import SessionStore
+from mewbo_core.session.session_store import SessionStore
 from mewbo_core.triggers.store import JsonTriggerStore
 from mewbo_demo_seeder.models import (
     PlanDecisionEvent,
     PlanProposedEvent,
     SeedBundle,
     SeedSession,
+    UserQuestionAnsweredEvent,
+    UserQuestionEvent,
     WidgetReadyEvent,
 )
 from mewbo_demo_seeder.seeder import DemoSeeder
@@ -34,7 +36,7 @@ from pydantic import ValidationError
 
 _BUNDLE_PATH = Path(__file__).resolve().parents[1] / "bundles" / "console-poc.json"
 _T0 = datetime(2026, 7, 14, 9, 30, 0, tzinfo=timezone.utc)
-_WIDGET_SESSION = "demo-trending-agent-harness-widget"
+_WIDGET_SESSION = "demo-trending-acme-repos-widget"
 
 
 # ── to_event() emits the exact frozen WidgetReadyPayload shape ─────────────
@@ -203,6 +205,119 @@ def test_bundle_plan_session_leaves_revision_2_pending(bundle: SeedBundle) -> No
     decided = {e.revision for e in session.events if isinstance(e, PlanDecisionEvent)}
     assert proposed == {1, 2}
     assert decided == {1}
+
+
+# ── Ask-user question seed kinds (the ask-user shot) ───────────────────────
+
+_ASK_USER_SESSION = "demo-ingest-queue-cutover"
+
+
+def test_user_question_emits_the_dispatcher_payload_shape() -> None:
+    """All five keys, and the questions re-serialized through the core models.
+
+    The api dispatcher dumps `AskUserQuestionArgs.questions`, so a group that
+    omits `options`/`multi_select` in the bundle still reaches the console with
+    both keys filled — which is what the timeline reducer reads.
+    """
+    event = UserQuestionEvent(
+        at_seconds=6,
+        call_id="call-1",
+        call_token="demo-token",
+        questions=[{"header": "Scope", "question": "Which one?"}],
+    )
+    doc = event.to_event(
+        _T0, session_model="claude-sonnet-5", agent_id="agent123", session_id="sess-abc"
+    )
+
+    assert doc["type"] == "user_question"
+    payload = doc["payload"]
+    assert set(payload) == {
+        "call_id",
+        "call_token",
+        "questions",
+        "timeout_seconds",
+        "notes_placeholder",
+    }
+    assert payload["questions"] == [
+        {"header": "Scope", "question": "Which one?", "options": [], "multi_select": False}
+    ]
+    assert payload["timeout_seconds"] is None
+    assert payload["notes_placeholder"] is None
+
+
+def test_user_question_defers_every_rule_to_the_core_arg_model() -> None:
+    """A one-option group is refused at bundle load, by the tool's own validator."""
+    with pytest.raises(ValidationError, match="options must be empty or hold 2-4 choices"):
+        UserQuestionEvent(
+            at_seconds=0,
+            call_id="call-1",
+            call_token="demo-token",
+            questions=[
+                {"header": "Scope", "question": "Which one?", "options": [{"label": "Only"}]}
+            ],
+        )
+
+
+def test_answered_event_carries_the_null_answer_fields() -> None:
+    """A run-stopped outcome writes the same key set the api does, answers null."""
+    doc = UserQuestionAnsweredEvent(
+        at_seconds=9, call_id="call-1", outcome="timed_out"
+    ).to_event(_T0, session_model="m", agent_id="a", session_id="s")
+    assert doc["type"] == "user_question_answered"
+    assert doc["payload"] == {
+        "call_id": "call-1",
+        "outcome": "timed_out",
+        "answered_via": None,
+        "answers": None,
+        "notes": None,
+        "delivery": None,
+    }
+
+
+def test_answered_without_a_matching_group_is_rejected_at_load() -> None:
+    """The console's fold would silently leave the card pending — fail here instead."""
+    with pytest.raises(ValidationError, match="before \\(or without\\) asking it"):
+        SeedSession.model_validate(
+            {
+                "id": "s1",
+                "title": "t",
+                "model": "m",
+                "offset_seconds": -60,
+                "events": [
+                    {
+                        "kind": "user_question_answered",
+                        "at_seconds": 0,
+                        "call_id": "nope",
+                        "outcome": "timed_out",
+                    },
+                    {"kind": "completion", "at_seconds": 1, "task_result": "done"},
+                ],
+            }
+        )
+
+
+def test_bundle_ask_user_session_covers_the_three_card_states(bundle: SeedBundle) -> None:
+    """One timed-out group, one multi-select+notes group, one bounded pending group.
+
+    These three states ARE the shot: a card whose run stopped waiting but stays
+    answerable, the group-level notes box, and the bounded-wait hint (which only
+    a still-pending group renders).
+    """
+    session = next(s for s in bundle.sessions if s.id == _ASK_USER_SESSION)
+    asked = [e for e in session.events if isinstance(e, UserQuestionEvent)]
+    resolved = [e for e in session.events if isinstance(e, UserQuestionAnsweredEvent)]
+    assert len(asked) == 3
+    assert [e.outcome for e in resolved] == ["timed_out"]
+
+    # The timed-out group was BOUNDED and its hint is suppressed anyway once the
+    # run stops waiting, so the pending bounded group is a separate one.
+    timed_out = next(e for e in asked if e.call_id == resolved[0].call_id)
+    assert timed_out.timeout_seconds is not None
+
+    pending = [e for e in asked if e.call_id != resolved[0].call_id]
+    assert any(e.notes_placeholder for e in pending)
+    assert any(e.timeout_seconds for e in pending)
+    assert any(q.get("multi_select") for e in pending for q in e.questions)
 
 
 # ── Issued API keys (shot 02 — Security settings) ──────────────────────────

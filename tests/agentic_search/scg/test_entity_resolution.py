@@ -135,8 +135,8 @@ def test_persisted_edge_is_durable(store: JsonScgStore) -> None:
 def test_parsed_graph_equivalent_types_emit_one_edge(store: JsonScgStore) -> None:
     """Two equivalent types whose fields come from HAS_FIELD nodes resolve.
 
-    Regression: freshly-parsed OpenAPI/MCP sources leave ``bindings`` empty and
-    expose fields as ``field`` nodes via ``HAS_FIELD`` edges. The aligner must
+    Freshly-parsed OpenAPI/MCP sources leave ``bindings`` empty and expose
+    fields as ``field`` nodes via ``HAS_FIELD`` edges. The aligner must
     derive the field set from those neighbours so type-ER fires on parsed
     sources — not only on the (later) binding-bearing shape.
     """

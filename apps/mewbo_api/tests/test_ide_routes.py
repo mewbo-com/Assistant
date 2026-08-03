@@ -36,8 +36,6 @@ def _make_instance(sid: str = VALID_SID) -> IdeInstance:
         expires_at=now + timedelta(hours=1),
         max_deadline=now + timedelta(hours=8),
         extensions=0,
-        cpus=1.0,
-        memory="1g",
     )
 
 
@@ -50,9 +48,13 @@ def fake_manager() -> MagicMock:
 def fake_runtime() -> MagicMock:
     rt = MagicMock()
     rt.session_store.list_sessions.return_value = [VALID_SID]
-    rt.session_store.load_transcript.return_value = [
-        {"type": "context", "payload": {"project": "demo"}}
-    ]
+    # The launch path resolves the project through the bounded store read, not
+    # a transcript scan — stubbing ``load_transcript`` here would leave the
+    # MagicMock answering the real call with a truthy mock.
+    rt.session_store.latest_event_of_type.return_value = {
+        "type": "context",
+        "payload": {"project": "demo"},
+    }
     return rt
 
 
@@ -75,7 +77,7 @@ def bound_auth_kit(tmp_path) -> Any:
     from mewbo_api import backend
     from mewbo_api.auth import AuthKit
     from mewbo_api.auth.guard_registry import guard_registry
-    from mewbo_core.key_store import KeyStore
+    from mewbo_core.secrets.key_store import KeyStore
     from mewbo_iam import AuthSettings
 
     guard_registry.bind(
@@ -144,9 +146,56 @@ def test_post_404_when_session_unknown(client: Any, fake_runtime: MagicMock) -> 
 
 
 def test_post_409_when_session_has_no_project(client: Any, fake_runtime: MagicMock) -> None:
-    fake_runtime.session_store.load_transcript.return_value = [{"type": "context", "payload": {}}]
+    # No context event carries a project: the ``payload_key`` narrowing means
+    # the store answers ``None`` rather than handing back a projectless event.
+    fake_runtime.session_store.latest_event_of_type.return_value = None
     resp = client.post(f"/api/sessions/{VALID_SID}/ide")
     assert resp.status_code == 409
+
+
+def test_post_asks_the_store_for_the_bounded_read(
+    client: Any, fake_runtime: MagicMock
+) -> None:
+    """The narrowing must reach the STORE, or it is decoration.
+
+    A filter applied after a full read shrinks the response and leaves the work
+    proportional to the session's whole history — the defect this replaced.
+    """
+    client.post(f"/api/sessions/{VALID_SID}/ide")
+    fake_runtime.session_store.latest_event_of_type.assert_called_once_with(
+        VALID_SID, "context", payload_key="project"
+    )
+    fake_runtime.session_store.load_transcript.assert_not_called()
+
+
+def test_post_409_when_the_store_read_fails(client: Any, fake_runtime: MagicMock) -> None:
+    """A storage failure degrades to "no project" — never a raised error."""
+    fake_runtime.session_store.latest_event_of_type.side_effect = RuntimeError("mongo down")
+    resp = client.post(f"/api/sessions/{VALID_SID}/ide")
+    assert resp.status_code == 409
+
+
+def test_post_409_carries_a_tier_refusal_verbatim(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recognised-but-unmountable session gets the SPECIFIC sentence.
+
+    The generic "no project in context" body is for a session no tier binds. A
+    wiki project whose checkout is gone must say so here rather than falling
+    through to the broker's ``workspace_denied`` 403, which names nothing a
+    console user can act on.
+    """
+
+    class _Refuses:
+        def resolve(self, _session_id: str, _runtime: Any) -> None:
+            raise ide_routes.IdeWorkspaceUnavailable("the checkout is gone")
+
+    monkeypatch.setattr(
+        ide_routes, "_resolver", ide_routes.IdeWorkspaceResolver(tiers=(_Refuses(),))
+    )
+    resp = client.post(f"/api/sessions/{VALID_SID}/ide")
+    assert resp.status_code == 409
+    assert resp.get_json()["message"] == "the checkout is gone"
 
 
 def test_post_503_when_docker_down(client: Any, fake_manager: MagicMock) -> None:

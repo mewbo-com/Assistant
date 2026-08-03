@@ -16,11 +16,11 @@ import { getErrorMessage, logApiError } from "../utils/errors";
  *
  * This hook reads the SAME `['projects']` query as `useProjects()` and narrows
  * it with `select` (re-calling a hook on a shared queryKey is not a second
- * fetch). It used to be a hand-rolled `useState` + `useEffect` cache that ALSO
- * invalidated `['projects']` for the rest of the app — a second cache sitting
- * next to the real one, which the console's CLAUDE.md forbids outright. Writes
- * are `useMutation`s that invalidate the one key, so the composer's project
- * picker, the session list's `ProjectLabel` and this pane can never disagree.
+ * fetch) — a hand-rolled `useState` + `useEffect` cache here would be a second
+ * cache sitting next to the real one, which the console's CLAUDE.md forbids
+ * outright. Writes are `useMutation`s that invalidate the one key, so the
+ * composer's project picker, the session list's `ProjectLabel` and this pane
+ * can never disagree.
  */
 const PROJECTS_KEY = ["projects"] as const;
 
@@ -31,16 +31,16 @@ function isManaged(p: ProjectSummary): p is ProjectSummary & { project_id: strin
 
 /**
  * `/api/projects` returns the union of config + managed entries. Carry the
- * worktree flags through — earlier versions stripped them, which broke
- * worktree detection downstream (ProjectCard, the composer's picker).
+ * worktree flags through — stripping them breaks worktree detection
+ * downstream (ProjectCard, the composer's picker).
  *
  * `GET /api/projects` (`backend.py::Projects.get`) builds each managed entry
  * from a fixed, narrower dict — `name`/`project_id`/`path`/`description`/
  * `available`/`source`/`is_worktree`/`parent_project_id`/`branch` — and never
  * includes `path_source`/`folder_created`/`created_at`/`updated_at`; those
  * only exist on the FULL record `POST`/`PATCH /api/v_projects/<id>` return
- * (`backend.py::_vproject_to_dict`). This used to fabricate them (`"auto"` /
- * `true` / `""` / `""`) just to satisfy `VirtualProject`'s shape — a lie
+ * (`backend.py::_vproject_to_dict`). Fabricating them (`"auto"` / `true` /
+ * `""` / `""`) just to satisfy `VirtualProject`'s shape would be a lie
  * waiting for the first consumer that renders "Created {created_at}" and
  * prints "Invalid Date". Omit them instead; `VirtualProject` declares them
  * optional for exactly this reason.
@@ -68,14 +68,13 @@ export function useVirtualProjects() {
 
   const invalidate = () => qc.invalidateQueries({ queryKey: PROJECTS_KEY });
 
-  // Mutations previously had no `onError` at all, and the hook's `error`
-  // field reads only the QUERY (`query.error` below) — so a rejecting
-  // create/update/delete produced an unhandled promise rejection and no
-  // error anywhere a user could see (a stuck confirm dialog, a card wedged
-  // in edit mode). `usePlugins.ts` established the fix for this same
-  // refactor: surface mutation failures as `sonner` toasts fired from the
-  // HOOK, so every caller gets it for free without hand-rolling its own
-  // try/catch.
+  // The hook's `error` field reads only the QUERY (`query.error` below), so
+  // mutations need their OWN `onError` — without one, a rejecting
+  // create/update/delete produces an unhandled promise rejection and no
+  // error anywhere a user can see (a stuck confirm dialog, a card wedged
+  // in edit mode). `usePlugins.ts` established the fix for this same shape:
+  // surface mutation failures as `sonner` toasts fired from the HOOK, so
+  // every caller gets it for free without hand-rolling its own try/catch.
   const createM = useMutation({
     mutationFn: (input: { name: string; description: string; path?: string }) =>
       createVirtualProject(input.name, input.description, input.path),

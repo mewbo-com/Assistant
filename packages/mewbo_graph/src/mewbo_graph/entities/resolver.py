@@ -136,7 +136,13 @@ class EntityResolver:
         self._k = block_k
 
     def resolve(self, slug: str, candidate: Entity) -> LadderDecision:
-        """Return a ladder decision for *candidate* against existing entities."""
+        """Return a ladder decision for *candidate* against existing entities.
+
+        Scores against whatever the store holds AT CALL TIME, not a fixed
+        snapshot — so two calls with an identical *candidate* are not
+        guaranteed to reach the same decision if the store's contents changed
+        between them.
+        """
         try:
             qvec = self._embedder.embed_query(candidate.name)
         except Exception:
@@ -179,6 +185,18 @@ class EntityResolver:
         ``wiki-page-writer.md``). Normalize each subject to its deterministic id
         so a ``merge``/``distinct`` prior actually matches — an id passes through
         unchanged, a ``name|type`` key is resolved via ``Entity.compute_id``.
+
+        **KNOWN GAP — contradictory priors resolve by store read order.** This
+        folds per PAIR, while a recommendation is keyed per ``(action, pair)``
+        (``EntityRecommendation.compute_id``), so a ``merge`` and a ``distinct``
+        on the SAME pair persist as two rows and the last one iterated wins.
+        The JSON driver iterates in insertion order and Mongo's ``find()`` has no
+        inherent order, so the winner can differ between a dev store and a
+        deployed one. Fixing it is a judgment call about entity quality — drop
+        ``action`` from the key so a later prior genuinely supersedes, versus
+        keep both rows and tie-break here toward ``distinct`` (a wrong merge
+        destroys two entities into one; a wrong split is recoverable) — and it
+        is tracked separately rather than decided in passing here.
         """
         priors: dict[frozenset[str], str] = {}
         for rec in self._store.get_entity_recommendations(slug):

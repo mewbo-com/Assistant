@@ -4,6 +4,7 @@
 # ruff: noqa: D101, D102, D103, D107
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -13,6 +14,7 @@ from unittest.mock import patch
 import pytest
 from docker.errors import APIError, NotFound
 from mewbo_api.ide import (
+    DockerContainerBackend,
     DockerUnavailable,
     IdeInstance,
     IdeManager,
@@ -95,8 +97,6 @@ class InMemoryStore:
             expires_at=src.expires_at,
             max_deadline=src.max_deadline,
             extensions=src.extensions,
-            cpus=src.cpus,
-            memory=src.memory,
         )
 
     def insert(self, instance: IdeInstance) -> None:
@@ -144,8 +144,6 @@ def cfg(state_dir: str) -> WebIdeConfig:
         image="codercom/code-server:latest",
         default_lifetime_hours=1,
         max_lifetime_hours=8,
-        cpus=1.0,
-        memory="1g",
         pids_limit=512,
         network="mewbo-ide",
         state_dir=state_dir,
@@ -214,6 +212,15 @@ def test_ensure_creates_container_and_persists(
     vols = call["volumes"]
     assert vols[project_path] == {"bind": "/home/coder/project", "mode": "rw"}
     assert vols[deadline_file] == {"bind": "/mewbo/deadline", "mode": "ro"}
+
+    # seeded default settings: one file, read-only, shared across sessions
+    settings_file = os.path.join(manager._cfg.state_dir, "default-settings.json")
+    assert vols[settings_file] == {
+        "bind": "/home/coder/.local/share/code-server/User/settings.json",
+        "mode": "ro",
+    }
+    with open(settings_file) as fh:
+        assert json.load(fh) == {"workbench.colorTheme": "Monokai"}
 
 
 def test_ensure_reconnect_when_container_alive(manager: IdeManager, project_path: str) -> None:
@@ -329,8 +336,6 @@ def test_ensure_handles_duplicate_key_race(
         expires_at=now + timedelta(hours=1),
         max_deadline=now + timedelta(hours=8),
         extensions=0,
-        cpus=1.0,
-        memory="1g",
     )
     store._docs[VALID_SID] = pre
     # Register container so alive check returns True.
@@ -554,7 +559,7 @@ def test_docker_unavailable_wrapped(cfg: WebIdeConfig) -> None:
         def delete(self, sid: str) -> bool:
             return False
 
-    mgr = IdeManager(cfg, RaisingStore(), docker_client=None)
+    backend = DockerContainerBackend(cfg, docker_client=None)
     with patch("mewbo_api.ide.docker_from_env", side_effect=DockerException("no sock")):
         with pytest.raises(DockerUnavailable):
-            mgr._docker()
+            backend._docker()

@@ -17,7 +17,13 @@ from mewbo_graph.wiki.memory_types import (
     MemoryNode,
     MemoryProvenance,
 )
-from mewbo_graph.wiki.types import GraphEdge, GraphNode, make_graph_node
+from mewbo_graph.wiki.types import (
+    CommitScope,
+    Embedding,
+    GraphEdge,
+    GraphNode,
+    make_graph_node,
+)
 
 SLUG = "org/repo"
 
@@ -271,7 +277,9 @@ def test_delete_nodes_by_file(store) -> None:
     _seed_graph(store)
     removed = store.delete_nodes_by_file(SLUG, "auth.py")
     assert removed == 2
-    remaining = {n.node_id for n in store.query_graph(SLUG)}
+    remaining = {
+        n.node_id for n in store.query_graph(SLUG, scope=CommitScope.every())
+    }
     assert remaining == {"fB", "nB"}
 
 
@@ -280,5 +288,50 @@ def test_delete_edges_by_source_file(store) -> None:
     # edges sourced from auth.py nodes: fA->nA (CONTAINS), nA->nB (CALLS)
     removed = store.delete_edges_by_source_file(SLUG, "auth.py")
     assert removed == 2
-    remaining = {(e.source, e.target, e.type) for e in store.list_edges(SLUG)}
+    remaining = {
+        (e.source, e.target, e.type)
+        for e in store.list_edges(SLUG, scope=CommitScope.every())
+    }
     assert remaining == {("fB", "nB", "CONTAINS")}
+
+
+def _seed_embeddings(store, node_ids: list[str]) -> None:
+    store.upsert_embeddings(
+        SLUG,
+        [
+            Embedding(slug=SLUG, node_id=nid, vector=[1.0, 0.0], model="m", dim=2)
+            for nid in node_ids
+        ],
+        commit_sha="c1",
+    )
+
+
+def _vectorised_ids(store) -> set[str]:
+    return {e.node_id for e in store.vector_search(SLUG, [1.0, 0.0], k=100)}
+
+
+def test_delete_nodes_by_file_cascades_to_the_vectors_of_those_nodes(store) -> None:
+    """Deleting a file's nodes deletes their embeddings in the same call.
+
+    ``Embedding`` carries no ``file`` field, so a vector can only be reached
+    through the node it points at — and once that node is gone the vector is
+    unreachable, unreapable and still scoreable by ``vector_search``. Making the
+    cascade part of THIS method is what keeps "no orphaned vectors" a property
+    of the store rather than a call-ordering rule each caller has to remember.
+    """
+    _seed_graph(store)
+    _seed_embeddings(store, ["fA", "nA", "fB", "nB"])
+
+    removed = store.delete_nodes_by_file(SLUG, "auth.py")
+
+    assert removed == 2  # the return value is still the NODE count
+    assert _vectorised_ids(store) == {"fB", "nB"}
+
+
+def test_delete_nodes_by_file_leaves_vectors_alone_when_no_node_matches(store) -> None:
+    """A file with no nodes deletes nothing at all — not even a stray vector."""
+    _seed_graph(store)
+    _seed_embeddings(store, ["fA", "nA", "fB", "nB"])
+
+    assert store.delete_nodes_by_file(SLUG, "absent.py") == 0
+    assert _vectorised_ids(store) == {"fA", "nA", "fB", "nB"}

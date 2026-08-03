@@ -17,12 +17,13 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from mewbo_core.agent_context import AgentContext
+from mewbo_core.agents.agent_context import AgentContext
+from mewbo_core.agents.hypervisor import AgentHypervisor
 from mewbo_core.classes import ActionStep
 from mewbo_core.hooks import HookManager
-from mewbo_core.hypervisor import AgentHypervisor
+from mewbo_core.loop.tool_use_loop import ToolUseLoop
 from mewbo_core.permissions import PermissionDecision, PermissionPolicy
-from mewbo_core.tool_registry import (
+from mewbo_core.tooling.tool_registry import (
     TOOL_SEARCH_TOOL_ID,
     ToolRegistry,
     ToolSpec,
@@ -31,7 +32,6 @@ from mewbo_core.tool_registry import (
     is_always_load,
     is_deferred,
 )
-from mewbo_core.tool_use_loop import ToolUseLoop
 from mewbo_tools.integration.tool_search import ToolSearchRunner
 
 # ---------------------------------------------------------------------------
@@ -94,7 +94,7 @@ def _agent_context() -> AgentContext:
 
 def _build_loop(registry: ToolRegistry) -> ToolUseLoop:
     """Build a ToolUseLoop with mocked LLM binding (no real model calls)."""
-    with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+    with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
         mock_build.return_value = MagicMock()
         mock_build.return_value.bind_tools.return_value = MagicMock()
         return ToolUseLoop(
@@ -344,7 +344,7 @@ class TestDeferredToolBlock:
             metadata={"schema": {"type": "object"}, "server": server},
         )
 
-    def test_groups_mcp_tools_by_server_with_counts(self):
+    def test_groups_mcp_tools_by_server_and_names_every_tool_id(self):
         specs = [
             self._mcp_spec("mcp_linear_list_issues", server="linear"),
             self._mcp_spec("mcp_linear_get_issue", server="linear"),
@@ -358,9 +358,28 @@ class TestDeferredToolBlock:
         assert "<available-mcp-servers>" in block
         assert "linear (2)" in block
         assert "slack (1)" in block
-        # Full tool ids should NOT appear (server-only summary).
-        assert "mcp_linear_list_issues" not in block
+        # Every deferred id is named, so the model can `select:` one directly
+        # instead of burning a turn discovering names it could have been told.
+        for spec in specs:
+            assert spec.tool_id in block
         assert "tool_search" in block
+
+    def test_id_listing_is_bounded_and_says_what_it_dropped(self):
+        # One oversized server, then a second whose ids must be elided.
+        big = [self._mcp_spec(f"mcp_big_tool_{i:04d}", server="big") for i in range(400)]
+        small = [self._mcp_spec("mcp_small_ping", server="small")]
+        loop = _build_loop(_registry())
+        loop._tool_search_enabled = True
+        loop._tool_specs_full = big + small
+        loop._deferred_ids = {s.tool_id for s in big + small}
+        block = loop._render_deferred_tool_block()
+        # Both servers stay VISIBLE with honest counts...
+        assert "big (400)" in block
+        assert "small (1)" in block
+        # ...but the elided server's ids are absent and the block says so,
+        # rather than presenting a truncated catalog as a complete one.
+        assert "mcp_small_ping" not in block
+        assert "omitted for length" in block
 
     def test_lists_non_mcp_deferred_tools_separately(self):
         local_deferred = ToolSpec(
@@ -413,7 +432,7 @@ class TestEndToEndRebind:
         (real ToolSearchRunner) but the MCP tool execution is mocked."""
         reg = ToolRegistry()
         # tool_search uses the real runner over this same registry.
-        from mewbo_core.tool_registry import _register_tool_search
+        from mewbo_core.tooling.tool_registry import _register_tool_search
 
         # An MCP tool the model will fetch via tool_search.
         mcp_runner = MagicMock()
@@ -473,9 +492,9 @@ class TestEndToEndRebind:
             return default
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
-            patch("mewbo_core.tool_use_loop.get_config_value", side_effect=_config_lookup),
-            patch("mewbo_core.tool_registry.get_config_value", side_effect=_config_lookup),
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.get_config_value", side_effect=_config_lookup),
+            patch("mewbo_core.tooling.tool_registry.get_config_value", side_effect=_config_lookup),
         ):
             bound_models: list[MagicMock] = []
 
@@ -515,10 +534,11 @@ class TestEndToEndRebind:
         post_names = {s["function"]["name"] for s in post_schemas}
         assert "mcp_linear_get_issue" in post_names
 
-    def test_default_off_keeps_full_bind(self):
-        """When ``tool_search.mode`` is the default 'off', the bind list
+    def test_mode_off_keeps_full_bind(self):
+        """When an operator sets ``tool_search.mode`` to 'off', the bind list
         contains every spec on turn 1 — no deferral, no system block, no
-        re-bind."""
+        re-bind. ('off' is the opt-out, not the default; the default is
+        'on'.)"""
         reg = self._registry_with_real_tool_search()
         responses = [_aimsg(text="Done — no tools needed.")]
 
@@ -534,9 +554,9 @@ class TestEndToEndRebind:
             return default
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
-            patch("mewbo_core.tool_use_loop.get_config_value", side_effect=_config_lookup),
-            patch("mewbo_core.tool_registry.get_config_value", side_effect=_config_lookup),
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.get_config_value", side_effect=_config_lookup),
+            patch("mewbo_core.tooling.tool_registry.get_config_value", side_effect=_config_lookup),
         ):
             bound_models: list[MagicMock] = []
 
@@ -570,8 +590,8 @@ class TestEndToEndRebind:
         """A scoped run (non-empty ``allowed_tools`` that omits tool_search)
         must STILL get tool_search bound and reach its deferred MCP tool.
 
-        This is the Phase 0 correctness property: ``filter_specs``
-        exempts ``always_load`` specs from the allowlist gate. Without the
+        The correctness property: ``filter_specs`` exempts ``always_load``
+        specs from the allowlist gate. Without the
         exemption a strict sub-agent gets its MCP tools deferred (stripped)
         AND loses the only means to fetch them — zero MCP tools reachable.
         """
@@ -598,9 +618,9 @@ class TestEndToEndRebind:
             return default
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
-            patch("mewbo_core.tool_use_loop.get_config_value", side_effect=_config_lookup),
-            patch("mewbo_core.tool_registry.get_config_value", side_effect=_config_lookup),
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.get_config_value", side_effect=_config_lookup),
+            patch("mewbo_core.tooling.tool_registry.get_config_value", side_effect=_config_lookup),
         ):
             bound_models: list[MagicMock] = []
 
@@ -636,9 +656,9 @@ class TestEndToEndRebind:
 
 
 class TestPlanModeDeferral:
-    """Plan-mode semantics (Phase 2).
+    """Plan-mode semantics.
 
-    Decision: deferral is ORTHOGONAL to the plan-mode tool filter. The
+    Deferral is ORTHOGONAL to the plan-mode tool filter. The
     deferred ``tool_search`` tool is read-only, so it is always bindable in
     plan mode; the model fetches an MCP schema on demand and the per-turn
     re-bind hands it to the EXISTING plan-mode filter — which never
@@ -669,9 +689,9 @@ class TestPlanModeDeferral:
 
         bound_models: list[MagicMock] = []
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
-            patch("mewbo_core.tool_use_loop.get_config_value", side_effect=_config_lookup),
-            patch("mewbo_core.tool_registry.get_config_value", side_effect=_config_lookup),
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.get_config_value", side_effect=_config_lookup),
+            patch("mewbo_core.tooling.tool_registry.get_config_value", side_effect=_config_lookup),
         ):
 
             def _bind_tools(schemas):
@@ -712,7 +732,7 @@ class TestAutoMode:
     ``off`` never defers, ``on`` always defers, ``auto`` defers only when
     the deferred-tool count exceeds ``agent.tool_search.auto_threshold`` —
     so lean / zero-MCP sessions keep verbatim binding and pay nothing while
-    a many-MCP session is fixed (Phase 1).
+    a many-MCP session defers.
     """
 
     def _mcp_specs(self, n: int) -> list[ToolSpec]:
@@ -733,7 +753,7 @@ class TestAutoMode:
             return default
 
         loop = _build_loop(_registry())
-        with patch("mewbo_core.tool_use_loop.get_config_value", side_effect=_cfg):
+        with patch("mewbo_core.loop.tool_use_loop.get_config_value", side_effect=_cfg):
             return loop._is_tool_search_enabled(specs)
 
     def test_off_disabled_regardless_of_count(self):
@@ -769,7 +789,7 @@ class TestFilterSpecsAlwaysLoad:
 
     The allowlist scopes the *ordinary* tool surface; it must never strip a
     tool the model needs to make progress (``tool_search``). An explicit
-    denylist is still authoritative — deny beats always_load (Phase 0).
+    denylist is still authoritative — deny beats always_load.
     """
 
     def test_always_load_survives_non_empty_allowlist(self):
@@ -865,7 +885,7 @@ class TestToolSearchSupplement:
         assert "No deferred tools" not in out.content
 
     def test_no_supplement_no_deferred_keeps_message(self):
-        """Empty registry + no supplement ⇒ the historical message (backward compat)."""
+        """Empty registry + no supplement ⇒ the plain message."""
         reg = _registry(_spec("read_file"))
         runner = ToolSearchRunner(reg)
         out = runner.run(self._step("anything"), supplement=None)
@@ -928,7 +948,7 @@ class TestToolSearchDispatchSupplement:
     """
 
     def _loop_with_session_tool(self) -> ToolUseLoop:
-        from mewbo_core.tool_registry import _register_tool_search
+        from mewbo_core.tooling.tool_registry import _register_tool_search
 
         reg = ToolRegistry()
         reg.register(_spec("read_file", description="Read local files."))

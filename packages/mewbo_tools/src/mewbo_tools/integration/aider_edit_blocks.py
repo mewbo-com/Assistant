@@ -9,7 +9,7 @@ from pathlib import Path
 
 from mewbo_core.classes import AbstractTool, ActionStep
 from mewbo_core.common import MockSpeaker, get_mock_speaker
-from mewbo_core.errors import ToolInputError
+from mewbo_core.contracts.errors import ToolInputError
 
 from mewbo_tools.aider_bridge import (
     EditBlockApplyError,

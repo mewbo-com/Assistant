@@ -10,12 +10,18 @@ artifacts already exist:
 - ``graph``  — skip when the graph FOR THIS COMMIT is non-empty.
 - ``enrich`` — skip when abstract entities FOR THIS COMMIT exist.
 - ``plan``   — skip when the job has a committed page plan.
-- ``pages``  — write only the plan pages NOT already in the store.
+- ``pages``  — write only the plan pages THIS JOB has not already written.
 
 The graph/enrich counts are keyed on ``(slug, commit_sha)``, not on the slug's
 whole artifact set: since the store carries the UNION of every commit ever
 indexed for a slug, "N nodes exist" answers "some commit built a graph", not
 "this commit's graph is built" — the distinction the skip decision turns on.
+
+``pages`` is keyed tighter still, on the JOB's own claimed page ids, because it
+answers a different question: not "does a usable artifact exist" but "did THIS
+run already write this page". The slug-wide page list answered neither — a page
+written by an earlier index at another commit counted as done, so a resume
+skipped regenerating it and the run shipped a mix of two commits' documentation.
 
 ``ResumePlan`` is computed ONCE (``build``) at resume time and persisted as a tiny
 dict on the job's resume sidecar (``store.save_resume_plan``). Each wiki phase tool
@@ -53,10 +59,9 @@ class ResumeCountError(RuntimeError):
     The distinction this type exists to preserve: an artifact count of zero
     means "nothing was ever built", and rebuilding is then the correct branch —
     but a count that FAILED means nothing at all, and rebuilding on the strength
-    of it costs a full re-index plus a re-embedding pass. The reads used to
-    swallow every exception and return 0, collapsing the second case into the
-    first with no log line, so the triggering exception was never even
-    identifiable after the fact.
+    of it costs a full re-index plus a re-embedding pass. Swallowing every
+    exception and returning 0 collapses the second case into the first with no
+    log line, leaving the triggering exception unidentifiable after the fact.
 
     Raising instead makes the resume path fail CLOSED: a caller that cannot
     determine what is already built must refuse to resume rather than silently
@@ -124,7 +129,7 @@ class ResumePlan:
         if plan_ids:
             skip.add("plan")
 
-        done = cls._persisted_page_ids(store, slug)
+        done = cls._written_page_ids(store, slug, job.job_id)
         pages_done = frozenset(pid for pid in plan_ids if pid in done)
         pages_remaining = tuple(pid for pid in plan_ids if pid not in done)
 
@@ -244,7 +249,7 @@ class ResumePlan:
     #
     # Every read below fails CLOSED. An empty result is a real answer ("nothing
     # is built yet") that legitimately selects a rebuild; an exception is not an
-    # answer at all, and treating it as an empty one is what turned a transient
+    # answer at all, and treating it as an empty one is what turns a transient
     # store glitch into a full re-index. See :class:`ResumeCountError`.
 
     @staticmethod
@@ -252,9 +257,9 @@ class ResumePlan:
         """Log *exc* and raise :class:`ResumeCountError` — the one failure path.
 
         Shared by all four reads so a failure is reported identically wherever it
-        happens. The log line matters as much as the raise: the old handlers were
-        silent, so nothing in the job log ever named the exception that had
-        triggered a rebuild.
+        happens. The log line matters as much as the raise: a silent handler
+        leaves nothing in the job log naming the exception that triggered a
+        rebuild.
         """
         logging.warning(
             "ResumePlan: {} read failed for {} ({}: {}) — refusing to resume",
@@ -295,12 +300,21 @@ class ResumePlan:
         return ids
 
     @classmethod
-    def _persisted_page_ids(cls, store: WikiStoreBase, slug: str) -> set[str]:
-        """Set of page ids already written to the store for *slug*."""
+    def _written_page_ids(
+        cls, store: WikiStoreBase, slug: str, job_id: str
+    ) -> frozenset[str]:
+        """Page ids *job_id* itself wrote (its claim set, else its attribution).
+
+        Not the slug's page list. The store holds the union of every index ever
+        run for a slug, so "a page with this id exists" answers "some run wrote
+        it", which on a re-index is true for pages belonging to an older commit
+        entirely — and a resume that reads those as done skips regenerating
+        them.
+        """
         try:
-            return {p.id for p in store.list_pages(slug)}
+            return store.get_job_page_ids(slug, job_id)
         except Exception as exc:
-            cls._read_failed("persisted pages", slug, exc)
+            cls._read_failed("written pages", job_id, exc)
 
 
 __all__ = ["ResumeCountError", "ResumePlan", "SKIPPABLE_PHASES"]

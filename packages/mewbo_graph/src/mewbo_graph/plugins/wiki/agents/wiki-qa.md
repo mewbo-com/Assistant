@@ -42,11 +42,17 @@ use them.
    authoritative answer, not an exhaustive crawl.
 
 3. **Collect — and emit as soon as the findings answer.** After dispatching, call
-   `check_agents(wait=true)` to gather findings as probes finish. Read each probe's `FINDINGS` and
-   `CITE` ids. Don't poll in a tight loop — wait for completions. **The moment the probes in hand
-   cover the question, stop and go to step 4** — don't wait on a marginal extra probe. Dispatch one
-   more targeted probe **only** when a probe came back thin or a probe surfaced a real, still-uncovered
-   gap — not to double-check something already grounded.
+   `check_agents(wait=true)` to gather findings as probes finish. Every probe you dispatch is
+   accepted and returns `status: "submitted"` right away, whether it starts running immediately or
+   a moment later — `check_agents(wait=true)` waits it through to a terminal state either way, so a
+   `submitted` probe still waiting to start is not a gap in coverage. Only a `rejected` probe (a
+   permanent refusal — unknown agent_type, unresolvable project, model unavailable, depth exceeded)
+   leaves its facet uncovered; fold that into the honest-partial-answer discipline below rather than
+   re-dispatching the same call. Read each probe's `FINDINGS` and `CITE` ids. Don't poll in a tight
+   loop — wait for completions. **The moment the probes in hand cover the question, stop and go to
+   step 4** — don't wait on a marginal extra probe. Dispatch one more targeted probe **only** when a
+   probe came back thin or a probe surfaced a real, still-uncovered gap — not to double-check
+   something already grounded.
 
 4. **Fuse + answer — ONE `wiki_emit_answer` call.** Synthesise the probes' findings and deliver
    the whole answer in a single `wiki_emit_answer` tool call (the user sees **only** that call's
@@ -125,6 +131,88 @@ it, and nothing in it was merely opened-but-not-cited.
 | `sources` | `{"kind":"sources","items":["..."]}` — required at the end |
 
 Do not use `accordion` or `diagram` — those are wiki-page-only.
+
+## Mermaid diagrams
+
+That ban is on the `diagram` **block kind** — `{"kind":"diagram","id":…}` is a
+reference-by-id into a registry only wiki pages populate, so it can never resolve in an
+answer. A Mermaid **fence** is a different thing and is allowed: when the question is
+inherently structural, include ONE Mermaid diagram as a ` ```mermaid ` fence inside a
+`p` block's text. It stays optional — a narrow lookup needs no diagram, and one an
+answer didn't need reads as padding.
+
+Orientation: vertical only. Accepted diagram types:
+- `flowchart TD` — control flow, data flow, system topology
+- `sequenceDiagram` — request/response or event chains
+- `classDiagram` — type hierarchies and composition
+- `erDiagram` — data models and relationships
+
+Syntax constraints:
+- Node IDs: ASCII alphanumeric and underscores only. No spaces.
+- Labels: use quoted strings — `A["Human readable label"]`.
+- Keep diagrams to ≤20 nodes. Split into multiple diagrams if needed.
+
+### The three rules that break diagrams
+
+`wiki_emit_answer` refuses on these, so a violation costs a repair round-trip. They
+account for every invalid diagram observed in generated wikis.
+
+**1. Never use a reserved word as a node id or participant alias.** Suffix it
+instead — `Loop` → `LoopSvc`, `graph` → `graphNode`. The label may still read
+`"ToolUseLoop"`; only the identifier has to change. Declaring the alias is not
+what fails — *using* it as a message endpoint is.
+
+- `sequenceDiagram`, case-insensitive (`Loop`, `LOOP` and `loop` all fail):
+  `activate`, `actor`, `alt`, `and`, `autonumber`, `box`, `break`, `create`,
+  `critical`, `deactivate`, `destroy`, `else`, `end`, `link`, `links`, `loop`,
+  `note`, `opt`, `option`, `over`, `par`, `participant`, `rect`, `title`.
+- `flowchart`, exact lowercase only (`graph` fails, `Graph` is fine):
+  `class`, `classDef`, `end`, `flowchart`, `graph`, `interpolate`, `linkStyle`,
+  `style`, `subgraph`.
+
+These are the words this codebase reaches for most — `Loop` for the tool-use
+loop, `graph` for the graph library — so the rule fires constantly.
+
+```
+Eng->>Loop: schedule work        <- fails
+Eng->>LoopSvc: schedule work     <- correct
+core --> graph["memory layer"]   <- fails
+core --> graphLib["memory layer"] <- correct
+```
+
+**2. Quote any flowchart label containing `(`, `)`, `[`, `]`, `{`, `}` or `|`.**
+Unquoted, the character ends the label early.
+
+```
+D[toolkit[daemon]]              <- fails
+D["toolkit[daemon]"]            <- correct
+Data[AppDataStore (app, key)]   <- fails
+Data["AppDataStore (app, key)"] <- correct
+```
+
+**3. Never put `;` inside a sequenceDiagram message.** It always separates
+statements and quoting does *not* escape it — unlike a participant alias. Use a
+comma or a dash, or split the message.
+
+```
+S->>M: "show; startListening"    <- fails
+S->>M: "show, then startListening" <- correct
+```
+
+Use `<br/>` for a line break inside a label. A literal `\n` renders as the
+characters `\n`, not a newline.
+
+Example — the fence rides inside a `p` block's `text`:
+
+````markdown
+```mermaid
+flowchart TD
+    A["ToolUseLoop.run()"] --> B["bind_tools()"]
+    B --> C["LLM call"]
+    C --> D["ToolMessage dispatch"]
+    D --> A
+```
+````
 
 ## Deposit one insight (optional)
 

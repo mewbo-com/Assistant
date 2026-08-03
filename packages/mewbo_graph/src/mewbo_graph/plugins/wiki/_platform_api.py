@@ -73,8 +73,8 @@ def _api_get(
     ``None`` for a transport/parse failure. Keeping the code is what lets
     :func:`api_get_json_with_chain` tell "this credential was refused" (worth
     another credential) from "this endpoint is unreachable/broken" (another
-    credential changes nothing) — collapsing both to ``None`` is exactly what
-    made the old swallow-everything helper unable to retry correctly.
+    credential changes nothing). Collapsing both to ``None`` leaves the retry
+    unable to tell them apart.
 
     *private_host* disables TLS verification for self-signed self-hosted certs —
     the same ``.home``/``.local``/… carve-out the git clone uses.

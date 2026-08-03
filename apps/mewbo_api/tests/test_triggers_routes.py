@@ -13,7 +13,7 @@ from mewbo_api import backend
 from mewbo_api.triggers import routes as trigger_routes
 from mewbo_api.triggers.service import TriggerFireContext, TriggerService
 from mewbo_core.config import TriggersConfig
-from mewbo_core.session_store import SessionStore
+from mewbo_core.session.session_store import SessionStore
 from mewbo_core.triggers.policy import TriggerPolicy
 from mewbo_core.triggers.store import JsonTriggerStore
 

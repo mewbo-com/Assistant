@@ -58,7 +58,7 @@ class TriggerAuthority(BaseModel):
     scope at fire time.
 
     ``scopes`` preserves the three-state law of the identity kernel: ``None`` =
-    unrestricted-legacy (impose no narrowing), ``()`` = explicitly scopeless, a
+    unrestricted (impose no narrowing), ``()`` = explicitly scopeless, a
     non-empty tuple = exactly those. ``None`` and ``()`` are NEVER collapsed —
     the fail-open trap a scopeless key becoming unrestricted.
     """
@@ -126,9 +126,9 @@ class TriggerSpec(BaseModel):
     created_by: Literal["agent", "user"]
     provenance: TriggerProvenance = Field(default_factory=TriggerProvenance)
     # The arming caller's authority, snapshotted at arm time (app-set, and only
-    # when auth is enabled). ``None`` — every trigger armed before IAM, and every
-    # auth-disabled deployment — means "no captured authority": the fire path
-    # falls back to today's ambient re-engage, byte-identical. Lives on the shared
+    # when auth is enabled). ``None`` — an auth-disabled deployment, or a record
+    # carrying no authority — means the fire path falls back to the ambient
+    # re-engage. Lives on the shared
     # base (the stored RECORD contract), never on a per-kind variant, so the
     # discriminated union stays pure and every kind carries it for free.
     authority: TriggerAuthority | None = None

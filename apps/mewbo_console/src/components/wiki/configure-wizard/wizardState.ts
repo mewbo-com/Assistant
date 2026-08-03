@@ -6,11 +6,13 @@
  * consumers. Mirrors the `useQaConversation` pattern used for QAScreen.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "wouter";
 
+import { hostOf } from "../../../api/git";
 import { useConfig } from "../../../hooks/useConfig";
 import { useModels } from "../../../hooks/useModels";
+import { useRepository } from "../../../hooks/useRepositories";
 
 import { uploadCatalogDocuments } from "../api/client";
 import {
@@ -26,19 +28,63 @@ import type {
   WizardSourceType,
   WizardSubmission,
 } from "../api/types";
-import { splitLines } from "../projectSettingsForm";
+import { parseMcpServers, splitLines } from "../projectSettingsForm";
 import { buildHref } from "../router";
 import { slugFromRepoUrl } from "../slug";
 
+/**
+ * Exact host → platform, matched against the SERVER's catalogue.
+ *
+ * The one rule the backend uses (`mewbo_core.repositories.PLATFORM_HOSTS`):
+ * exact host, or a dot-subdomain of one, so an Azure DevOps org on the older
+ * `acme.visualstudio.com` domain resolves. Never a substring. An unrecognised host is
+ * `"git"` — the honest answer, since a self-hosted forge is unknowable.
+ *
+ * The mapping itself is never written down here: `platforms` comes from
+ * `/v1/wiki/platforms`, whose `hosts` are built from that same core constant,
+ * so there is exactly one place a host is bound to a platform.
+ */
+function platformForHost(host: string, platforms: Platform[]): Platform["id"] {
+  for (const p of platforms) {
+    for (const h of p.hosts) {
+      if (host === h || host.endsWith("." + h)) return p.id;
+    }
+  }
+  return "git";
+}
+
+/**
+ * The platform the REGISTRY will store for a repo URL, or `null` if no host
+ * can be read from it.
+ *
+ * Deliberately heuristic-free, unlike `detectPlatformFromUrl` below. This
+ * answer is shown next to "will be registered as", so it is a claim about a
+ * value the server is about to persist and render back: it must be the
+ * server's rule or nothing at all. `hostOf` is the console's one host
+ * extractor and agrees with the backend grammar on every URL shape that can
+ * reach this function (pinned against the shared fixture in
+ * `registryPlatform.test.ts`).
+ */
+export function registryPlatformFromUrl(
+  url: string,
+  platforms: Platform[],
+): Platform["id"] | null {
+  const host = hostOf(url);
+  return host === null ? null : platformForHost(host, platforms);
+}
+
+/**
+ * The platform tile the WIZARD pre-selects. Guesses, and that is correct here:
+ * the tile is a starting point the user can click away from, and self-hosted
+ * forges are the whole reason the guess exists. Do NOT reuse this for anything
+ * that gets persisted — use `registryPlatformFromUrl` for that.
+ */
 export function detectPlatformFromUrl(url: string, platforms: Platform[]): Platform["id"] {
   try {
     const u = new URL(url);
     const host = u.hostname.toLowerCase();
-    for (const p of platforms) {
-      for (const h of p.hosts) {
-        if (host === h || host.endsWith("." + h)) return p.id;
-      }
-    }
+    const exact = platformForHost(host, platforms);
+    if (exact !== "git") return exact;
     // Heuristic fallbacks for self-hosted Git servers — the catalog only
     // lists the cloud-default host for each platform, so anything else
     // falls through to a pattern guess.
@@ -82,6 +128,12 @@ export interface WizardState {
   files: string;
   /** Developer-mode opt-in: build only the AST graph, skip docs + LLM. */
   graphOnly: boolean;
+  /** Free-text operator guidance appended to the indexer's playbook; empty =
+   *  none. Capped at 4000 chars server-side — it is paid once per page. */
+  customInstructions: string;
+  /** External MCP servers to attach for the index, edited as raw `.mcp.json`
+   *  JSON; empty = attach none. Parsed at submit, never stored parsed. */
+  mcpServers: string;
   // ── catalog fields ────────────────────────────────────────────────
   /** Human-readable workspace name; slugified to produce the project slug. */
   catalogName: string;
@@ -110,10 +162,21 @@ const CATALOG_STEPS = [
 
 export interface UseWizardMachineOptions {
   initialUrl?: string;
+  /**
+   * Slug (`host/owner/repo`) of an already-registered repository, off the
+   * configure route's `?repo=`. When it resolves, seeds `url`/`platform`
+   * from the registry record — a SEED, not a lock: every field stays
+   * editable exactly as when the wizard opens cold, and an unknown or
+   * unreachable slug just leaves the wizard cold (no error surfaced here).
+   * Registering a repository stays inert; this is how an operator opts
+   * into indexing one without retyping a URL the product already holds.
+   */
+  initialRepo?: string;
 }
 
-export function useWizardMachine({ initialUrl = "" }: UseWizardMachineOptions) {
+export function useWizardMachine({ initialUrl = "", initialRepo }: UseWizardMachineOptions) {
   const [, navigate] = useLocation();
+  const registeredRepo = useRepository(initialRepo);
   const platforms = useWikiPlatforms();
   const languages = useWikiLanguages();
   const { config } = useConfig();
@@ -148,6 +211,8 @@ export function useWizardMachine({ initialUrl = "" }: UseWizardMachineOptions) {
     dirs: "",
     files: "",
     graphOnly: false,
+    customInstructions: "",
+    mcpServers: "",
     catalogName: "",
     catalogDocs: [],
   }));
@@ -159,6 +224,26 @@ export function useWizardMachine({ initialUrl = "" }: UseWizardMachineOptions) {
       setState((s) => ({ ...s, model: seedModel }));
     }
   }, [seedModel, state.model]);
+
+  // Seed url/platform from an already-registered repository (`?repo=`),
+  // independent of the model-seed effect above — they touch disjoint
+  // fields and can't race each other. Applies AT MOST ONCE (repoSeedApplied
+  // ref): the registry list underneath `useRepository` can refetch for
+  // reasons that have nothing to do with this wizard instance, and a
+  // second application would clobber whatever the user has since typed.
+  // An explicit `?url=`, or a url the user typed before the fetch
+  // resolved, wins outright — the seed never overwrites a non-empty field.
+  const repoSeedApplied = useRef(false);
+  const [repoSeedUrl, setRepoSeedUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (repoSeedApplied.current) return;
+    const repo = registeredRepo.repository;
+    if (!repo) return;
+    repoSeedApplied.current = true;
+    if (state.url.trim()) return;
+    setRepoSeedUrl(repo.repoUrl);
+    setState((s) => ({ ...s, url: repo.repoUrl, platform: repo.platform }));
+  }, [registeredRepo.repository, state.url]);
 
   const gitSlug = useMemo(() => slugFromRepoUrl(state.url), [state.url]);
   const catalogSlug = useMemo(() => slugifyName(state.catalogName), [state.catalogName]);
@@ -174,15 +259,20 @@ export function useWizardMachine({ initialUrl = "" }: UseWizardMachineOptions) {
   const platform =
     platformList.find((p) => p.id === state.platform) ?? platformList[0];
 
-  // Auto-detect platform from URL unless user has explicitly picked one.
+  // Auto-detect platform from URL unless user has explicitly picked one, or
+  // the URL still matches the registered repo it was just seeded from — a
+  // registered platform is the product's own record and wins over the
+  // heuristic host guess. Once the user edits the URL away from the seed,
+  // `state.url !== repoSeedUrl` and normal auto-detect resumes untouched.
   useEffect(() => {
     if (!state.url || state.platformLocked) return;
+    if (state.url === repoSeedUrl) return;
     if (!platformList.length) return;
     const next = detectPlatformFromUrl(state.url, platformList);
     if (next !== state.platform) {
       setState((s) => ({ ...s, platform: next }));
     }
-  }, [state.url, state.platformLocked, platformList, state.platform]);
+  }, [state.url, state.platformLocked, platformList, state.platform, repoSeedUrl]);
 
   const set = (patch: Partial<WizardState>) => setState((s) => ({ ...s, ...patch }));
 
@@ -251,6 +341,10 @@ export function useWizardMachine({ initialUrl = "" }: UseWizardMachineOptions) {
     }
     if (!gitSlug || !platform) return;
     const fallbackLadder = state.fallbackModels.filter((m) => m !== state.model);
+    // Reuses the settings dialog's parser rather than a second one: the wizard
+    // and the settings panel edit the SAME field in the same textarea shape, and
+    // two parsers would drift on the first change to either.
+    const mcpServers = parseMcpServers(state.mcpServers);
     const payload: WizardSubmission = {
       repoUrl: state.url,
       slug: gitSlug,
@@ -272,6 +366,12 @@ export function useWizardMachine({ initialUrl = "" }: UseWizardMachineOptions) {
       // Only forward the developer-mode opt-in when it's actually available
       // and engaged — the field is omitted entirely otherwise.
       ...(developerMode && state.graphOnly ? { graphOnly: true } : {}),
+      // Same omit-when-inert rule as `ref` again: an untouched field must leave
+      // the submission byte-identical to one made before it existed.
+      ...(state.customInstructions.trim()
+        ? { customInstructions: state.customInstructions.trim() }
+        : {}),
+      ...(mcpServers ? { mcpServers } : {}),
     };
     submit.mutate(payload, {
       onSuccess: (job) => {
@@ -301,6 +401,14 @@ export function useWizardMachine({ initialUrl = "" }: UseWizardMachineOptions) {
     platform,
     gitSlug,
     branches,
+    /**
+     * Registered default branch, when `initialRepo` resolved one — a
+     * DISPLAY fallback only. Never written into `state.ref`: leaving `ref`
+     * empty is what lets the branch picker's "Default · …" option keep
+     * tracking the git host's *current* default rather than pinning to
+     * whatever the registry had cached at registration time.
+     */
+    seedDefaultBranch: registeredRepo.repository?.defaultBranch ?? null,
     step,
     setStep,
     STEPS,

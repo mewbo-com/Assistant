@@ -2,11 +2,9 @@
  * Runtime config injected by nginx at container start
  * (see ``docker/console-entrypoint.sh``).
  *
- * The global was renamed from ``__MEESEEKS_CONFIG__`` to
- * ``__MEWBO_CONFIG__``; production images still in rotation ship the
- * older entrypoint script, so we accept either — whichever the running
- * container's entrypoint wrote wins. New deploys produce the new name;
- * legacy ones keep working until the next image rebuild.
+ * Accepts either ``__MEESEEKS_CONFIG__`` or ``__MEWBO_CONFIG__`` —
+ * whichever the running container's entrypoint wrote wins, since not
+ * every deployed image runs the same entrypoint version.
  *
  * Single source of truth so every consumer reads the same thing.
  */

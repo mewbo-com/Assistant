@@ -3,8 +3,8 @@
 
 One atomic class (mirrors :class:`ContextMeter`) that turns the event stream the
 :class:`~mewbo_cli.tui.agent_transcript_hub.AgentTranscriptHub` ALREADY ingests
-into the honest "what is this agent doing *right now*" signal the old 2-state
-label (``thinking`` / ``running {tool}``) could not express:
+into the honest "what is this agent doing *right now*" signal, which a
+2-state label (``thinking`` / ``running {tool}``) cannot express:
 
 - a **phase** — waiting for the first token (``uploading``), a reasoning model
   thinking with no deltas (``reasoning``), tokens flowing (``streaming``),
@@ -12,8 +12,8 @@ label (``thinking`` / ``running {tool}``) could not express:
 - an **EWMA output tok/s** during streaming (live ``len/4`` estimate, the honest
   count is reconciled from the authoritative ``llm_call_end`` usage),
 - **time-to-first-token** (TTFT) for the last call,
-- a **stall timer** off a monotonic last-event timestamp — a hung agent and a
-  fast-streaming one no longer look identical.
+- a **stall timer** off a monotonic last-event timestamp, so a hung agent and
+  a fast-streaming one do not look identical.
 
 APP-LAYER, ZERO CORE CHANGE: the meter is fed from the hub's existing ingest
 points (``_on_llm_start`` / ``_on_delta`` / ``tool_started`` / ``_on_tool_result``
@@ -60,7 +60,7 @@ def _default_is_reasoning_model(model: str | None) -> bool:
     raises — an unknown model degrades to ``False`` (treated as a normal call).
     """
     try:
-        from mewbo_core.llm import model_supports_reasoning_effort
+        from mewbo_core.llm.llm import model_supports_reasoning_effort
 
         return bool(model_supports_reasoning_effort(model))
     except Exception:  # noqa: BLE001 — a classifier miss must never break the meter

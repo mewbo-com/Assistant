@@ -82,7 +82,7 @@ data class ChatUiState(
     /** The currently-bound session id (`null` = fresh/unsaved chat) - passthrough of
      * [ChatViewModel]'s own `SessionBinding.currentId`. Exists so [ChatTranscript] can key its
      * M7 chip-entrance "already seen" tracking on the REAL rebind signal rather than its own
-     * composition lifetime, which outlives session switches (fix-round-3 minor #5: chip entrances
+     * composition lifetime, which outlives session switches (a real regression: chip entrances
      * were replaying on every session switch because that tracking set was seeded once at first
      * mount and never reset when `bind()` loaded a different session's history in place). */
     val sessionId: String? = null,
@@ -113,7 +113,7 @@ data class ChatUiState(
     val activeTurnModality: InputModality = InputModality.Text,
     /** See [DictationState]'s own KDoc. */
     val dictation: DictationState = DictationState.Idle,
-    /** Pull-up handoff draft (user directive 2026-07-04): text the user had typed in the assist
+    /** Pull-up handoff draft: text the user had typed in the assist
      * overlay's pill when they swiped it up into the app, awaiting one-shot application to the
      * composer field. Applied by `ChatSurface` exactly like a [DictationState.Final] EXCEPT it
      * never tags the pending send [InputModality.Voice] — the text was typed, and a masqueraded
@@ -132,7 +132,18 @@ data class ChatUiState(
      * initiated [ChatViewModel.send] (fresh turn = fresh consent to speak) or by [ChatViewModel.bind]
      * (a session switch starts over). Not persisted, same posture as [activeTurnModality]. */
     val speechMuted: Boolean = false,
-)
+) {
+    /**
+     * `ChatSurface`'s pre-session scope row (`ComposerScopeIndicator`) is on screen: no session
+     * exists yet AND nothing has been said. It owns the project/tools readout while it is up, and
+     * `ChatScreen`'s top bar takes over the moment it goes away - so the project is stated exactly
+     * once at any moment. Both sides read THIS predicate rather than each spelling the condition,
+     * because two copies of it drifting apart shows the project twice or not at all, and neither
+     * failure announces itself.
+     */
+    val showsComposerScopeIndicator: Boolean
+        get() = sessionId == null && items.isEmpty()
+}
 
 /**
  * Callbacks a host wires into [ChatSurface]; kept as one bundle so the surface signature stays
@@ -202,10 +213,14 @@ data class ChatCallbacks(
 
     /**
      * Submit a [ChatItem.Question] card's answer (ask-user questions) → [ChatViewModel.answerQuestion].
-     * The card owns callId/callToken/answers and its own local submitting state; `onResult(false)`
-     * (a genuine POST failure — not a 404/409 answered-elsewhere) tells it to re-enable and toast.
-     * Default no-op so the assist overlay's own `ChatTranscript` call site keeps compiling — it hands
-     * off to the app before a blocked question is answered, so it wires nothing.
+     * The card owns callId/callToken/answers/notes and its own local submitting state; `onResult(false)`
+     * (a genuine POST failure — not a 404/409 answered-elsewhere) tells it to re-enable and toast. Fires
+     * the same way whether the card is still pending or the run already moved on
+     * ([com.mewbo.aura.data.model.QuestionResolution.RunMovedOn]). Default no-op so the assist
+     * overlay's own `ChatTranscript` call site keeps compiling — it hands off to the app before a
+     * blocked question is answered, so it wires nothing.
      */
-    val onSubmitQuestionAnswer: (callId: String, callToken: String, answers: List<QuestionAnswerItemDto>, onResult: (Boolean) -> Unit) -> Unit = { _, _, _, onResult -> onResult(false) },
+    val onSubmitQuestionAnswer:
+        (callId: String, callToken: String, answers: List<QuestionAnswerItemDto>, notes: String?, onResult: (Boolean) -> Unit) -> Unit =
+        { _, _, _, _, onResult -> onResult(false) },
 )

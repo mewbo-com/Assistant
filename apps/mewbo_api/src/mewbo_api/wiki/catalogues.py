@@ -7,9 +7,22 @@ the LiteLLM proxy actually serves. DRY: one model list, one source.
 """
 from __future__ import annotations
 
+from mewbo_core.workspaces.repositories import PLATFORM_HOSTS, PlatformId
 from mewbo_graph.wiki.types import Language, Platform
 
 # ── Platforms ─────────────────────────────────────────────────────────────────
+
+#: Which hosts each card claims, INVERTED from the one mapping in
+#: ``mewbo_core.workspaces.repositories.PLATFORM_HOSTS``. The direction is the whole point:
+#: core owns which host runs which forge (a fact about the world, and the only
+#: thing that sets a registered repository's ``platform``), this module owns how
+#: that reads on a card (name, colour, token help). A second hand-kept host list
+#: here would drift silently, and the drift is invisible — the wizard would
+#: pre-select one platform while the registry stored another.
+_HOSTS_BY_PLATFORM: dict[PlatformId, list[str]] = {
+    platform: [host for host, owner in PLATFORM_HOSTS.items() if owner == platform]
+    for platform in dict.fromkeys(PLATFORM_HOSTS.values())
+}
 
 PLATFORMS: list[Platform] = [
     Platform(
@@ -18,7 +31,7 @@ PLATFORMS: list[Platform] = [
         mono="Gh",
         color="#181717",
         short="github.com or GitHub Enterprise",
-        hosts=["github.com"],
+        hosts=_HOSTS_BY_PLATFORM.get("github", []),
         tokenLabel="GitHub Personal Access Token",
         tokenScope="repo (full) for private repos; public_repo is enough for public.",
         tokenUrl="https://github.com/settings/tokens/new",
@@ -34,7 +47,7 @@ PLATFORMS: list[Platform] = [
         mono="Gl",
         color="#FC6D26",
         short="gitlab.com or self-hosted GitLab",
-        hosts=["gitlab.com"],
+        hosts=_HOSTS_BY_PLATFORM.get("gitlab", []),
         tokenLabel="GitLab Personal Access Token",
         tokenScope="read_repository (read_api too if you want issue/PR context).",
         tokenUrl="https://gitlab.com/-/user_settings/personal_access_tokens",
@@ -50,7 +63,7 @@ PLATFORMS: list[Platform] = [
         mono="Bb",
         color="#0052CC",
         short="bitbucket.org cloud workspaces",
-        hosts=["bitbucket.org"],
+        hosts=_HOSTS_BY_PLATFORM.get("bitbucket", []),
         tokenLabel="Bitbucket App Password",
         tokenScope="Repository: Read. Use your username with the app password.",
         tokenUrl="https://bitbucket.org/account/settings/app-passwords/",
@@ -66,7 +79,7 @@ PLATFORMS: list[Platform] = [
         mono="Gt",
         color="#609926",
         short="gitea.com or any self-hosted Gitea/Forgejo",
-        hosts=["gitea.com", "codeberg.org"],
+        hosts=_HOSTS_BY_PLATFORM.get("gitea", []),
         tokenLabel="Gitea Access Token",
         tokenScope="Needs read:repository scope.",
         tokenUrl=None,
@@ -82,7 +95,7 @@ PLATFORMS: list[Platform] = [
         mono="Az",
         color="#0078D7",
         short="dev.azure.com repos",
-        hosts=["dev.azure.com", "visualstudio.com"],
+        hosts=_HOSTS_BY_PLATFORM.get("azure", []),
         tokenLabel="Azure DevOps PAT",
         tokenScope="Code: Read.",
         tokenUrl="https://dev.azure.com/_usersSettings/tokens",
@@ -98,7 +111,7 @@ PLATFORMS: list[Platform] = [
         mono="Git",
         color="#F05032",
         short="Any Git URL (SSH or HTTPS)",
-        hosts=[],
+        hosts=_HOSTS_BY_PLATFORM.get("git", []),
         tokenLabel="HTTPS credentials (optional)",
         tokenScope="Use a deploy token, app password, or omit for public repos.",
         tokenUrl=None,

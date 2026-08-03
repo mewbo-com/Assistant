@@ -31,16 +31,21 @@ contract):
 
 * ``envelope`` — ``{"error": {"code", "reason", "retryable"}}``, the canonical
   shape (the app-level 404 handler, the structured and agentic-search surfaces).
-* ``message`` — ``{"message": "..."}``, the legacy auth/validation shape the
+* ``message`` — ``{"message": "..."}``, the auth/validation shape the
   ``/api`` routes and the IAM/admin surfaces return.
 
 The shape is a property of the SURFACE, not of the failure kind: an unknown
 session is a 404 envelope on ``/api/sessions/<id>``, while an unknown user is a
 404 ``message`` on ``/api/iam/users/<id>``. So each class carries the shape its
 majority of call sites use as a ClassVar default, and a single ``shape=``
-argument selects the other at the raise site. Picking the wrong one is a wire
-regression, so the rule is: **match what the handler you are migrating already
+argument selects the other at the raise site. Picking the wrong one changes the
+wire, so the rule is: **match what the handler you are migrating already
 returns — read its ``return`` statements, do not assume.**
+
+The envelope's ``code`` belongs to the surface for the same reason and is
+selected the same way: the factory methods default it to the numeric status and
+take a ``code=`` argument for a surface whose client branches on a semantic
+token instead (``/v1/git/repositories`` and its ``repository_not_found``).
 """
 
 from __future__ import annotations
@@ -218,7 +223,7 @@ class ApiError(Exception):
 class RequestInvalid(ApiError):
     """400 — the request body or parameters are malformed, missing, or invalid.
 
-    Defaults to the ``message`` shape: this is the legacy validation shape the
+    Defaults to the ``message`` shape: this is the validation shape the
     ``/api`` routes and every admin surface already return.
     """
 
@@ -227,31 +232,53 @@ class RequestInvalid(ApiError):
 
     @classmethod
     def field_error(
-        cls, field: str, reason: str, *, shape: WireShape | None = None
+        cls,
+        field: str,
+        reason: str,
+        *,
+        code: int | str | None = None,
+        shape: WireShape | None = None,
     ) -> RequestInvalid:
-        """A 400 naming the offending *field* and why it was refused."""
+        """A 400 naming the offending *field* and why it was refused.
+
+        *code* is the second per-raise degree of freedom, and it exists for the
+        same reason ``shape`` does: it belongs to the SURFACE, not to the
+        failure kind. It defaults to the numeric status, which is what the
+        ``message`` surfaces put on the wire, and an envelope surface
+        whose client branches on a semantic token (``/v1/git/repositories`` and
+        its ``invalid_repo_url``/``invalid_request``) passes that token instead.
+        Without it such a surface has to hand-build its own payload, which is
+        how a second spelling of a refusal gets into the codebase.
+        """
         return cls(
-            InvalidRequestPayload(code=cls.status, reason=reason, field=field, retryable=False),
+            InvalidRequestPayload(
+                code=cls.status if code is None else code,
+                reason=reason,
+                field=field,
+                retryable=False,
+            ),
             shape=shape,
         )
 
     @classmethod
     def from_validation_error(
-        cls, exc: ValidationError, *, shape: WireShape | None = None
+        cls, exc: ValidationError, *, code: int | str | None = None, shape: WireShape | None = None
     ) -> RequestInvalid:
         """Map a Pydantic ``ValidationError`` to a 400, keeping the field location.
 
         Renders the ``"<location>: <msg>"`` string the admin surfaces put on the
         wire. Only the FIRST failure is reported — the established contract on
-        these routes, and the one a form can actually act on.
+        these routes, and the one a form can actually act on. This is the ONE
+        place that unwrapping lives; a surface that wants its own wire code
+        passes *code* rather than re-deriving ``loc``/``msg`` itself.
         """
         errors = exc.errors()
         if not errors:
-            return cls.field_error("body", "invalid request body", shape=shape)
+            return cls.field_error("body", "invalid request body", code=code, shape=shape)
         first = errors[0]
         location = ".".join(str(part) for part in first.get("loc", ())) or "body"
         return cls.field_error(
-            location, f"{location}: {first.get('msg', 'invalid value')}", shape=shape
+            location, f"{location}: {first.get('msg', 'invalid value')}", code=code, shape=shape
         )
 
 
@@ -343,9 +370,18 @@ class ResourceNotFound(ApiError):
     wire_shape: ClassVar[WireShape] = "envelope"
 
     @classmethod
-    def for_reason(cls, reason: str, *, shape: WireShape | None = None) -> ResourceNotFound:
-        """A 404 whose *reason* names what was not found."""
-        return cls(ErrorPayload(code=cls.status, reason=reason, retryable=False), shape=shape)
+    def for_reason(
+        cls, reason: str, *, code: int | str | None = None, shape: WireShape | None = None
+    ) -> ResourceNotFound:
+        """A 404 whose *reason* names what was not found.
+
+        *code* selects a semantic token over the numeric status — see
+        :meth:`RequestInvalid.field_error` for why that belongs to the surface.
+        """
+        return cls(
+            ErrorPayload(code=cls.status if code is None else code, reason=reason, retryable=False),
+            shape=shape,
+        )
 
 
 @final
@@ -353,7 +389,7 @@ class StateConflict(ApiError):
     """409 — the resource is in a conflicting state for this operation.
 
     ``message`` by default: every 409 in the app today (duplicate team slug,
-    built-in role, an already-active run) rides the legacy shape.
+    built-in role, an already-active run) rides the ``message`` shape.
     """
 
     status: ClassVar[int] = 409
@@ -361,10 +397,88 @@ class StateConflict(ApiError):
 
     @classmethod
     def for_reason(
-        cls, reason: str, *, retryable: bool = False, shape: WireShape | None = None
+        cls,
+        reason: str,
+        *,
+        code: int | str | None = None,
+        retryable: bool = False,
+        shape: WireShape | None = None,
     ) -> StateConflict:
-        """A 409 explaining the conflicting state."""
-        return cls(ErrorPayload(code=cls.status, reason=reason, retryable=retryable), shape=shape)
+        """A 409 explaining the conflicting state.
+
+        *code* selects a semantic token over the numeric status — see
+        :meth:`RequestInvalid.field_error` for why that belongs to the surface.
+        """
+        return cls(
+            ErrorPayload(
+                code=cls.status if code is None else code, reason=reason, retryable=retryable
+            ),
+            shape=shape,
+        )
+
+
+@final
+class CapabilityUnavailable(ApiError):
+    """503 — the deployment lacks the optional capability this route needs.
+
+    The honest answer for a route whose work depends on an optional extra that
+    is simply not installed. It is deliberately NOT a 500 (nothing failed; the
+    server is working as configured), NOT a 404 (the route exists and will work
+    on a deployment that has the extra), and NOT retryable — retrying changes
+    nothing until an operator installs it. ``reason`` must NAME the missing
+    capability and what to install, because that operator is the only person who
+    can act on it.
+
+    Envelope, matching the semantic-code refusals the ``/v1`` surfaces already
+    return, so a client branches on ``code`` rather than parsing prose.
+    """
+
+    status: ClassVar[int] = 503
+    wire_shape: ClassVar[WireShape] = "envelope"
+
+    @classmethod
+    def for_capability(cls, code: str, reason: str) -> CapabilityUnavailable:
+        """A 503 whose *code* names the absent capability and *reason* the fix."""
+        return cls(ErrorPayload(code=code, reason=reason, retryable=False))
+
+
+@final
+class StreamCapacityExhausted(ApiError):
+    """503 — every stream slot is taken, so this stream is refused.
+
+    The sibling 503 above says "this deployment cannot do that at all"; this one
+    says "not right now, and shortly it can" — so unlike
+    :class:`CapabilityUnavailable` it IS retryable, and it carries its own
+    retry delay because the caller has no other way to guess one. The two are
+    told apart by ``code``, never by the status they share.
+
+    ``reason`` NAMES the bound and the knob that moves it. A stream limit is an
+    operator's number, and a refusal that does not say which number was reached
+    sends whoever is paged to read the source.
+    """
+
+    status: ClassVar[int] = 503
+    wire_shape: ClassVar[WireShape] = "envelope"
+
+    # A refused stream is a transient queueing problem, not a broken one: slots
+    # come back as runs finish and idle streams age out. Short enough that a
+    # client reconnects while the user is still looking at the screen, long
+    # enough that a fleet of them does not become the next thundering herd.
+    RETRY_AFTER_SECONDS: ClassVar[int] = 5
+
+    @classmethod
+    def for_limit(cls, limit: int) -> StreamCapacityExhausted:
+        """A retryable 503 naming the *limit* that was reached."""
+        return cls(
+            ErrorPayload(
+                code="stream_capacity_exhausted",
+                reason=(
+                    f"Already serving {limit} concurrent event streams. Retry "
+                    "shortly, or raise api.max_concurrent_streams."
+                ),
+                retryable=True,
+            )
+        )
 
 
 @final
@@ -453,6 +567,7 @@ def register_api_error_handler(app: Any, api: Any = None) -> None:
 __all__ = [
     "ApiError",
     "AuthenticationRequired",
+    "CapabilityUnavailable",
     "ErrorPayload",
     "InvalidRequestPayload",
     "PermissionDenied",

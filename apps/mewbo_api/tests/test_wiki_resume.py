@@ -80,6 +80,11 @@ def _seed_interrupted_at_pages(store, *, job_id="j-resume", slug="org/repo"):
     for pid in ids:
         if pid != "p3":
             store.save_page(slug, _page(pid))
+            # Claim it for THIS job, as ``wiki_submit_page`` does. A page in the
+            # store only proves SOME index wrote it — the slug accumulates every
+            # run's output — and it is the claim that makes it work this resume
+            # may skip rather than an older commit's leftovers.
+            store.claim_job_page(slug, job_id, pid)
     return job_id, slug
 
 
@@ -105,19 +110,33 @@ def test_resume_reuses_job_id_and_persists_plan(store, runtime):
 
 def test_resume_readvertises_wiki_capability(store, runtime):
     """The resumed session re-advertises client_capabilities:["wiki"] (else the
-    indexer can't spawn wiki-* AgentDefs → 'stuck after scan')."""
+    indexer can't spawn wiki-* AgentDefs → 'stuck after scan').
+
+    Matched on the KEY rather than on the whole payload: the same event now also
+    persists the run's tool ceiling, playbook and checkout (see
+    ``_start_indexer_session``), so an exact-dict comparison would pin the
+    payload's shape rather than the capability this test is about.
+    """
     job_id, _ = _seed_interrupted_at_pages(store)
     WikiResume.resume(store, runtime, job_id)
 
     cap_calls = [
         c for c in runtime.append_context_event.call_args_list
-        if c.args[1] == {"client_capabilities": ["wiki"]}
+        if c.args[1].get("client_capabilities") == ["wiki"]
     ]
     assert cap_calls, "resume must advertise the wiki capability"
+    # A resumed indexer inherits the same persisted scope a fresh one gets — it
+    # goes through the same seam, and a resume is exactly when losing the tool
+    # ceiling or the playbook would be hardest to notice.
+    payload = cap_calls[0].args[1]
+    assert payload["strict_tool_scope"] is True
+    assert payload["mcp_tools"]
+    assert payload["skill_instructions"]
+    assert payload["cwd"]
 
 
 def test_resume_does_not_disturb_durable_credential(store, runtime):
-    """Resume no longer warms an ephemeral cache — CloneTokenCache is gone.
+    """Resume warms no ephemeral cache — there is no CloneTokenCache.
 
     The re-clone authenticates via the clone tool's own ``resolve_chain``,
     which reads the durable per-slug ``CredentialStore`` directly at clone

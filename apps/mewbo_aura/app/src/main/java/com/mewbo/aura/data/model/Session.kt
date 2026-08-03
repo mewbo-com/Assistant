@@ -16,6 +16,15 @@ data class SessionSummary(
      * (`recoverable` is always false alongside it). See [com.mewbo.aura.data.api.SessionSummaryDto.terminated]. */
     val terminated: Boolean = false,
     val terminatedAt: String? = null,
+    /**
+     * Pin state — an ORDERING signal only, never a filter bypass. The wire sends both keys only
+     * when pinned, so absent reads as not-pinned. Consumed by
+     * [com.mewbo.aura.ui.sessions.SessionGrouping], which lifts a pinned row into its own leading
+     * section AFTER the active [com.mewbo.aura.ui.sessions.RecentsFilter] has already narrowed the
+     * list. See [com.mewbo.aura.data.api.SessionSummaryDto.pinned].
+     */
+    val pinned: Boolean = false,
+    val pinnedAt: String? = null,
 )
 
 /** Domain-facing transcript + status snapshot (mapped from `GET /api/sessions/{id}/events`). */

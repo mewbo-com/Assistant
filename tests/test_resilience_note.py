@@ -12,7 +12,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from langchain_core.messages import SystemMessage
-from mewbo_core.tool_use_loop import (
+from mewbo_core.loop.tool_use_loop import (
     _RESILIENCE_NOTE_HEADER,
     ResilienceNote,
     ToolUseLoop,
@@ -158,7 +158,7 @@ def test_note_survives_model_escalation_rerender():
     # _apply_model_escalation re-renders messages[0]; the note slot must ride it.
     loop = _loop()
     loop._emit_event(_retry(model="primary", error_type="TimeoutError"))
-    with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+    with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
         mock_build.return_value = MagicMock()
         mock_build.return_value.bind_tools.return_value = MagicMock()
         messages = [SystemMessage(content="orig")]

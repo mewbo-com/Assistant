@@ -1,4 +1,4 @@
-"""Plugin-suite anchor for the agent-side Mewbo Apps suite (spec §4B).
+"""Plugin-suite anchor for the agent-side Mewbo Apps suite.
 
 ``PLUGIN_ROOT`` is THIS package directory, and this directory IS the plugin
 suite: its manifest sits at ``plugin/.claude-plugin/plugin.json`` (the
@@ -12,7 +12,7 @@ Discovery therefore registers the PARENT, not this directory:
 ``discover_builtin_plugins(root)`` scans a root's IMMEDIATE subdirectories for a
 ``<suite>/.claude-plugin/plugin.json``, so ``backend.py`` pushes
 ``PLUGIN_ROOT.parent`` (the ``mewbo_api.apps`` package dir) to
-``mewbo_core.plugins.register_builtin_root`` — the down-only seam that mirrors
+``mewbo_core.tooling.plugins.register_builtin_root`` — the down-only seam that mirrors
 how ``mewbo_graph`` contributes its ``wiki``/``scg`` suites — and ``plugin/`` is
 the one suite it finds inside. See ``backend.py:init_apps`` (authoritative) + the
 startup discovery guard there.

@@ -2,9 +2,10 @@
  * wikiStatus — the pure, React-free verdict a reader needs from the wiki
  * index-status card: "is this wiki current, and do I need to re-index?"
  *
- * The card used to present raw drift numbers and leave the judgment to the
- * reader. `deriveWikiStatus` makes the judgment ONCE, from the existing data
- * contracts, and hands back a single verdict the card renders verdict-first.
+ * `deriveWikiStatus` makes the judgment ONCE, from the existing data
+ * contracts, rather than the card presenting raw drift numbers and leaving
+ * the judgment to the reader, and hands back a single verdict the card
+ * renders verdict-first.
  *
  * Five decision-relevant verdicts (the states the spec names), plus two honest
  * indeterminate ones that keep the card from ever showing a FALSE green:
@@ -68,7 +69,12 @@ export interface WikiStatusInput {
   freshness: ProjectFreshness | null | undefined;
   /** Freshness query still in flight (no data, no error) — drives "checking". */
   freshnessPending?: boolean;
-  /** The running (non-terminal) index job for this slug, if any. */
+  /**
+   * The job the server currently treats as active for this slug, if any —
+   * not necessarily "running": an `interrupted` job the server hasn't
+   * resolved counts too (see `IndexingJob.isActive`). Sourced from
+   * `useActiveIndexingJobs`, which already reflects the server's verdict.
+   */
   activeJob?: IndexingJob | null;
   /** The terminal-but-incomplete index job for this slug, if any. */
   recoverableJob?: RecoverableJob | null;

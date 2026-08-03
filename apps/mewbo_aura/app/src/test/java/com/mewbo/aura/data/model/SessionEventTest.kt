@@ -4,6 +4,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -352,6 +353,121 @@ class SessionEventTest {
     fun `lastContextProject treats a blank project field the same as absent`() {
         val events = listOf(SessionEvent.decode(json, """{"type":"context","ts":"t1","payload":{"project":""}}"""))
         assertEquals(null, SessionEvent.lastContextProject(events))
+    }
+
+    @Test
+    fun `lastContextProject follows a mid-transcript switch_project, not the project the turn opened in`() {
+        // The auto-select flow: the app sends the "auto" sentinel with the query, the model calls
+        // switch_project, and the switch persists its own context event naming where it moved to.
+        // The newest context event wins, so the session's project is the SWITCHED one - the value
+        // the next /query must resend, or the turn after this migrates back to a scratch cwd.
+        val events = listOf(
+            SessionEvent.decode(json, """{"type":"context","ts":"t1","payload":{"client":"aura-android","project":"auto"}}"""),
+            SessionEvent.decode(json, """{"type":"user","ts":"t2","payload":{"text":"fix the login bug"}}"""),
+            SessionEvent.decode(json, """{"type":"context","ts":"t3","payload":{"project":"acme/beacon","cwd":"/srv/acme/beacon"}}"""),
+        )
+        assertEquals("acme/beacon", SessionEvent.lastContextProject(events))
+    }
+
+    @Test
+    fun `a session that switches twice reports the LAST project, so one task can span several`() {
+        val events = listOf(
+            SessionEvent.decode(json, """{"type":"context","ts":"t1","payload":{"project":"auto"}}"""),
+            SessionEvent.decode(json, """{"type":"context","ts":"t2","payload":{"project":"acme/beacon","cwd":"/srv/acme/beacon"}}"""),
+            SessionEvent.decode(json, """{"type":"tool_result","ts":"t3","payload":{"tool_id":"shell","operation":"run","success":true}}"""),
+            SessionEvent.decode(json, """{"type":"context","ts":"t4","payload":{"project":"managed:9f3a","cwd":"/srv/wt/9f3a"}}"""),
+        )
+        assertEquals("managed:9f3a", SessionEvent.lastContextProject(events))
+    }
+
+    // --- the per-event readers: what keeps the project LIVE during a running turn ---
+    //
+    // ChatViewModel folds one event at a time as it streams in, so it cannot re-scan a settled
+    // transcript. adoptContextProject is the seam it uses; the two facts it has to keep apart are
+    // "a context event naming no project" (the session is on a temp-dir cwd) and "not a context
+    // event at all" (nothing to adopt) - a bare null from contextProject collapses them, and
+    // collapsing them would blank the project on the first agent_message_delta of every turn.
+
+    @Test
+    fun `adoptContextProject takes the project a context event names`() {
+        val event = SessionEvent.decode(json, """{"type":"context","ts":"t1","payload":{"project":"acme/beacon","cwd":"/srv/acme/beacon"}}""")
+        assertEquals("acme/beacon", SessionEvent.adoptContextProject(event, current = "auto"))
+    }
+
+    @Test
+    fun `adoptContextProject leaves the project alone for every non-context event`() {
+        val streamed = listOf(
+            """{"type":"agent_message_delta","ts":"t1","payload":{"text":"working","agent_id":"a1","depth":0}}""",
+            """{"type":"tool_result","ts":"t2","payload":{"tool_id":"shell","operation":"run","success":true}}""",
+            """{"type":"assistant","ts":"t3","payload":{"text":"done"}}""",
+            """{"type":"completion","ts":"t4","payload":{"done":true}}""",
+        ).map { SessionEvent.decode(json, it) }
+
+        streamed.forEach { event ->
+            assertEquals(
+                "an ordinary streamed event must never blank the session's project",
+                "acme/beacon",
+                SessionEvent.adoptContextProject(event, current = "acme/beacon"),
+            )
+        }
+    }
+
+    @Test
+    fun `adoptContextProject clears the project when a context event names none - that IS Temporary`() {
+        val event = SessionEvent.decode(json, """{"type":"context","ts":"t1","payload":{"client":"aura-android"}}""")
+        assertEquals(null, SessionEvent.adoptContextProject(event, current = "acme/beacon"))
+    }
+
+    @Test
+    fun `adoptContextProject with no event at all is a pass-through`() {
+        // ChatViewModel's error path publishes without an originating event.
+        assertEquals("acme/beacon", SessionEvent.adoptContextProject(null, current = "acme/beacon"))
+    }
+
+    @Test
+    fun `folding events one at a time lands exactly where lastContextProject does`() {
+        // The live path and the session-load path must agree by construction, not by two readers
+        // happening to be written the same way.
+        val events = listOf(
+            """{"type":"context","ts":"t1","payload":{"project":"auto"}}""",
+            """{"type":"agent_message_delta","ts":"t2","payload":{"text":"looking","agent_id":"a1","depth":0}}""",
+            """{"type":"context","ts":"t3","payload":{"project":"acme/beacon","cwd":"/srv/acme/beacon"}}""",
+            """{"type":"assistant","ts":"t4","payload":{"text":"done"}}""",
+        ).map { SessionEvent.decode(json, it) }
+
+        val folded = events.fold<SessionEvent, String?>(null) { current, event ->
+            SessionEvent.adoptContextProject(event, current)
+        }
+        assertEquals(SessionEvent.lastContextProject(events), folded)
+        assertEquals("acme/beacon", folded)
+    }
+
+    @Test
+    fun `isContextEvent is true only for a persisted context frame`() {
+        assertTrue(SessionEvent.isContextEvent(SessionEvent.decode(json, """{"type":"context","ts":"t1","payload":{}}""")))
+        assertFalse(SessionEvent.isContextEvent(SessionEvent.decode(json, """{"type":"user","ts":"t1","payload":{"text":"hi"}}""")))
+        // An unrecognized future type also decodes to Unknown - the type string is what decides.
+        assertFalse(SessionEvent.isContextEvent(SessionEvent.decode(json, """{"type":"brand_new","ts":"t1","payload":{}}""")))
+    }
+
+    @Test
+    fun `a malformed project field degrades to null instead of throwing on the live path`() {
+        // The `jsonPrimitive` accessor THROWS on a nested object/array. On the history path that
+        // landed in a try/catch; on the per-event live path it would take the run's collector down,
+        // so these readers use `as? JsonPrimitive` throughout.
+        val nested = SessionEvent.decode(json, """{"type":"context","ts":"t1","payload":{"project":{"key":"acme"}}}""")
+        val array = SessionEvent.decode(json, """{"type":"context","ts":"t2","payload":{"project":["acme"]}}""")
+
+        assertEquals(null, SessionEvent.contextProject(nested))
+        assertEquals(null, SessionEvent.contextProject(array))
+        assertEquals(null, SessionEvent.lastContextProject(listOf(nested, array)))
+        assertEquals(null, SessionEvent.adoptContextProject(nested, current = "acme/beacon"))
+    }
+
+    @Test
+    fun `a malformed model field degrades the same way`() {
+        val nested = SessionEvent.decode(json, """{"type":"context","ts":"t1","payload":{"model":{"id":"x"}}}""")
+        assertEquals(null, SessionEvent.lastContextModel(listOf(nested)))
     }
 
     // --- lastContextMcpTools (ChatViewModel.bind's session tool-narrowing hydration) ---

@@ -1,0 +1,239 @@
+{
+  "note": "Shared expectation table for repository-identity parsing. Read by the Python suite (tests/test_repositories.py) and by the console's slug parser tests, so the two sides are pinned to agree rather than agreeing by coincidence. Written from the documented rules, never dumped from either implementation - an expectation generated from the code under test only proves the code equals itself.",
+  "platformHosts": {
+    "github.com": "github",
+    "gitlab.com": "gitlab",
+    "bitbucket.org": "bitbucket",
+    "gitea.com": "gitea",
+    "codeberg.org": "gitea",
+    "dev.azure.com": "azure",
+    "visualstudio.com": "azure"
+  },
+  "platformHostsNote": "Host -> platform, the ONE mapping. Core asserts PLATFORM_HOSTS equals this, the wiki platform catalogue builds each card's hosts from PLATFORM_HOSTS, and the console builds its test catalogue from this block - so a host added in one place cannot go missing in another. Match is exact host or dot-subdomain; anything unlisted is \"git\".",
+  "contract": {
+    "slug": "host[/namespace...]/owner/repo - the canonical identity and the store key. Lossless: parsing a slug and re-composing it round-trips.",
+    "host": "The DNS host: the FIRST segment, lowercased. This is what a host-scoped credential is shared by, so it is never widened to include a namespace.",
+    "namespace": "Intermediate segments between the host and owner/repo. Non-empty only for a nested group (a GitLab subgroup). Preserved so the slug round-trips; dropping it would silently re-key a project onto a different slug.",
+    "owner": "The last-but-one segment. Case preserved - path case is significant on some forges.",
+    "repo": "The last segment, with a trailing .git stripped. Case preserved.",
+    "parsed": "null when the input cannot name a repository (no host, or fewer than three segments). Such an input is not a registry identity; a tolerant reader degrades to 'unknown repository' rather than guessing.",
+    "platform": "The forge the host implies. EXACT host or dot-subdomain match only (myorg.visualstudio.com is azure); never a substring, and never a guess from a 'git.' prefix. An unrecognised host is \"git\" - a persisted platform is rendered to users, so a wrong guess is a lie that sticks."
+  },
+  "cases": [
+    {
+      "id": "https-with-git-suffix",
+      "input": "https://github.com/bearlike/Assistant.git",
+      "parsed": {
+        "slug": "github.com/bearlike/Assistant",
+        "host": "github.com",
+        "namespace": [],
+        "owner": "bearlike",
+        "repo": "Assistant",
+        "platform": "github"
+      }
+    },
+    {
+      "id": "https-no-suffix",
+      "input": "https://git.example.com/acme/beacon",
+      "parsed": {
+        "slug": "git.example.com/acme/beacon",
+        "host": "git.example.com",
+        "namespace": [],
+        "owner": "acme",
+        "repo": "beacon",
+        "platform": "git"
+      }
+    },
+    {
+      "id": "https-trailing-slash",
+      "input": "https://git.example.com/acme/beacon.git/",
+      "parsed": {
+        "slug": "git.example.com/acme/beacon",
+        "host": "git.example.com",
+        "namespace": [],
+        "owner": "acme",
+        "repo": "beacon",
+        "platform": "git"
+      },
+      "note": "A pasted remote often carries both a .git suffix and a trailing slash; both must normalize away or the same repo registers twice."
+    },
+    {
+      "id": "uppercase-host",
+      "input": "https://GitHub.COM/Bearlike/Assistant.git",
+      "parsed": {
+        "slug": "github.com/Bearlike/Assistant",
+        "host": "github.com",
+        "namespace": [],
+        "owner": "Bearlike",
+        "repo": "Assistant",
+        "platform": "github"
+      },
+      "note": "Host lowercased, owner and repo case PRESERVED. Lowercasing the path would re-key every stored credential and project slug."
+    },
+    {
+      "id": "ssh-scheme-with-port",
+      "input": "ssh://git@git.example.com:2222/acme/beacon.git",
+      "parsed": {
+        "slug": "git.example.com/acme/beacon",
+        "host": "git.example.com",
+        "namespace": [],
+        "owner": "acme",
+        "repo": "beacon",
+        "platform": "git"
+      },
+      "note": "The port and the user belong to the transport, not the identity - the same repository cloned over https must produce the same slug."
+    },
+    {
+      "id": "scp-style",
+      "input": "git@github.com:bearlike/Assistant.git",
+      "parsed": {
+        "slug": "github.com/bearlike/Assistant",
+        "host": "github.com",
+        "namespace": [],
+        "owner": "bearlike",
+        "repo": "Assistant",
+        "platform": "github"
+      }
+    },
+    {
+      "id": "scp-style-no-user",
+      "input": "git.example.com:acme/beacon.git",
+      "parsed": {
+        "slug": "git.example.com/acme/beacon",
+        "host": "git.example.com",
+        "namespace": [],
+        "owner": "acme",
+        "repo": "beacon",
+        "platform": "git"
+      },
+      "note": "The user half of an scp remote is optional; a colon in the first segment is what marks the authority."
+    },
+    {
+      "id": "gitlab-subgroup",
+      "input": "https://gitlab.com/acme/platform/beacon.git",
+      "parsed": {
+        "slug": "gitlab.com/acme/platform/beacon",
+        "host": "gitlab.com",
+        "namespace": [
+          "acme"
+        ],
+        "owner": "platform",
+        "repo": "beacon",
+        "platform": "gitlab"
+      },
+      "note": "THE divergence case. Owner/repo are the LAST TWO segments (so the repo is 'beacon', not 'platform'), the host stays the bare DNS host, and the intermediate group is preserved in the slug. A first-two-segments read yields 'gitlab.com/acme/platform' and loses the repository entirely."
+    },
+    {
+      "id": "gitlab-subgroup-slug",
+      "input": "gitlab.com/acme/platform/beacon",
+      "parsed": {
+        "slug": "gitlab.com/acme/platform/beacon",
+        "host": "gitlab.com",
+        "namespace": [
+          "acme"
+        ],
+        "owner": "platform",
+        "repo": "beacon",
+        "platform": "gitlab"
+      },
+      "note": "A slug and the URL it came from must parse identically - the slug is what is stored, so a mismatch would make a stored row unfindable."
+    },
+    {
+      "id": "bare-slug",
+      "input": "github.com/bearlike/Assistant",
+      "parsed": {
+        "slug": "github.com/bearlike/Assistant",
+        "host": "github.com",
+        "namespace": [],
+        "owner": "bearlike",
+        "repo": "Assistant",
+        "platform": "github"
+      }
+    },
+    {
+      "id": "legacy-owner-repo",
+      "input": "bearlike/Assistant",
+      "parsed": null,
+      "note": "A legacy two-segment wiki slug. Still readable as a wiki project, but NOT a repository identity: with no host it can neither compose a clone URL nor resolve a host-scoped credential."
+    },
+    {
+      "id": "bare-repo-name",
+      "input": "Assistant",
+      "parsed": null,
+      "note": "One token names no repository. The api's RepoIdentity reads it as a repo NAME and the wiki's CredentialScope reads it as a bare HOST - both correct for their own domain, which is exactly why the shared grammar refuses to pick one."
+    },
+    {
+      "id": "host-only",
+      "input": "git.example.com",
+      "parsed": null,
+      "note": "A bare host is a valid credential scope but not a repository."
+    },
+    {
+      "id": "host-only-url",
+      "input": "https://github.com/",
+      "parsed": null
+    },
+    {
+      "id": "blank",
+      "input": "",
+      "parsed": null
+    },
+    {
+      "id": "whitespace-only",
+      "input": "   ",
+      "parsed": null
+    },
+    {
+      "id": "surrounding-whitespace",
+      "input": "  https://github.com/bearlike/Assistant.git  ",
+      "parsed": {
+        "slug": "github.com/bearlike/Assistant",
+        "host": "github.com",
+        "namespace": [],
+        "owner": "bearlike",
+        "repo": "Assistant",
+        "platform": "github"
+      },
+      "note": "A copy-pasted remote routinely arrives padded."
+    },
+    {
+      "id": "codeberg-host",
+      "input": "https://codeberg.org/acme/beacon.git",
+      "parsed": {
+        "slug": "codeberg.org/acme/beacon",
+        "host": "codeberg.org",
+        "namespace": [],
+        "owner": "acme",
+        "repo": "beacon",
+        "platform": "gitea"
+      },
+      "note": "A second host maps to the same platform - the mapping is host-keyed, not one host per platform."
+    },
+    {
+      "id": "azure-legacy-subdomain",
+      "input": "https://acme.visualstudio.com/acme/beacon",
+      "parsed": {
+        "slug": "acme.visualstudio.com/acme/beacon",
+        "host": "acme.visualstudio.com",
+        "namespace": [],
+        "owner": "acme",
+        "repo": "beacon",
+        "platform": "azure"
+      },
+      "note": "Legacy Azure DevOps puts the organisation in a subdomain, so the match is on the dot-suffix."
+    },
+    {
+      "id": "self-hosted-git-prefix",
+      "input": "https://git.example.com/acme/beacon.git",
+      "parsed": {
+        "slug": "git.example.com/acme/beacon",
+        "host": "git.example.com",
+        "namespace": [],
+        "owner": "acme",
+        "repo": "beacon",
+        "platform": "git"
+      },
+      "note": "THE case a substring heuristic gets wrong. A 'git.' prefix is not evidence of any particular forge - this host could be Gitea, GitLab, Forgejo or plain git. 'git' is the honest answer, and the operator can label it."
+    }
+  ]
+}

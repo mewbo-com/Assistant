@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from mewbo_core.common import MockSpeaker, get_logger, pydantic_to_openai_tool
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from mewbo_graph.plugins.wiki._base import WikiSessionTool, _err_result
 from mewbo_graph.plugins.wiki._ctx import emit_log, emit_phase
@@ -28,6 +28,42 @@ class WikiCommitPlanArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     pages: list[PagePlan] = Field(..., min_length=1)
+    landingPageId: str | None = Field(  # noqa: N815
+        default=None,
+        description=(
+            "The page id the finished wiki lands on. Pass it HERE, with the plan"
+            " that contains it: it is checked against this plan's own ids"
+            " immediately, so a wrong id fails in milliseconds instead of at"
+            " wiki_finalize, after every page has been written."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _plan_is_internally_consistent(self) -> WikiCommitPlanArgs:
+        """Refuse a plan that cannot be completed as written.
+
+        Both checks are decidable from the plan ALONE, which is the point: each
+        would otherwise be discovered only at the far end of the run.
+
+        - A landing page the plan does not contain fails ``wiki_finalize`` with
+          "not found in submitted pages" — after the whole pages fan-out has
+          run, roughly 25 minutes into an index that was already doomed when the
+          plan was committed.
+        - A duplicated page id makes the progress denominator unreachable: the
+          plan length counts the duplicate but a page id can only ever be
+          written (and counted) once, so the bar stops short of its own total
+          forever.
+        """
+        ids = [p.id for p in self.pages]
+        duplicates = sorted({pid for pid in ids if ids.count(pid) > 1})
+        if duplicates:
+            raise ValueError(f"plan contains duplicate page ids: {duplicates}")
+        if self.landingPageId is not None and self.landingPageId not in set(ids):
+            raise ValueError(
+                f"landingPageId '{self.landingPageId}' is not one of this plan's "
+                f"page ids ({sorted(ids)})"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -84,10 +120,13 @@ class WikiCommitPlanTool(WikiSessionTool):
         # 5. Update job status to finalizing and emit progress events.
         # ``total_pages`` is also persisted on the snapshot so the landing
         # card can render the page-bar denominator without subscribing to
-        # SSE.
-        ctx.store.update_job(
-            ctx.job_id, status="finalizing", total_pages=total_pages
-        )
+        # SSE. ``landing_page_id`` rides the same write when the plan names one,
+        # so a run that dies before finalize still records where it meant to
+        # land — and the id is already known to be one of the planned pages.
+        job_fields: dict[str, Any] = {"status": "finalizing", "total_pages": total_pages}
+        if args.landingPageId is not None:
+            job_fields["landing_page_id"] = args.landingPageId
+        ctx.store.update_job(ctx.job_id, **job_fields)
         ctx.store.append_job_event(ctx.job_id, {
             "type": "finalizing",
             "scannedCount": scanned_count,

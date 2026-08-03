@@ -188,10 +188,12 @@ docker/init.d/*
 !docker/init.d/00-toolbox.sh
 !docker/init.d/10-git-setup.sh
 !docker/init.d/12-agent-clis.sh
+!docker/init.d/13-models-cli.sh
 !docker/init.d/15-tea-setup.sh
-# Host-specific redeploy helper — encodes this machine's paths and stack
-# layout, so it is per-machine ops rather than a shared script.
-redeploy.sh
+# Secrets-manager directory binding — names the deployment's project and
+# configuration, which are deployment identifiers and never belong in the tree.
+.ssm/
+
 /.claude/settings.json
 /.playwright-mcp
 
@@ -205,6 +207,10 @@ apps/mewbo_console/data/
 CLAUDE.local.md
 **/CLAUDE.local.md
 .claude/CLAUDE.local.md
+# Skills that document internal-only process rather than the product. A board
+# ritual reads machine-local scripts and a private tracker's conventions, so it
+# belongs beside the local instruction layer above, not in a mirrored tree.
+.claude/skills/board-standup/
 # Live git worktrees rooted under the project — checked out files belong to
 # their own branch and must not be tracked by the parent repo.
 .claude/worktrees/
@@ -234,8 +240,20 @@ docs/build-info.json
 # on every `wrangler dev` / `wrangler deploy`; may contain dev tokens.
 .wrangler/
 
-# Demo-as-code (#213): the demo stack is deterministic BY DESIGN — its env
+# Demo-as-code: the demo stack is deterministic BY DESIGN — its env
 # and api config carry no secrets (replay mode, fixed demo token) and MUST be
 # versioned or `make demo-up` cannot reproduce the artifact pipeline.
 !demo/demo.env
 !demo/configs/app.json
+
+# Local presentation scratch — working material, never project documentation.
+# Deliberately kept OUT of docs/: mkdocs builds every markdown file in docs_dir
+# whether or not it appears in `nav:`, and that site is published, so anything
+# dropped there ships publicly by default.
+/docs-interview/
+
+# Written by `devcontainer build` beside the config it was handed. Generated,
+# host-specific, and never ours to ship — the launcher resolves Features
+# through the devcontainer CLI and never reads a lockfile back, so committing
+# one would only churn.
+/.devcontainer/devcontainer-lock.json

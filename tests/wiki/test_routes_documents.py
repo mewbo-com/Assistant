@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from mewbo_graph.wiki.types import CommitScope
 
 API_KEY = "test-key-123"
 
@@ -30,7 +31,7 @@ def runtime_stub(store):
 
 @pytest.fixture()
 def client(tmp_path: Path, monkeypatch, store, runtime_stub):
-    monkeypatch.setenv("MASTER_API_TOKEN", API_KEY)
+    monkeypatch.setenv("MEWBO_MASTER_API_TOKEN", API_KEY)
     monkeypatch.setattr("mewbo_api.backend.MASTER_API_TOKEN", API_KEY, raising=False)
     # No real embedder — force the BM25 fallback path so the route never calls
     # a proxy (deterministic, offline). make_embedder_or_none returns None.
@@ -95,7 +96,7 @@ def test_post_documents_creates_and_populates_non_git_project(client):
     project = store.get_project("acme/catalog")
     assert project is not None
     assert project.landing_page_id == data["landingPageId"]
-    assert store.query_graph("acme/catalog")
+    assert store.query_graph("acme/catalog", scope=CommitScope.every())
 
 
 def test_post_documents_grounds_via_retriever(client):
@@ -122,7 +123,7 @@ def test_post_documents_reingest_upserts(client):
     resp = c.post("/v1/wiki/projects/acme%2Fcatalog/documents", json=_DOCS, headers=headers)
     assert resp.status_code == 201
     assert resp.get_json()["totalDocuments"] == 2  # not 4
-    assert len(store.query_graph("acme/catalog")) == 2
+    assert len(store.query_graph("acme/catalog", scope=CommitScope.every())) == 2
 
 
 def test_post_documents_empty_list_is_validation_error(client):

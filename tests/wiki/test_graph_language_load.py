@@ -1,13 +1,13 @@
 """``_load_ts_language`` loads bundled grammars via the language pack.
 
-Regression (both graph-only and the LLM indexer failed in production): the old
-loader read a per-language ``.so`` out of ``tree_sitter_language_pack.cache_dir()``
-and relied on ``download()`` to populate it. In language-pack 1.10.x ``download()``
-became a no-op — it returned successfully but wrote nothing — so the manual
-``ctypes.LoadLibrary`` then failed with "cannot open shared object file" on a path
-that was never created. The fix uses the supported ``get_language`` API: the 1.x
-line bundles every grammar in the wheel, so there is no download, no cache, and no
-``.so`` to locate. These drive the real loader + a real parse, so they fail if the
+Reading a per-language ``.so`` out of ``tree_sitter_language_pack.cache_dir()``
+and relying on ``download()`` to populate it does not work: on the 1.10.x line
+``download()`` is a no-op that returns successfully and writes nothing, so a
+manual ``ctypes.LoadLibrary`` fails with "cannot open shared object file" on a
+path that was never created — taking both graph-only and the LLM indexer down.
+The supported ``get_language`` API is what this uses: the 1.x line bundles every
+grammar in the wheel, so there is no download, no cache, and no ``.so`` to
+locate. These drive the real loader + a real parse, so they fail if the
 production body regresses (not namesake tests).
 """
 from __future__ import annotations

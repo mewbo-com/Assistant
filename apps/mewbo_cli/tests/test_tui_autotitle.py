@@ -10,7 +10,7 @@ from __future__ import annotations
 import threading
 from typing import Any
 
-import mewbo_core.title_generator as title_generator
+import mewbo_core.session.title_generator as title_generator
 from mewbo_cli.tui.session.autotitle import AutoTitler
 
 

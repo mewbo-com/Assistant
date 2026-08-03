@@ -14,7 +14,9 @@ RUN npm run build
 # ---------- runtime stage ----------
 FROM nginx:alpine
 
-ARG VERSION="0.0.10"
+# In lockstep with apps/mewbo_console/package.json and the other images — see
+# Dockerfile.base.
+ARG VERSION="0.0.13"
 
 LABEL org.opencontainers.image.title="Mewbo Console" \
       org.opencontainers.image.description="Web console for the Mewbo task-agent assistant" \

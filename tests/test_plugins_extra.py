@@ -14,7 +14,11 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from mewbo_core.plugins import (
+from mewbo_core.tooling.plugins import (
+    GithubPluginSource,
+    GitSubdirPluginSource,
+    PluginSource,
+    UrlPluginSource,
     discover_builtin_plugins,
     discover_installed_plugins,
     discover_marketplace_plugins,
@@ -247,7 +251,7 @@ def test_discover_builtin_plugins_nonexistent_root(tmp_path: Path) -> None:
 
 def test_resolve_builtin_root_falls_back_to_empty_on_error(monkeypatch) -> None:
     """When importlib.resources fails, _resolve_builtin_root returns Path('') (non-existent)."""
-    import mewbo_core.plugins as plugins_mod
+    import mewbo_core.tooling.plugins as plugins_mod
 
     monkeypatch.setattr(plugins_mod, "_BUILTIN_ROOT_OVERRIDE", None)
     with patch("importlib.resources.files", side_effect=OSError("boom")):
@@ -258,7 +262,7 @@ def test_resolve_builtin_root_falls_back_to_empty_on_error(monkeypatch) -> None:
 
 def test_all_builtin_roots_uses_override(tmp_path: Path, monkeypatch) -> None:
     """_BUILTIN_ROOT_OVERRIDE short-circuits _all_builtin_roots to just that path."""
-    import mewbo_core.plugins as plugins_mod
+    import mewbo_core.tooling.plugins as plugins_mod
 
     override = tmp_path / "custom"
     override.mkdir()
@@ -269,7 +273,7 @@ def test_all_builtin_roots_uses_override(tmp_path: Path, monkeypatch) -> None:
 
 def test_register_builtin_root_is_idempotent(tmp_path: Path, monkeypatch) -> None:
     """Registering the same root twice is a no-op."""
-    import mewbo_core.plugins as plugins_mod
+    import mewbo_core.tooling.plugins as plugins_mod
 
     # Patch the module-level list to avoid polluting other tests
     monkeypatch.setattr(plugins_mod, "_BUILTIN_ROOT_OVERRIDE", None)
@@ -297,7 +301,7 @@ def test_sync_marketplaces_clone_failure_logged(tmp_path: Path, monkeypatch) -> 
     def _fail_clone(cmd, **kwargs):
         raise subprocess.CalledProcessError(128, cmd, stderr="auth error")
 
-    monkeypatch.setattr("mewbo_core.plugins.subprocess.run", _fail_clone)
+    monkeypatch.setattr("mewbo_core.tooling.plugins.subprocess.run", _fail_clone)
     dirs = sync_marketplaces(["org/plugins"], tmp_path)
     assert dirs == []
 
@@ -316,7 +320,7 @@ def test_sync_marketplaces_existing_dir_no_marker_tries_pull(tmp_path: Path, mon
         # Don't create marketplace.json, so the marker won't be found
         return MagicMock(returncode=0)
 
-    monkeypatch.setattr("mewbo_core.plugins.subprocess.run", _record)
+    monkeypatch.setattr("mewbo_core.tooling.plugins.subprocess.run", _record)
     dirs = sync_marketplaces([entry], tmp_path)
     # A pull was attempted
     assert any("pull" in " ".join(cmd) for cmd in calls)
@@ -341,7 +345,7 @@ def test_sync_marketplaces_existing_dir_no_marker_pull_creates_marker(
         )
         return MagicMock(returncode=0)
 
-    monkeypatch.setattr("mewbo_core.plugins.subprocess.run", _create_marker)
+    monkeypatch.setattr("mewbo_core.tooling.plugins.subprocess.run", _create_marker)
     dirs = sync_marketplaces([entry], tmp_path)
     assert len(dirs) == 1
 
@@ -356,7 +360,7 @@ def test_sync_marketplaces_pull_failure_logged(tmp_path: Path, monkeypatch) -> N
     def _fail_pull(cmd, **kwargs):
         raise subprocess.CalledProcessError(1, cmd)
 
-    monkeypatch.setattr("mewbo_core.plugins.subprocess.run", _fail_pull)
+    monkeypatch.setattr("mewbo_core.tooling.plugins.subprocess.run", _fail_pull)
     # Must not raise
     dirs = sync_marketplaces([entry], tmp_path)
     assert dirs == []
@@ -448,19 +452,24 @@ def test_install_plugin_dict_source_url_field(tmp_path: Path, monkeypatch) -> No
         (dest / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "p"}))
         calls.append(cmd)
 
-    monkeypatch.setattr("mewbo_core.plugins.subprocess.run", _fake_clone)
+    monkeypatch.setattr("mewbo_core.tooling.plugins.subprocess.run", _fake_clone)
     manifest = install_plugin("p", "test-mp", marketplace_dirs=[mp_dir], install_base=install_base)
     assert manifest.name == "p"
     assert "https://git.example.com/p.git" in calls[0]
 
 
 def test_install_plugin_dict_source_missing_repo_and_url(tmp_path: Path) -> None:
-    """A dict source with neither 'repo' nor 'url' raises ValueError."""
+    """An explicit but unrecognized source type refuses that one install by name.
+
+    Superseded expectation: the old message named a key ('repo'/'url') it never
+    actually tested against this input. The replacement names the DISCRIMINATOR
+    value that was rejected, which is what a bad manifest entry actually is.
+    """
     mp_dir, install_base = _setup_marketplace(
         tmp_path,
         [{"name": "p", "version": "1.0", "source": {"source": "unknown"}}],
     )
-    with pytest.raises(ValueError, match="no 'repo' or 'url'"):
+    with pytest.raises(ValueError, match="unsupported source type 'unknown'"):
         install_plugin("p", "test-mp", marketplace_dirs=[mp_dir], install_base=install_base)
 
 
@@ -486,7 +495,7 @@ def test_install_plugin_missing_manifest_after_install(tmp_path: Path, monkeypat
         dest = Path(cmd[-1])
         dest.mkdir(parents=True, exist_ok=True)
 
-    monkeypatch.setattr("mewbo_core.plugins.subprocess.run", _fake_clone_no_manifest)
+    monkeypatch.setattr("mewbo_core.tooling.plugins.subprocess.run", _fake_clone_no_manifest)
     with pytest.raises(RuntimeError, match="missing a valid plugin.json"):
         install_plugin("p", "test-mp", marketplace_dirs=[mp_dir], install_base=install_base)
 
@@ -498,7 +507,7 @@ def test_install_plugin_skips_already_cloned_git_dir(tmp_path: Path, monkeypatch
         [{"name": "p", "version": "1.0", "source": {"repo": "owner/p"}}],
     )
     # Pre-create the destination with a .git dir and manifest
-    from mewbo_core.plugins import _sanitize_path_component
+    from mewbo_core.tooling.plugins import _sanitize_path_component
 
     cache_dir = (
         install_base
@@ -513,7 +522,9 @@ def test_install_plugin_skips_already_cloned_git_dir(tmp_path: Path, monkeypatch
     (cache_dir / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "p"}))
 
     calls: list = []
-    monkeypatch.setattr("mewbo_core.plugins.subprocess.run", lambda *a, **kw: calls.append(a))
+    monkeypatch.setattr(
+        "mewbo_core.tooling.plugins.subprocess.run", lambda *a, **kw: calls.append(a)
+    )
 
     manifest = install_plugin("p", "test-mp", marketplace_dirs=[mp_dir], install_base=install_base)
     assert manifest.name == "p"
@@ -536,10 +547,10 @@ def test_install_plugin_dict_source_subdir_and_sha(tmp_path: Path) -> None:
     """A ``{source: url, path, sha}`` entry vendors a plugin from a repo
     SUBDIRECTORY pinned to a commit — the "community-managed" shape.
 
-    Regression: the resolver used to drop ``path`` (reading plugin.json from the
-    clone root, where it does not exist → "missing a valid plugin.json") and
-    ``sha`` (installing the moving branch tip). Uses a real local git repo so the
-    clone/checkout/subtree-copy runs for real; no network.
+    Both keys are load-bearing: dropping ``path`` reads plugin.json from the
+    clone root, where it does not exist → "missing a valid plugin.json";
+    dropping ``sha`` installs the moving branch tip. Uses a real local git repo
+    so the clone/checkout/subtree-copy runs for real; no network.
     """
     if shutil.which("git") is None:
         pytest.skip("git not available")
@@ -616,6 +627,470 @@ def test_install_plugin_dict_source_bad_sha_raises(tmp_path: Path) -> None:
         install_plugin("mine", "test-mp", marketplace_dirs=[mp_dir], install_base=install_base)
 
 
+# ---------------------------------------------------------------------------
+# PluginSource discriminated union — direct model-level tests
+# ---------------------------------------------------------------------------
+
+
+def test_plugin_source_parse_defaults_bare_repo_to_github() -> None:
+    """A legacy dict with no 'source' key but a 'repo' key stamps 'github'."""
+    parsed = PluginSource.parse({"repo": "owner/p"})
+    assert isinstance(parsed, GithubPluginSource)
+    assert parsed.repo == "owner/p"
+
+
+def test_plugin_source_parse_defaults_bare_url_to_url() -> None:
+    parsed = PluginSource.parse({"url": "https://git.example.com/p.git"})
+    assert isinstance(parsed, UrlPluginSource)
+
+
+def test_plugin_source_url_resolves_verbatim() -> None:
+    """The 'url' variant is used AS-IS — no host-shorthand resolution."""
+    source = UrlPluginSource(url="owner/repo")
+    assert source.resolve_git_url() == "owner/repo"
+
+
+def test_plugin_source_github_resolves_through_shared_resolver() -> None:
+    source = GithubPluginSource(repo="owner/repo")
+    assert source.resolve_git_url() == "https://github.com/owner/repo.git"
+
+
+def test_plugin_source_git_subdir_resolves_shorthand_through_shared_resolver() -> None:
+    """Pins trap #1 directly on the model: git-subdir must NOT be verbatim —
+    a bare shorthand must resolve the same way the 'github' arm's repo does."""
+    source = GitSubdirPluginSource(url="git.example.com/team/p", path="sub")
+    assert source.resolve_git_url() == "https://git.example.com/team/p.git"
+
+
+def test_plugin_source_git_subdir_requires_path() -> None:
+    """The whole point of 'git-subdir' is the subdirectory — omitting it is a
+    malformed entry, and Pydantic's own error names the missing field."""
+    with pytest.raises(ValueError, match="path"):
+        GitSubdirPluginSource(url="https://git.example.com/p.git")
+
+
+def test_plugin_source_variants_ignore_unknown_extra_keys() -> None:
+    """extra='ignore': a third-party schema field Mewbo doesn't model yet must
+    not hard-fail the whole install the moment upstream adds one."""
+    parsed = PluginSource.parse(
+        {"source": "github", "repo": "owner/p", "some_future_field": "value"}
+    )
+    assert isinstance(parsed, GithubPluginSource)
+    assert not hasattr(parsed, "some_future_field")
+
+
+# ---------------------------------------------------------------------------
+# install_plugin — git-subdir, github+path, ref/sha precedence, unknown types
+# ---------------------------------------------------------------------------
+
+
+def test_install_plugin_git_subdir_source_real_git(tmp_path: Path, monkeypatch) -> None:
+    """The canonical 'git-subdir' discriminator (not the old 'url'-tagged ad
+    hoc shape) drives the real clone/checkout/subtree-copy machinery end to
+    end: a real local repo, no network, no mocked subprocess.
+
+    Host-shorthand resolution is patched to identity here so a plain local
+    path can stand in for a real git host in this test — that resolution
+    step is separately pinned, with the real (unpatched) resolver, by
+    test_plugin_source_git_subdir_resolves_shorthand_through_shared_resolver.
+    Production `_resolve_git_url` intentionally does NOT special-case
+    `file://` (or any other scheme) beyond https/http/ssh/git: a marketplace
+    `source` is third-party-supplied, and widening the recognized scheme set
+    there would let a plugin entry point at, and install code from, any
+    locally-reachable git repository.
+    """
+    if shutil.which("git") is None:
+        pytest.skip("git not available")
+    monkeypatch.setattr(
+        "mewbo_core.tooling.plugins._resolve_git_url", lambda url, **kw: url
+    )
+
+    origin = tmp_path / "origin"
+    plugin_dir = origin / "plugins" / "mine" / ".claude-plugin"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "plugin.json").write_text(json.dumps({"name": "mine", "version": "1.0.0"}))
+    _git(["init", "-q"], origin)
+    _git(["add", "-A"], origin)
+    _git(["commit", "-q", "-m", "pinned"], origin)
+    pinned_sha = _git(["rev-parse", "HEAD"], origin)
+    (plugin_dir / "plugin.json").write_text(json.dumps({"name": "mine", "version": "2.0.0"}))
+    _git(["commit", "-qam", "moved on"], origin)
+
+    mp_dir, install_base = _setup_marketplace(
+        tmp_path,
+        [
+            {
+                "name": "mine",
+                "version": "1.0",
+                "source": {
+                    "source": "git-subdir",
+                    "url": str(origin),
+                    "path": "plugins/mine",
+                    "sha": pinned_sha,
+                },
+            }
+        ],
+    )
+
+    manifest = install_plugin(
+        "mine", "test-mp", marketplace_dirs=[mp_dir], install_base=install_base
+    )
+
+    assert manifest.name == "mine"
+    assert manifest.version == "1.0.0"  # sha honored, not HEAD's 2.0.0
+    installed = Path(manifest.install_path)
+    assert (installed / ".claude-plugin" / "plugin.json").is_file()
+    assert not (installed / "plugins").exists()  # cache_dir IS the plugin root
+
+
+def test_install_plugin_git_subdir_resolves_shorthand_url(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """git-subdir must route its url through the shared host-agnostic
+    resolver — the exact swap trap #1 warns about. Routing it verbatim
+    instead would silently drop shorthand-url support the moment someone
+    reuses the url arm's logic for this discriminator."""
+    mp_dir, install_base = _setup_marketplace(
+        tmp_path,
+        [
+            {
+                "name": "p",
+                "version": "1.0",
+                "source": {
+                    "source": "git-subdir",
+                    "url": "git.example.com/team/p",
+                    "path": "sub/dir",
+                },
+            }
+        ],
+    )
+    calls: list[list] = []
+
+    def _fake_clone(cmd, **kw):
+        if cmd[:2] == ["git", "clone"]:
+            dest = Path(cmd[-1])
+            manifest_dir = dest / "sub" / "dir" / ".claude-plugin"
+            manifest_dir.mkdir(parents=True)
+            (manifest_dir / "plugin.json").write_text(json.dumps({"name": "p"}))
+        calls.append(cmd)
+        return MagicMock(returncode=0)
+
+    monkeypatch.setattr("mewbo_core.tooling.plugins.subprocess.run", _fake_clone)
+    manifest = install_plugin("p", "test-mp", marketplace_dirs=[mp_dir], install_base=install_base)
+    assert manifest.name == "p"
+    assert any("https://git.example.com/team/p.git" in c for c in calls)
+
+
+def test_install_plugin_git_subdir_missing_path_names_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A well-formed-but-incomplete git-subdir (missing 'path') surfaces
+    Pydantic's own error, which names the missing field — exactly what the
+    old fallback-branch message failed to do."""
+    mp_dir, install_base = _setup_marketplace(
+        tmp_path,
+        [
+            {
+                "name": "p",
+                "version": "1.0",
+                "source": {"source": "git-subdir", "url": "https://git.example.com/p.git"},
+            }
+        ],
+    )
+
+    def _no_subprocess(cmd, **kw):
+        raise AssertionError(f"subprocess.run must not be reached: {cmd}")
+
+    monkeypatch.setattr("mewbo_core.tooling.plugins.subprocess.run", _no_subprocess)
+    with pytest.raises(ValueError, match="path"):
+        install_plugin("p", "test-mp", marketplace_dirs=[mp_dir], install_base=install_base)
+
+
+def test_install_plugin_github_source_installs(tmp_path: Path, monkeypatch) -> None:
+    """A 'github' dict source (canonical discriminator, not the bare legacy
+    {"repo": ...} shape) resolves and clones the same way the legacy path
+    did."""
+    mp_dir, install_base = _setup_marketplace(
+        tmp_path,
+        [{"name": "p", "version": "1.0", "source": {"source": "github", "repo": "org/repo"}}],
+    )
+    calls: list[list] = []
+
+    def _fake_clone(cmd, **kw):
+        dest = Path(cmd[-1])
+        (dest / ".claude-plugin").mkdir(parents=True)
+        (dest / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "p"}))
+        calls.append(cmd)
+
+    monkeypatch.setattr("mewbo_core.tooling.plugins.subprocess.run", _fake_clone)
+    manifest = install_plugin("p", "test-mp", marketplace_dirs=[mp_dir], install_base=install_base)
+    assert manifest.name == "p"
+    assert "https://github.com/org/repo.git" in calls[0]
+
+
+def test_install_plugin_github_source_with_path_real_git(tmp_path: Path, monkeypatch) -> None:
+    """The 'github' discriminator also honours an optional 'path' — Mewbo's
+    generous extension beyond the strict upstream field set — so an author
+    who reaches for 'repo' plus a subdirectory still gets a vendored plugin
+    rather than a whole-repo clone with no manifest at its root.
+
+    Host-shorthand resolution is patched to identity here so a plain local
+    path can stand in for a real git host — see the docstring on
+    test_install_plugin_git_subdir_source_real_git for why.
+    """
+    if shutil.which("git") is None:
+        pytest.skip("git not available")
+    monkeypatch.setattr(
+        "mewbo_core.tooling.plugins._resolve_git_url", lambda url, **kw: url
+    )
+
+    origin = tmp_path / "origin"
+    plugin_dir = origin / "sub" / ".claude-plugin"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "plugin.json").write_text(json.dumps({"name": "ghp"}))
+    _git(["init", "-q"], origin)
+    _git(["add", "-A"], origin)
+    _git(["commit", "-q", "-m", "root"], origin)
+
+    mp_dir, install_base = _setup_marketplace(
+        tmp_path,
+        [
+            {
+                "name": "ghp",
+                "version": "1.0",
+                "source": {"source": "github", "repo": str(origin), "path": "sub"},
+            }
+        ],
+    )
+    manifest = install_plugin(
+        "ghp", "test-mp", marketplace_dirs=[mp_dir], install_base=install_base
+    )
+    assert manifest.name == "ghp"
+    installed = Path(manifest.install_path)
+    assert (installed / ".claude-plugin" / "plugin.json").is_file()
+    assert not (installed / "sub").exists()
+
+
+def test_install_plugin_url_source_ref_checks_out_tag_not_head(tmp_path: Path) -> None:
+    """A 'ref' (branch/tag) is honored — until now the installer read no
+    field named 'ref' anywhere, so a ref-only entry silently cloned whatever
+    the default branch tip happened to be."""
+    if shutil.which("git") is None:
+        pytest.skip("git not available")
+
+    origin = tmp_path / "origin"
+    (origin / ".claude-plugin").mkdir(parents=True)
+    (origin / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "mine", "version": "1.0.0"})
+    )
+    _git(["init", "-q"], origin)
+    _git(["add", "-A"], origin)
+    _git(["commit", "-q", "-m", "tagged"], origin)
+    _git(["tag", "v1"], origin)
+    (origin / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "mine", "version": "2.0.0"})
+    )
+    _git(["commit", "-qam", "moved on"], origin)
+
+    mp_dir, install_base = _setup_marketplace(
+        tmp_path,
+        [
+            {
+                "name": "mine",
+                "version": "1.0",
+                "source": {"source": "url", "url": str(origin), "ref": "v1"},
+            }
+        ],
+    )
+    manifest = install_plugin(
+        "mine", "test-mp", marketplace_dirs=[mp_dir], install_base=install_base
+    )
+    assert manifest.version == "1.0.0"  # v1's content, not HEAD's 2.0.0
+
+
+def test_install_plugin_url_source_sha_wins_over_ref(tmp_path: Path) -> None:
+    """When both 'ref' and 'sha' are set, 'sha' wins — the exact precedence
+    the canonical schema defines for every git-based source type."""
+    if shutil.which("git") is None:
+        pytest.skip("git not available")
+
+    origin = tmp_path / "origin"
+    (origin / ".claude-plugin").mkdir(parents=True)
+    (origin / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "mine", "version": "1.0.0"})
+    )
+    _git(["init", "-q"], origin)
+    _git(["add", "-A"], origin)
+    _git(["commit", "-q", "-m", "tagged"], origin)
+    _git(["tag", "v1"], origin)
+    (origin / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "mine", "version": "2.0.0"})
+    )
+    _git(["commit", "-qam", "pinned"], origin)
+    pinned_sha = _git(["rev-parse", "HEAD"], origin)
+    (origin / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "mine", "version": "3.0.0"})
+    )
+    _git(["commit", "-qam", "moved on again"], origin)
+
+    mp_dir, install_base = _setup_marketplace(
+        tmp_path,
+        [
+            {
+                "name": "mine",
+                "version": "1.0",
+                "source": {
+                    "source": "url",
+                    "url": str(origin),
+                    "ref": "v1",
+                    "sha": pinned_sha,
+                },
+            }
+        ],
+    )
+    manifest = install_plugin(
+        "mine", "test-mp", marketplace_dirs=[mp_dir], install_base=install_base
+    )
+    assert manifest.version == "2.0.0"  # sha's commit — neither v1's nor HEAD's
+
+
+def test_install_plugin_npm_source_names_npm(tmp_path: Path, monkeypatch) -> None:
+    """'npm' is a real Claude Code source type Mewbo does not implement — it
+    must refuse by name, never silently sniff a stray key and guess."""
+    mp_dir, install_base = _setup_marketplace(
+        tmp_path,
+        [{"name": "p", "version": "1.0", "source": {"source": "npm", "package": "left-pad"}}],
+    )
+
+    def _no_subprocess(cmd, **kw):
+        raise AssertionError(f"subprocess.run must not be reached: {cmd}")
+
+    monkeypatch.setattr("mewbo_core.tooling.plugins.subprocess.run", _no_subprocess)
+    with pytest.raises(ValueError, match="npm"):
+        install_plugin("p", "test-mp", marketplace_dirs=[mp_dir], install_base=install_base)
+
+
+def test_install_plugin_unknown_source_refuses_one_install_catalog_lists_all(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An unrecognized source type refuses THAT ONE install; the marketplace
+    catalog still lists every entry — discover_marketplace_plugins never
+    reads 'source' at all, so one bad entry cannot take down browsing."""
+    mp_dir, install_base = _setup_marketplace(
+        tmp_path,
+        [
+            {"name": "good", "version": "1.0", "source": {"source": "github", "repo": "org/good"}},
+            {"name": "bad", "version": "1.0", "source": {"source": "totally-unknown"}},
+        ],
+    )
+    available = discover_marketplace_plugins(marketplace_dirs=[mp_dir])
+    assert {p["name"] for p in available} == {"good", "bad"}
+
+    def _no_subprocess(cmd, **kw):
+        raise AssertionError(f"subprocess.run must not be reached: {cmd}")
+
+    monkeypatch.setattr("mewbo_core.tooling.plugins.subprocess.run", _no_subprocess)
+    with pytest.raises(ValueError, match="unsupported source type 'totally-unknown'"):
+        install_plugin("bad", "test-mp", marketplace_dirs=[mp_dir], install_base=install_base)
+
+
+def test_install_plugin_realistic_marketplace_fixture(tmp_path: Path, monkeypatch) -> None:
+    """A fixture shaped like the real marketplace.json blast-radius survey —
+    a mix of source types where 'git-subdir' is the majority of the
+    dict-typed entries, replayed through the real dispatch. This is the
+    fixture shape that would have caught the defect before it shipped: every
+    plugin name/host below is a scrubbed, wholly fictional stand-in."""
+    plugins = [
+        {"name": "acme-local", "version": "1.0", "source": "./acme-local"},
+        {
+            "name": "acme-cloud",
+            "version": "1.0",
+            "source": {"source": "github", "repo": "acme/cloud"},
+        },
+        {
+            "name": "acme-observability",
+            "version": "1.0",
+            "source": {"source": "url", "url": "https://git.example.com/acme/observability.git"},
+        },
+        {
+            "name": "acme-payments",
+            "version": "1.0",
+            "source": {
+                "source": "git-subdir",
+                "url": "https://git.example.com/acme/monorepo.git",
+                "path": "plugins/payments",
+            },
+        },
+        {
+            "name": "acme-search",
+            "version": "1.0",
+            "source": {
+                "source": "git-subdir",
+                "url": "https://git.example.com/acme/monorepo.git",
+                "path": "plugins/search",
+            },
+        },
+        {
+            "name": "acme-scheduler",
+            "version": "1.0",
+            "source": {
+                "source": "git-subdir",
+                "url": "https://git.example.com/acme/monorepo.git",
+                "path": "plugins/scheduler",
+                "ref": "v2",
+            },
+        },
+        {
+            "name": "acme-widgets",
+            "version": "1.0",
+            "source": {"source": "npm", "package": "acme-widgets"},
+        },
+        {"name": "acme-mystery", "version": "1.0", "source": {"source": "not-a-real-type"}},
+    ]
+    mp_dir, install_base = _setup_marketplace(tmp_path, plugins)
+    src = mp_dir / "acme-local"
+    src.mkdir()
+    (src / ".claude-plugin").mkdir()
+    (src / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "acme-local"}))
+
+    available = discover_marketplace_plugins(marketplace_dirs=[mp_dir])
+    assert {p["name"] for p in available} == {p["name"] for p in plugins}
+
+    known_subdirs = ["plugins/payments", "plugins/search", "plugins/scheduler"]
+
+    def _fake_clone(cmd, **kw):
+        if cmd[:2] == ["git", "clone"]:
+            dest = Path(cmd[-1])
+            (dest / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+            (dest / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "x"}))
+            for subdir in known_subdirs:
+                sd = dest / subdir / ".claude-plugin"
+                sd.mkdir(parents=True, exist_ok=True)
+                (sd / "plugin.json").write_text(json.dumps({"name": "x"}))
+        return MagicMock(returncode=0)
+
+    monkeypatch.setattr("mewbo_core.tooling.plugins.subprocess.run", _fake_clone)
+
+    for plugin_name in (
+        "acme-local",
+        "acme-cloud",
+        "acme-observability",
+        "acme-payments",
+        "acme-search",
+        "acme-scheduler",
+    ):
+        manifest = install_plugin(
+            plugin_name, "test-mp", marketplace_dirs=[mp_dir], install_base=install_base
+        )
+        assert manifest is not None
+
+    for plugin_name in ("acme-widgets", "acme-mystery"):
+        with pytest.raises(ValueError, match="unsupported source type"):
+            install_plugin(
+                plugin_name, "test-mp", marketplace_dirs=[mp_dir], install_base=install_base
+            )
+
+
 def test_install_plugin_updates_registry(tmp_path: Path, monkeypatch) -> None:
     """install_plugin writes the plugin entry into installed_plugins.json."""
     mp_dir, install_base = _setup_marketplace(
@@ -628,7 +1103,7 @@ def test_install_plugin_updates_registry(tmp_path: Path, monkeypatch) -> None:
         (dest / ".claude-plugin").mkdir(parents=True)
         (dest / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "p"}))
 
-    monkeypatch.setattr("mewbo_core.plugins.subprocess.run", _fake_clone)
+    monkeypatch.setattr("mewbo_core.tooling.plugins.subprocess.run", _fake_clone)
     install_plugin("p", "test-mp", marketplace_dirs=[mp_dir], install_base=install_base)
 
     reg_path = install_base / "installed_plugins.json"
@@ -716,7 +1191,7 @@ def test_uninstall_plugin_bad_registry_json(tmp_path: Path) -> None:
 
 def test_load_all_plugin_components_disabled(monkeypatch) -> None:
     """When plugins.enabled is False, returns an empty PluginFanOut."""
-    import mewbo_core.plugins as plugins_mod
+    import mewbo_core.tooling.plugins as plugins_mod
     from mewbo_core.config import reset_config, set_config_override
 
     set_config_override({"plugins": {"enabled": False}})
@@ -733,7 +1208,7 @@ def test_load_all_plugin_components_disabled(monkeypatch) -> None:
 
 def test_load_all_plugin_components_cache_hit(tmp_path: Path, monkeypatch) -> None:
     """A second call returns the cached PluginFanOut when registry hasn't changed."""
-    import mewbo_core.plugins as plugins_mod
+    import mewbo_core.tooling.plugins as plugins_mod
     from mewbo_core.config import reset_config, set_config_override
 
     set_config_override(
@@ -760,7 +1235,7 @@ def test_load_all_plugin_components_cache_hit(tmp_path: Path, monkeypatch) -> No
 
 def test_load_all_plugin_components_mcp_normalization(tmp_path: Path, monkeypatch) -> None:
     """mcpServers top-level key is renamed to 'servers' during fan-out."""
-    import mewbo_core.plugins as plugins_mod
+    import mewbo_core.tooling.plugins as plugins_mod
     from mewbo_core.config import reset_config, set_config_override
 
     # Build a plugin with mcpServers format

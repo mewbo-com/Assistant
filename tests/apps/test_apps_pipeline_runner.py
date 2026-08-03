@@ -1,6 +1,6 @@
-"""Contract tests for the Phase 2 code-pipeline execution engine.
+"""Contract tests for the code-pipeline execution engine.
 
-Covers the four surfaces this wave adds, all with the clock injected (``now=`` /
+Four surfaces, all with the clock injected (``now=`` /
 a fixed ``clock``) and real JSON stores (the data-plane + ledger math IS the
 contract; only the failure handler / session backend are faked):
 
@@ -38,6 +38,7 @@ from mewbo_api.apps.models import (
     WorkspaceRef,
 )
 from mewbo_api.apps.pipeline_runner import (
+    _MAX_QUERY_LIMIT,
     PIPELINE_ALLOWED_MODULES,
     AppPipelineRunner,
     PipelineExecutionError,
@@ -46,7 +47,7 @@ from mewbo_api.apps.pipeline_runner import (
 )
 from mewbo_api.apps.pipeline_tracker import AppPipelineRunTracker
 from mewbo_api.apps.store import JsonAppDataStore, JsonAppStore, JsonPipelineRunStore
-from mewbo_core.secret_redaction import get_secret_redactor
+from mewbo_core.contracts.secret_redaction import get_secret_redactor
 from pydantic import ValidationError
 
 NOW = datetime(2026, 7, 18, 9, 0, 0, tzinfo=timezone.utc)
@@ -248,11 +249,17 @@ class TestModels:
             PipelineSpec(name="p", wake_prompt="w", on_demand=True, llm_budget_tokens=-1)
 
     def test_timeout_seconds_bounds(self):
-        # Declared per-pipeline (ge=1, le=600): 0 and >600 fail at definition.
+        # The PARSE bound is deliberately WIDE (ge=1, le=600) — this model is read
+        # back from an append-only store, so a stored manifest declaring more than
+        # the real ceiling must keep validating or every detail read of that app
+        # 500s. The real ceiling (PIPELINE_TIMEOUT_CEILING_SECONDS) is enforced at
+        # submit and clamped at execution instead; see
+        # tests/apps/test_pipeline_timeout_clamp.py.
         with pytest.raises(ValidationError):
             PipelineSpec(name="p", wake_prompt="w", on_demand=True, timeout_seconds=0)
         with pytest.raises(ValidationError):
             PipelineSpec(name="p", wake_prompt="w", on_demand=True, timeout_seconds=601)
+        # 300 is the value a real stored manifest carries — it must still parse.
         assert (
             PipelineSpec(
                 name="p", wake_prompt="w", on_demand=True, timeout_seconds=300
@@ -1423,7 +1430,7 @@ class TestCodeFireSeam:
 
     def test_record_code_run_can_write_an_on_request_kind_row(self, tmp_path, workspace):
         # record_code_run CAN stamp kind="on_request" — the REST invoke endpoint
-        # (Phase 2 revised ruling) now uses it, gated by require_effect.
+        # uses it, gated by require_effect.
         pipeline = _code_pipeline(trigger_ref="trig-1")
         tracker, _, _, run_store = _tracker(
             tmp_path, source=_GLOB_PIPELINE, pipeline=pipeline, workspace=workspace
@@ -1591,3 +1598,45 @@ class TestCodeFireIntegrityDispatch:
         )
 
         assert handler.calls == []
+
+
+class TestCollectionQueryLimit:
+    """``ctx.collection(...).query(limit=...)`` refuses a limit it cannot honour.
+
+    Silently clamping would hand a pipeline author fewer rows than they asked
+    for with nothing to notice — the same defect class the REST data route's
+    ``truncated`` flag closes. Here the honest answer is a refusal, mirroring
+    ``plugin/app_data.py``'s Pydantic ``le=`` on the agent-facing surface.
+    """
+
+    _QUERY = (
+        "def run(params, ctx):\n"
+        "    return len(ctx.collection('notes').query(limit=params['limit']))\n"
+    )
+
+    def test_limit_above_the_cap_refuses(self, tmp_path):
+        runner, app_store, _ = _runner(tmp_path)
+        pipeline = _code_pipeline(params_schema={"type": "object"})
+        app = _app(pipeline=pipeline, source=self._QUERY)
+        app_store.save(app)
+
+        with pytest.raises(PipelineExecutionError) as exc:
+            runner.execute(
+                app, pipeline, {"limit": _MAX_QUERY_LIMIT + 1}, now=NOW, dry_run=False
+            )
+
+        assert exc.value.code == "validation"
+        assert str(_MAX_QUERY_LIMIT) in str(exc.value)
+
+    def test_limit_at_the_cap_still_succeeds(self, tmp_path):
+        runner, app_store, data_store = _runner(tmp_path)
+        pipeline = _code_pipeline(params_schema={"type": "object"})
+        app = _app(pipeline=pipeline, source=self._QUERY)
+        app_store.save(app)
+        data_store.upsert(app.app_id, "notes", "a", {"n": 1})
+
+        result = runner.execute(
+            app, pipeline, {"limit": _MAX_QUERY_LIMIT}, now=NOW, dry_run=False
+        )
+
+        assert result.output == 1

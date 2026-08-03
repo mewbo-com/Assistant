@@ -22,6 +22,7 @@ import type { Block, QaTurn } from "./api/types";
 import { buildHref } from "./router";
 import { DEFAULT_WIKI_SLUG } from "./slug";
 import { useStoredModel } from "./useStoredModel";
+import { useStoredQaMode } from "./useStoredQaMode";
 
 export interface QaConversationInput {
   question: string;
@@ -55,6 +56,7 @@ const EMPTY_BLOCKS: Block[] = [];
 export function useQaConversation({ question, pageId, slug, model: urlModel, answerId }: QaConversationInput) {
   const [, navigate] = useLocation();
   const [storedModel, setStoredModel] = useStoredModel();
+  const [storedMode, setStoredMode] = useStoredQaMode();
   const repoSlug = slug ?? DEFAULT_WIKI_SLUG;
   const fromPageQuery = useWikiPage(pageId, repoSlug);
 
@@ -105,6 +107,7 @@ export function useQaConversation({ question, pageId, slug, model: urlModel, ans
           model: answeringModel,
           slug: repoSlug,
           answerId: liveInput.answerId,
+          mode: storedMode,
         }
       : null,
   );
@@ -117,6 +120,13 @@ export function useQaConversation({ question, pageId, slug, model: urlModel, ans
   const streamDone = streamSettled ? stream.done : false;
   const streamSummary = streamSettled ? stream.summarySources : null;
   const streamError = streamSettled ? stream.error : null;
+  // `sessionId` MUST be masked by `settled` like every field above it, and the
+  // reason is sharper than a flicker. The reducer only clears on `meta`, and
+  // navigating to a DIFFERENT answer drops the hook to a null input — so no
+  // `meta` ever arrives to clear it, and the folded state keeps the PREVIOUS
+  // conversation's session id indefinitely. Unmasked, the jump would then point
+  // at the run that answered some other question, permanently and silently.
+  const streamSessionId = streamSettled ? stream.sessionId : null;
 
   // The conversation's persisted id — the same across every follow-up.
   const activeAnswerId = answerId ?? stream.answerId;
@@ -125,6 +135,30 @@ export function useQaConversation({ question, pageId, slug, model: urlModel, ans
   // backfills the deterministic provenance trail for the LATEST turn once the
   // stream settles (the stream's internal ``access`` events are ignored).
   const snapshot = useQaAnswerSnapshot(activeAnswerId, isSnapshot || streamDone);
+
+  // The Mewbo session answering this conversation. Per-CONVERSATION, not
+  // per-turn: a follow-up continues the SAME session, so this is stable across
+  // the whole thread — which is why it is returned once here rather than
+  // carried on `RenderedTurn`. The live `meta` event wins over the snapshot
+  // because it lands FIRST: a streaming turn is watchable from its opening
+  // frame, long before the snapshot read is even enabled (it is gated on the
+  // stream settling). The snapshot covers the other half — a replayed
+  // ``?answer=`` load, where no stream ever opens.
+  //
+  // The snapshot leg needs a guard of its own, for a subtler version of the
+  // same staleness the mask above fixes. `activeAnswerId` falls back to
+  // `stream.answerId`, which is ALSO unmasked — so pointing a settled screen
+  // at a new COLD question leaves the query keyed on the previous answer, and
+  // a disabled TanStack query still serves its cached entry. Reading it then
+  // would navigate to the run that answered the previous question. Trust it
+  // only once this screen has settled on the conversation it is showing; the
+  // one-round-trip window that excludes is the same window the surrounding
+  // fields already blank, so the jump hides exactly while the answer does.
+  const snapshotSessionId =
+    isSnapshot || streamSettled ? snapshot.data?.sessionId : undefined;
+  // `null` when neither carries one — absence is what the screen reads as
+  // "nothing to watch".
+  const sessionId = streamSessionId ?? snapshotSessionId ?? null;
 
   // ── The CURRENT (latest) turn — from the live stream or the snapshot top. ─
   const snapshotBlocks = snapshot.data?.blocks;
@@ -247,7 +281,10 @@ export function useQaConversation({ question, pageId, slug, model: urlModel, ans
     resolveSourceHref,
     storedModel,
     setStoredModel,
+    storedMode,
+    setStoredMode,
     renderedTurns,
+    sessionId,
     onAsk,
   };
 }

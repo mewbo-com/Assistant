@@ -3,7 +3,6 @@ import {
   AttachmentRecord,
   CommandResult,
   CommandSpec,
-  EventRecord,
   NotificationItem,
   QueryMode,
   SessionContext,
@@ -14,7 +13,7 @@ import {
   ShareRecord
 } from "../types";
 import { QuestionAnswerItemPayload } from "../types";
-import { AgentSummary, AnswerQuestionResult, ApiClient, ApiConfig, ApiKeyCreated, ApiKeyRevoked, ApiKeySummary, ConfigState, CreateWorktreeInput, ForkResponse, MarketplacePlugin, ModelInfo, PluginSummary, ProjectBranches, ProjectSummary, RecoverResponse, SkillSummary, ToolSummary, VirtualProject, WorktreeSummary } from "./contracts";
+import { AgentSummary, AnswerQuestionResult, ApiClient, ApiConfig, ApiKeyCreated, ApiKeyRevoked, ApiKeySummary, ConfigState, CreateWorktreeInput, ForkResponse, MarketplacePlugin, ModelInfo, PluginSummary, ProjectBranches, ProjectSummary, RecoverResponse, SessionListFilter, SkillSummary, ToolSummary, VirtualProject, WorktreeSummary } from "./contracts";
 import { apiFetch, withBase, authHeaders, readError, readJson as handleJson } from "./httpBase";
 
 // Capability IDs can be overridden at build time. Each must match the id in a
@@ -29,17 +28,25 @@ import { apiFetch, withBase, authHeaders, readError, readJson as handleJson } fr
 //     the ordinary chat/query path. Headless product drives (wiki/search) use
 //     their own client and never send this — they must not bind the
 //     block-until-answered tool.
+//   - `generative_ui` → core's generative-UI capability, which gates the
+//     `present_ui` SessionTool. Advertising it and rendering the result are
+//     one decision: the console has the allowlist renderer
+//     (`components/generative-ui/`), so it grants the tool. A surface that
+//     advertised without rendering would let a run spend a step producing a
+//     tree nobody can read.
 // The header is a comma-separated list (backend.py splits on "," and strips),
-// so all three grants ride every session the console opens.
+// so all four grants ride every session the console opens.
 const WIDGET_CAPABILITY_ID =
   (import.meta.env.VITE_WIDGET_CAPABILITY_ID as string | undefined) || "stlite";
 const APPS_CAPABILITY_ID =
   (import.meta.env.VITE_APPS_CAPABILITY_ID as string | undefined) || "apps";
 const ASK_USER_CAPABILITY_ID = "ask_user";
+const GENERATIVE_UI_CAPABILITY_ID = "generative_ui";
 const CLIENT_CAPABILITIES = [
   WIDGET_CAPABILITY_ID,
   APPS_CAPABILITY_ID,
-  ASK_USER_CAPABILITY_ID
+  ASK_USER_CAPABILITY_ID,
+  GENERATIVE_UI_CAPABILITY_ID
 ].join(",");
 
 function headers(apiKey?: string): HeadersInit {
@@ -56,9 +63,13 @@ export function createRealClient(config: ApiConfig): ApiClient {
   const apiKey = config.apiKey || "";
 
   return {
-    async listSessions(includeArchived = false): Promise<SessionSummary[]> {
-      const params = includeArchived ? "?include_archived=1" : "";
-      const response = await apiFetch(withBase(baseUrl, `/api/sessions${params}`), {
+    async listSessions(includeArchived = false, filter?: SessionListFilter): Promise<SessionSummary[]> {
+      const params = new URLSearchParams();
+      if (includeArchived) params.set("include_archived", "1");
+      for (const project of filter?.project ?? []) params.append("project", project);
+      if (filter?.pinned !== undefined) params.set("pinned", filter.pinned ? "true" : "false");
+      const query = params.toString();
+      const response = await apiFetch(withBase(baseUrl, `/api/sessions${query ? `?${query}` : ""}`), {
         headers: headers(apiKey)
       });
       const payload = await handleJson<{ sessions: SessionSummary[] }>(response);
@@ -93,33 +104,6 @@ export function createRealClient(config: ApiConfig): ApiClient {
       await handleJson(response);
     },
 
-    async fetchEvents(
-      sessionId: string,
-      after?: string
-    ): Promise<{
-      events: EventRecord[];
-      running: boolean;
-      status?: string;
-      done_reason?: string;
-      terminated?: boolean;
-      recoverable?: boolean;
-    }> {
-      const params = after ? `?after=${encodeURIComponent(after)}` : "";
-      const response = await apiFetch(
-        withBase(baseUrl, `/api/sessions/${sessionId}/events${params}`),
-        { headers: headers(apiKey) }
-      );
-      const payload = await handleJson<{
-        events: EventRecord[];
-        running: boolean;
-        status?: string;
-        done_reason?: string;
-        terminated?: boolean;
-        recoverable?: boolean;
-      }>(response);
-      return payload;
-    },
-
     async fetchUsage(sessionId: string): Promise<SessionUsage> {
       const response = await apiFetch(
         withBase(baseUrl, `/api/sessions/${sessionId}/usage`),
@@ -132,6 +116,21 @@ export function createRealClient(config: ApiConfig): ApiClient {
       const response = await apiFetch(
         withBase(baseUrl, `/api/sessions/${sessionId}/spec`),
         { headers: headers(apiKey) }
+      );
+      return handleJson<SessionSpecResponse>(response);
+    },
+
+    async rebindSessionProject(
+      sessionId: string,
+      project: string
+    ): Promise<SessionSpecResponse> {
+      const response = await apiFetch(
+        withBase(baseUrl, `/api/sessions/${sessionId}/project`),
+        {
+          method: "PUT",
+          headers: headers(apiKey),
+          body: JSON.stringify({ project })
+        }
       );
       return handleJson<SessionSpecResponse>(response);
     },
@@ -150,6 +149,22 @@ export function createRealClient(config: ApiConfig): ApiClient {
         { method: "DELETE", headers: headers(apiKey) }
       );
       await handleJson(response);
+    },
+
+    async pinSession(sessionId: string) {
+      const response = await apiFetch(
+        withBase(baseUrl, `/api/sessions/${sessionId}/pin`),
+        { method: "POST", headers: headers(apiKey) }
+      );
+      return handleJson<{ session_id: string; pinned: boolean; pinned_at: string | null }>(response);
+    },
+
+    async unpinSession(sessionId: string) {
+      const response = await apiFetch(
+        withBase(baseUrl, `/api/sessions/${sessionId}/pin`),
+        { method: "DELETE", headers: headers(apiKey) }
+      );
+      return handleJson<{ session_id: string; pinned: boolean; pinned_at: string | null }>(response);
     },
 
     async updateSessionTitle(
@@ -266,7 +281,7 @@ export function createRealClient(config: ApiConfig): ApiClient {
     async answerQuestion(
       sessionId: string,
       callId: string,
-      body: { call_token: string; answers: QuestionAnswerItemPayload[] }
+      body: { call_token: string; answers: QuestionAnswerItemPayload[]; notes?: string }
     ): Promise<AnswerQuestionResult> {
       const response = await apiFetch(
         withBase(baseUrl, `/api/sessions/${sessionId}/questions/${callId}/answer`),
@@ -276,7 +291,19 @@ export function createRealClient(config: ApiConfig): ApiClient {
           body: JSON.stringify(body)
         }
       );
-      if (response.ok) return { ok: true };
+      if (response.ok) {
+        // `delivery` tells the card whether the waiting run got the answer or
+        // it landed as a new message. A body the server did not send (or that
+        // does not parse) must not turn an accepted answer into an error.
+        const payload = (await response.json().catch(() => null)) as
+          | { delivery?: unknown }
+          | null;
+        const delivery = payload?.delivery;
+        return {
+          ok: true,
+          delivery: delivery === "run" || delivery === "message" ? delivery : undefined
+        };
+      }
       // Classify the status so the card settles silently when the question was
       // resolved elsewhere (404/409/410) vs. surfacing a correctable message.
       const kind =
@@ -354,35 +381,6 @@ export function createRealClient(config: ApiConfig): ApiClient {
       });
       const payload = await handleJson<{ tools: ToolSummary[] }>(response);
       return payload.tools;
-    },
-
-    streamEvents(
-      sessionId: string,
-      onEvent: (event: EventRecord) => void,
-      onEnd: () => void
-    ): () => void {
-      const params = new URLSearchParams();
-      if (apiKey) params.set("api_key", apiKey);
-      const url = withBase(baseUrl, `/api/sessions/${sessionId}/stream?${params}`);
-      const source = new EventSource(url);
-      source.onmessage = (e) => {
-        try {
-          const event = JSON.parse(e.data);
-          if (event.type === "stream_end") {
-            source.close();
-            onEnd();
-            return;
-          }
-          onEvent(event);
-        } catch {
-          // Ignore malformed frames
-        }
-      };
-      source.onerror = () => {
-        source.close();
-        onEnd();
-      };
-      return () => source.close();
     },
 
     async listModels(): Promise<ModelInfo> {
@@ -479,7 +477,7 @@ export function createRealClient(config: ApiConfig): ApiClient {
         headers: headers(apiKey)
       });
       const data = await handleJson<Partial<ConfigState>>(response);
-      return { config: data.config ?? {}, secrets: data.secrets ?? {} };
+      return { config: data.config ?? {}, secrets: data.secrets ?? {}, storage: data.storage };
     },
 
     async patchConfig(patch: Record<string, unknown>): Promise<ConfigState> {

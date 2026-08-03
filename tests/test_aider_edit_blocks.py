@@ -6,7 +6,8 @@ import textwrap
 
 import pytest
 from mewbo_core.classes import ActionStep
-from mewbo_core.errors import ToolInputError
+from mewbo_core.config import reset_config, set_config_override
+from mewbo_core.contracts.errors import ToolInputError
 from mewbo_tools.aider_bridge import (
     EditBlockApplyError,
     apply_search_replace_blocks,
@@ -16,6 +17,27 @@ from mewbo_tools.integration.aider_edit_blocks import (
     AiderEditBlockTool,
     _format_tool_input_error,
 )
+
+
+@pytest.fixture(autouse=True)
+def _unpinned_path_scope():
+    """Pin the path-scope axis OFF: these exercise SEARCH/REPLACE semantics.
+
+    What this module is about is block parsing, whitespace-tolerant matching,
+    ellipsis handling, the ``{"kind": "diff", ...}`` contract and the miss hint —
+    against an explicit caller-supplied ``root``, which every case here spells as
+    a bare ``tmp_path``. ``path_scope_to_active_project`` ships ON and refuses a
+    ``root`` argument that widens beyond the session's scope, so leaving it at
+    its default would fail all of these for a reason none of them is testing.
+    That axis has its own coverage in ``tests/test_path_guard_scope_parity.py``.
+
+    Resets afterwards: ``set_config_override`` is process-global and nothing in
+    ``conftest.py`` clears it, so an unreset override leaks into every later
+    module.
+    """
+    set_config_override({"agent": {"path_scope_to_active_project": False}})
+    yield
+    reset_config()
 
 
 def _block(path: str, search: str, replace: str) -> str:

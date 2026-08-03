@@ -514,8 +514,8 @@ def test_finish_activity_collapses_spinner_into_summary() -> None:
 def test_finish_activity_blocked_outcome_is_not_a_green_checkmark() -> None:
     """A ``"blocked"`` outcome renders its own glyph/tone, never ``✓ done``.
 
-    Regression for the false-success bug: the footer spinner used to settle
-    unconditionally into a green checkmark regardless of how the turn ended.
+    Settling the footer spinner unconditionally into a green checkmark reports
+    success regardless of how the turn ended.
     """
     registry = _make_registry()
 
@@ -569,7 +569,7 @@ def test_finish_activity_unmet_goal_renders_goal_not_met_label() -> None:
 
 def test_finish_activity_completed_outcome_keeps_green_done() -> None:
     """A clean ``"completed"`` outcome (and the ``None`` default) keep the
-    historical green ``✓ done`` line — no behaviour change for a normal turn.
+    green ``✓ done`` line that a normal turn renders.
     """
     registry = _make_registry()
 
@@ -660,6 +660,13 @@ def test_hub_drives_transcript_view_in_emission_order() -> None:
             self._tv.upsert_tool(card_id, item)
 
         def spawn(self, item: TranscriptItem) -> None:
+            self._tv.write_item(item)
+
+        def append_panel(self, item: TranscriptItem) -> None:
+            # Required even though no test here emits a panel: the hub GUARDS
+            # every sink call, so a missing method degrades to a swallowed
+            # AttributeError — a future panel test would silently see nothing
+            # rather than failing.
             self._tv.write_item(item)
 
         def set_status(self, label: str) -> None:

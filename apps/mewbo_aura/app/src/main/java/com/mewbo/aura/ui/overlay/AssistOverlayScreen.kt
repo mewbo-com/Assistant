@@ -103,7 +103,7 @@ import kotlinx.coroutines.launch
  * calling into `AssistTurnMachine.startListening`, since only it holds a `Context`; this screen
  * doesn't know or care which way that came out - it's also what re-arms the post-turn bare mic
  * glyph. [onCancelListening] is the LISTENING state's stop-tile tap. [onPullUpToApp] is the
- * composer pill's swipe-up gesture (user directive 2026-07-04): a soft handoff into the full app
+ * composer pill's swipe-up gesture: a soft handoff into the full app
  * carrying the pill's current draft text - the host (`AuraSession` -> `AssistTurnMachine.pullUpToApp`)
  * owns the session-vs-new-chat routing decision; this screen only reports the gesture and the draft
  * it happened over. */
@@ -120,9 +120,9 @@ data class AssistOverlayCallbacks(
 )
 
 /**
- * The assist invocation overlay (v4:, text-first + handoff; restores a
- * response surface for the Streaming state - a floating [ResponseCard] recovered from the pre-v4
- * `ResponseSheet` recipe [git show f7e505a], NOT the old full-bleed 0.75-height sheet). Layers
+ * The assist invocation overlay: text-first with a handoff to the app, rendering a floating
+ * [ResponseCard] for the Streaming state, capped at ~65% of the overlay's own height (never a
+ * full-bleed sheet). Layers
  * bottom to top: [OverlayScrim] (0-180ms fade) -> [AuroraEdgeGlow] (bottom-anchored bloom, ignites
  * 0-450ms at the orb's position) -> swipe-dismiss catcher (scoped above the card when one is
  * showing, so its own scroll doesn't fight a whole-screen drag) -> a bottom-anchored `Column`
@@ -161,9 +161,8 @@ fun AssistOverlayScreen(
         draft = TextFieldValue(error.retryText, selection = TextRange(error.retryText.length))
     }
 
-    // Review fix round 1 (Critical, carried over): the overlay's total height in px, captured once
-    // via layout - the swipe-dismiss threshold below needs the FULL screen height, and v5's card
-    // sizing needs it too (max ~65% of screen).
+    // The overlay's total height in px, captured once via layout - the swipe-dismiss threshold
+    // below needs the FULL screen height, and the card sizing needs it too (max ~65% of screen).
     var fullHeightPx by remember { mutableIntStateOf(0) }
 
     val density = LocalDensity.current
@@ -226,11 +225,11 @@ fun AssistOverlayScreen(
             state = edgeGlowState,
             colors = AuraColors.auroraOverlayLiveBloom,
             perimeterBloom = perimeterBloom,
-            // [R5 2026-07-11] the overlay's full multi-hue aurora + persistent edge-lit perimeter.
+            // The overlay's full multi-hue aurora + persistent edge-lit perimeter.
             hueDriftAmount = OVERLAY_AURORA_HUE_DRIFT,
             perimeterPresence = OVERLAY_PERIMETER_PRESENCE,
-            // [R4 2026-07-10] Issue D: shares the pill's own exit window (below) so the glow
-            // extinguishes WITH the pill, never as a ghost after it or a pop before it.
+            // Shares the pill's own exit window (below) so the glow extinguishes WITH the pill,
+            // never as a ghost after it or a pop before it.
             dismissFadeMs = OVERLAY_GLOW_DISMISS_MS,
         )
 
@@ -238,9 +237,10 @@ fun AssistOverlayScreen(
         // SWIPE, both -> onDismiss. The tap is caught HERE, not delegated to the gap layer above in
         // code (below in z): Compose hit-testing routes a pointer event only to the TOPMOST hit
         // sibling chain, so across this catcher's region the event reaches ONLY this Box — the gap
-        // layer never sees it (device-verified: a tap here previously died in the drag
-        // detector). Two pointerInputs on one node compose fine — the tap detector fires on a
-        // stationary press, the drag detector on movement past slop. Still scoped ABOVE the card's
+        // layer never sees it (device-verified: without its own tap detector, a tap here dies
+        // silently in the drag detector, which only fires past slop). Two pointerInputs on one node
+        // compose fine — the tap detector fires on a stationary press, the drag detector on
+        // movement past slop. Still scoped ABOVE the card's
         // reserved region while one shows (`1f - maxHeightFraction`): a whole-screen catcher
         // competes with the card's own ChatTranscript SCROLL (Critical — the DRAG needs
         // this scoping; don't reintroduce a whole-screen drag catcher). When no card shows it is
@@ -336,7 +336,7 @@ fun AssistOverlayScreen(
     }
 }
 
-/** [R4 2026-07-10] the ONE companion-affordance slot above the pill - contextual chips float
+/** The ONE companion-affordance slot above the pill - contextual chips float
  * here (today: the inline error card and the continue-last-session chip; nothing else - YAGNI).
  * Shared fade+rise entrance so slot content arrives as part of the overlay's choreography
  * instead of popping. */
@@ -446,19 +446,17 @@ private fun rememberEdgeGlowState(state: AssistUiState, reducedMotion: Boolean):
     return when {
         isIdle -> EdgeGlowState.Hidden
         igniting -> EdgeGlowState.Igniting(progress)
-        // v4: READY is the resting "shown, nothing typed yet" state - reuses the same ambient
-        // "edge alive" breathe (0 rms) STREAMING used to, since nothing is actually listening.
+        // READY is the resting "shown, nothing typed yet" state - reuses the same ambient
+        // "edge alive" breathe (0 rms) Listening uses, since nothing is actually listening yet.
         state is AssistUiState.Ready -> EdgeGlowState.Listening(0f)
         state is AssistUiState.Listening -> EdgeGlowState.Listening(state.rmsDb)
         state is AssistUiState.Sending -> EdgeGlowState.Thinking
-        // state-dependent reach, measured: ACTIVE GENERATION stays in the CONTRACTED Thinking
-        // profile (ref3: bloom hugs the pill, no corner reach) - the final device gate caught the
-        // first cut mapping it to Listening(0f), the WIDE ambient breathe, which inverted the
-        // listening-vs-generating relationship on screen. Settling to done now RESTS instead of
-        // hiding ([R4 2026-07-10] - supersedes the ref4 scrim-neutral/Hidden mapping): a low,
-        // static bottom pool signals "the assistant is still present" for as long as the overlay
-        // stays on screen, rather than going dark the instant the reply finishes. Error stays
-        // Hidden (§6.12 "failure is quiet" - unchanged below).
+        // ACTIVE GENERATION stays in the CONTRACTED Thinking profile (bloom hugs the pill, no
+        // corner reach) - mapping it to the WIDE ambient Listening breathe would invert the
+        // listening-vs-generating relationship on screen. Settling to done RESTS instead of
+        // hiding: a low, static bottom pool signals "the assistant is still present" for as long
+        // as the overlay stays on screen, rather than going dark the instant the reply finishes.
+        // Error stays Hidden (§6.12 "failure is quiet" - unchanged below).
         state is AssistUiState.Streaming && !state.done -> EdgeGlowState.Thinking
         state is AssistUiState.Streaming -> EdgeGlowState.Resting
         state is AssistUiState.Error -> EdgeGlowState.Hidden // §6.12: failure is quiet, no aurora treatment.
@@ -467,16 +465,14 @@ private fun rememberEdgeGlowState(state: AssistUiState, reducedMotion: Boolean):
     }
 }
 
-/** [R4 2026-07-10] Phase-1/2 bloom envelope: snaps to 1 the moment the overlay leaves Idle (the
- * bloom IS the invocation moment — its alpha rides [AuroraEdgeGlow]'s own visible ramp), holds
- * through the 450ms ignite, then exhales to 0 over [AuraMotion.bloomSettleMs] (FastOutSlowIn).
- * Reduced motion never raises it (belt); [AuroraEdgeGlow] forces 0 as well (suspenders). The Idle
- * reset is DELAYED by [OVERLAY_GLOW_DISMISS_MS] so a mid-bloom dismissal fades WITH the glow's own
- * hold-frame dismiss fade instead of snapping the perimeter to 0 a frame early. A rapid
- * re-invocation restarts this effect and cancels that pending reset harmlessly — `wasIdle` is
- * committed BEFORE the delay, so the ignition branch above still snaps the bloom back to 1 on the
- * next pass regardless. Per this file's per-invocation reset law (the same law the `draft`/pull-up
- * offset follow). */
+/** Bloom envelope: snaps to 1 the moment the overlay leaves Idle (its alpha rides
+ * [AuroraEdgeGlow]'s own visible ramp), holds through the 450ms ignite, then exhales to 0 over
+ * [AuraMotion.bloomSettleMs] (FastOutSlowIn). Reduced motion never raises it; [AuroraEdgeGlow]
+ * forces 0 too. The Idle reset is DELAYED by [OVERLAY_GLOW_DISMISS_MS] so a mid-bloom dismissal
+ * fades WITH the glow's own hold-frame dismiss fade instead of snapping the perimeter to 0 a frame
+ * early. A rapid re-invocation restarts this effect and cancels that pending reset harmlessly -
+ * `wasIdle` is committed BEFORE the delay, so the ignition branch above still snaps the bloom back
+ * to 1 on the next pass regardless. */
 @Composable
 private fun rememberPerimeterBloom(state: AssistUiState, reducedMotion: Boolean): State<Float> {
     val bloom = remember { Animatable(0f) }
@@ -548,8 +544,7 @@ private fun ResponseCard(
         // onRetry/onNotice/onReadAloudToggle/speakingKey: the overlay has no toast host or
         // per-message TTS wiring - it has a conversation-level speaker badge instead (below), and a
         // client-side AssistUiState.Error never reaches this card at all (its own top-level inline
-        // ErrorCard handles that, see AssistOverlayScreen) - documented gap, carried over from the
-        // pre-v4 ResponseSheet's identical rationale.
+        // ErrorCard handles that, see AssistOverlayScreen) - a documented gap, not an unwired one.
         // sessionEnded = false is correct BY CONSTRUCTION, not an unwired gap: this card only
         // ever renders `beginTurn`'s FIRST turn, which always opens a BRAND-NEW session
         // (`sessionId ?: createSession()`, voice/AssistTurnMachine) - and a fresh session can never
@@ -771,16 +766,16 @@ private fun FloatingComposerBar(
         } else {
             // Dismiss: reverse at dismissSpeedMultiplier - a spring has no "duration" to divide, so
             // the exit uses a tween at the scaled window instead, mirroring the scrim's own exit.
-            // [R4 2026-07-10] Same OVERLAY_GLOW_DISMISS_MS the glow's own dismissFadeMs reads
-            // (above) - one constant, not two parallel formulas, so the glow can't drift out of
-            // sync with the pill it's meant to extinguish alongside.
+            // Same OVERLAY_GLOW_DISMISS_MS the glow's own dismissFadeMs reads (above) - one
+            // constant, not two parallel formulas, so the glow can't drift out of sync with the
+            // pill it's meant to extinguish alongside.
             launch { entranceOffsetDp.animateTo(COMPOSER_ENTRANCE_SLIDE_DP, tween(OVERLAY_GLOW_DISMISS_MS)) }
             launch { entranceAlpha.animateTo(0f, tween(OVERLAY_GLOW_DISMISS_MS)) }
         }
     }
 
     // Pull-up (swipe-up) on the composer pill softly hands the overlay into the full app (user
-    // directive 2026-07-04). The pill drag-FOLLOWS the finger upward; releasing past
+    // directive). The pill drag-FOLLOWS the finger upward; releasing past
     // PILL_PULL_UP_THRESHOLD_DP commits (the machine fires the standard `settle` release haptic and
     // routes into the app - session-vs-new-chat decided host-side), below it springs back via the
     // shared AuraMotion.composerMorphSpring. The offset MUST reset on Idle: this composition survives
@@ -877,16 +872,16 @@ private fun FloatingComposerBar(
     )
 }
 
-/** Dismiss button - everything that isn't the card/composer/orb/error card/chip. The listening
- * partial-transcript caption that used to render here was DELETED (user bug #5):
- * the composer pill's own `DictationCenterContent` (via `ComposerState.Dictation.partialText`) is
- * the sole live-transcription surface now - a second, competing mid-screen caption was the bug, not
- * a feature. v4 drops the old idle hint too (the composer's own "Ask Mewbo" placeholder already
- * covers it, and true [AssistUiState.Idle] is never actually on screen - see its own KDoc). */
-/** [R4 2026-07-10] Non-visual state channel: a zero-sized polite live region — TalkBack announces
- * each state-KIND change (rms/delta ticks produce the identical string, so no re-announce spam).
+/** Dismiss button - everything that isn't the card/composer/orb/error card/chip. There is
+ * deliberately no mid-screen listening caption: the composer pill's own `DictationCenterContent`
+ * (via `ComposerState.Dictation.partialText`) is the sole live-transcription surface, since a
+ * second, competing caption would be a redundant surface, not a feature. There is likewise no
+ * separate idle hint - the composer's own "Ask Mewbo" placeholder already covers it, and true
+ * [AssistUiState.Idle] is never actually on screen - see its own KDoc. */
+/** Non-visual state channel: a zero-sized polite live region — TalkBack announces each
+ * state-KIND change (rms/delta ticks produce the identical string, so no re-announce spam).
  * Dismissal is deliberately unannounced: the window teardown races TalkBack; focus returning to
- * the host app is the dismissal signal (physical-Pixel verify item). */
+ * the host app is the dismissal signal. */
 @Composable
 private fun OverlayStateAnnouncer(state: AssistUiState, modifier: Modifier = Modifier) {
     val announcement = when (state) {
@@ -915,11 +910,9 @@ private fun OverlayChrome(state: AssistUiState, onDismiss: () -> Unit) {
             onClick = onDismiss,
             modifier = Modifier
                 .align(Alignment.TopStart)
-                // [R4 2026-07-10] Issue D: the dismiss glyph was the ONLY floating element at the
-                // top of the overlay with no container - it read as a rendering artifact (and was
-                // literally invisible in the preview host: with no explicit tint it inherited
-                // LocalContentColor = Color.Black over the dark scrim). Same surfaceIconScrim disc
-                // the chat top bar already uses for icons over content.
+                // Without this the icon inherits LocalContentColor (Color.Black under
+                // MaterialTheme) over the dark scrim, rendering invisible. Same surfaceIconScrim
+                // disc the chat top bar uses for icons over content.
                 .background(color = AuraColors.surfaceIconScrim, shape = AuraShape.radiusPill),
         ) {
             Icon(imageVector = Icons.Filled.Close, contentDescription = "Dismiss", tint = AuraColors.iconPrimary)
@@ -957,11 +950,9 @@ private val NO_OP: () -> Unit = {}
 private const val SWIPE_DISMISS_HEIGHT_FRACTION = 0.15f
 private val OVERLAY_EDGE_PADDING = 16.dp
 
-// [R4 2026-07-10] 1dp = the smallest non-prunable semantics node for OverlayStateAnnouncer's polite
-// live region — a genuinely zero-sized node risks layout-pruning, dropping the TalkBack channel.
-// Deliberately NOT an AuraSpacing token: it's an accessibility implementation detail (keep the node
-// alive), not a design/visual value — same flagged-exception convention as the interaction-only
-// RESPONSE_CARD_HANDLE_TOUCH_HEIGHT/HANDLE_DRAG_EXPAND_THRESHOLD_DP constants below.
+// 1dp = the smallest non-prunable semantics node for OverlayStateAnnouncer's polite live region -
+// a genuinely zero-sized node risks layout-pruning, dropping the TalkBack channel. Deliberately
+// NOT an AuraSpacing token: an accessibility implementation detail, not a design/visual value.
 private val ANNOUNCER_NODE_SIZE_DP = 1.dp
 private val COMPOSER_ENTRANCE_SLIDE_DP = 24f // §7.0: "slide up 24dp"
 
@@ -973,14 +964,14 @@ private val COMPOSER_ENTRANCE_SLIDE_DP = 24f // §7.0: "slide up 24dp"
 private val RESPONSE_CARD_HANDLE_TOUCH_HEIGHT = 32.dp
 private val HANDLE_DRAG_EXPAND_THRESHOLD_DP = 24.dp
 
-// Pull-up commit distance for the composer pill (user directive 2026-07-04). Deliberately larger
+// Pull-up commit distance for the composer pill. Deliberately larger
 // than the response card's 24dp handle threshold: the WHOLE pill translates here (not a dedicated
 // 32dp handle strip), so a more committed pull avoids accidental handoffs while scrolling/typing.
 // No AuraSpacing token yet - flagged for later tokenization (AuraSpacing additions are out of this
 // task's lane), same local-constant convention the two thresholds above already use.
 private val PILL_PULL_UP_THRESHOLD_DP = 48.dp
 
-// [R4 2026-07-10] Issue-D exit choreography: the glow's dismiss fade shares the pill's own exit
+// [R4] Issue-D exit choreography: the glow's dismiss fade shares the pill's own exit
 // window ((settle − start) / dismissSpeedMultiplier ≈ 169ms) so glow and pill extinguish
 // TOGETHER — the glow neither outlives the pill (ghost light) nor vanishes first (pop). Uses
 // AuroraEdgeGlow's hold-frame fade (never a uniform snap - §7.15). FloatingComposerBar's own exit
@@ -988,7 +979,7 @@ private val PILL_PULL_UP_THRESHOLD_DP = 48.dp
 private val OVERLAY_GLOW_DISMISS_MS =
     ((AuraMotion.barSlideSettleMs - AuraMotion.barSlideStartMs) / AuraMotion.dismissSpeedMultiplier).toInt()
 
-// [R5 2026-07-11] The overlay is the ONLY surface that lights up the full multi-hue aurora: it
+// [R5] The overlay is the ONLY surface that lights up the full multi-hue aurora: it
 // drives the hue-drift field (A blue -> B violet -> C ember) and the persistent edge-lit perimeter
 // floor at full strength. Chat keeps both at 0 (AuroraEdgeGlow's defaults → the legacy bottom-only,
 // single-hue byte-path). Caller-side design knobs, not measured tokens (ui/aurora/CLAUDE.md

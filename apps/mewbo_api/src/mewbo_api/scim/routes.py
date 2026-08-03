@@ -473,7 +473,7 @@ class ScimRoutesController:
         the team (a SCIM member list carries no roles).
 
         Removals deliberately do NOT go through :meth:`_resolve_members`. That
-        filter skips ids the user store no longer knows, which is right for an
+        filter skips ids the user store cannot resolve, which is right for an
         add — but applying it to a removal would REFUSE to detach a deleted
         user, leaving exactly the stranded edge the removal was sent to clear.
         ``remove_member`` is already a no-op for a member who is not there.
@@ -494,12 +494,12 @@ class ScimRoutesController:
         return tuple(ScimGroupMember(value=user_id) for user_id in user_ids)
 
     def _group_members(self, team_id: str) -> tuple[ScimGroupMember, ...]:
-        """The wire roster for one team: durable edges, minus what no longer resolves.
+        """The wire roster for one team: durable edges, minus what does not resolve.
 
         This is the read half of the store's deliberate non-cascade — deleting
         a user leaves its edges behind, and resolving each ``user_id`` here is
         what keeps a stranded edge out of the response instead of surfacing a
-        member the deployment no longer has.
+        member the deployment does not have.
         """
         members: list[ScimGroupMember] = []
         for edge in self.team_store.list_members(team_id):

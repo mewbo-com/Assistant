@@ -1,6 +1,6 @@
 """Tests for transcript compaction utilities."""
 
-from mewbo_core.compaction import micro_compact_events
+from mewbo_core.session.compaction import micro_compact_events
 
 
 def test_micro_compact_events_truncates_large_results():
@@ -12,9 +12,11 @@ def test_micro_compact_events_truncates_large_results():
     ]
     compacted = micro_compact_events(events)
     assert len(compacted) == 2
-    # Tool result truncated to ~2000 chars + "[truncated]"
+    # Tool result truncated to ~4000 chars + a sized "[truncated]" marker
     tool_result = compacted[0]["payload"]["result"]
-    assert len(tool_result) < 2100
+    assert len(tool_result) < 4100
+    # The marker states what it dropped — a mute one reads as a complete result.
+    assert "1000 of 5000 characters omitted" in tool_result
     assert tool_result.endswith("[truncated]")
     # Non-tool events unchanged
     assert compacted[1] == events[1]

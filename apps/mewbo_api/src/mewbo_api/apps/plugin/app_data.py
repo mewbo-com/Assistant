@@ -3,7 +3,7 @@
 
 The maintainer session (tagged ``app:<app_id>``) is re-woken by a pipeline
 trigger to ingest / transform data; ``app_data`` is how it writes and reads its
-app's collections. It is the ONLY agent-side ingress to ``app_data`` (spec §2.5),
+app's collections. It is the ONLY agent-side ingress to ``app_data``,
 so it owns three guarantees the store below it cannot:
 
 1. **Scope.** A call may only touch an app whose ``maintainer_session_id`` is THIS
@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import jsonschema
 from mewbo_core.common import MockSpeaker, get_logger, pydantic_to_openai_tool
-from mewbo_core.session_tools import DEFAULT_SESSION_TOOL_MODES
+from mewbo_core.tooling.session_tools import DEFAULT_SESSION_TOOL_MODES
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from mewbo_api.apps.plugin.runtime import (
@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mewbo_core.classes import ActionStep
-    from mewbo_core.types import Event
+    from mewbo_core.contracts.types import Event
 
     from mewbo_api.apps.models import AppSpec, CollectionSpec
 
@@ -59,6 +59,16 @@ APP_DATA_TOOL_ID = "app_data"
 # Bound a single query so a runaway `limit` can't pull the whole collection into
 # the model's context.
 _MAX_QUERY_LIMIT = 1000
+
+# The tool's OWN ceiling on a serialized `query` result — strictly below the
+# loop's generic per-session-tool cap (`DEFAULT_SESSION_TOOL_MAX_RESULT_CHARS`,
+# 200_000) so the loop's undifferentiated `content_str[:max_chars]` cut can
+# never fire on this path and slice a document in half. The headroom (20_000
+# chars) is not a real reservation against that cap — it exists so this tool's
+# OWN envelope math is the one deciding what gets cut, by whole documents, with
+# the drop reported honestly instead of an amputated Python repr the loop
+# hands back unparseable.
+_MAX_QUERY_RESULT_CHARS = 180_000
 
 
 # ------------------------------------------------------------------
@@ -74,6 +84,20 @@ class AppDataArgs(BaseModel):
     documents back (optional `filter`, `limit`). `operation="delete"` removes one
     document by `key`. You may only touch the app you maintain. Set `pipeline` on
     a write so the run's provenance ledger counts it.
+
+    A `query` result carries TWO independent bounds and reports each honestly
+    rather than letting one masquerade as the other. `limit` bounds which
+    documents get FETCHED — `more_available` on the result says whether the
+    collection held more matches than `limit` let through, so `count: 1000`
+    against `limit: 1000` never reads as "that's everything" the way it used
+    to. Separately, a character ceiling bounds whether the documents already
+    fetched FIT in the response — when they don't, whole documents are dropped
+    from the tail (never cut mid-record), reported via
+    `output_truncated`/`documents_omitted`. `count` is always how many
+    documents actually came back. Only `more_available is False AND
+    output_truncated is False` means you have the complete matching set; plan
+    pagination (a narrower `filter`, or a follow-up `query` past what you
+    already have) off either flag, never off `limit` alone.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -101,7 +125,14 @@ class AppDataArgs(BaseModel):
         default=100,
         ge=1,
         le=_MAX_QUERY_LIMIT,
-        description="`query` only: max documents to return (1-1000).",
+        description=(
+            "`query` only: max documents to return (1-1000). Two things can leave "
+            "you short of that: the collection may hold more matches than `limit` "
+            "(see `more_available` on the result), and the response is additionally "
+            "capped by total serialized size (see `output_truncated`/"
+            "`documents_omitted`). Narrow `filter` rather than assuming `limit` "
+            "alone bounds what you have."
+        ),
     )
     sort: str | None = Field(
         default=None,
@@ -142,7 +173,7 @@ APP_DATA_SCHEMA: dict[str, object] = pydantic_to_openai_tool(AppDataArgs, name=A
 class AppDataTool:
     """Handles ``app_data`` — scoped upsert/query/delete over one app's collections.
 
-    Satisfies the :class:`~mewbo_core.session_tools.SessionTool` Protocol; the
+    Satisfies the :class:`~mewbo_core.tooling.session_tools.SessionTool` Protocol; the
     three store collaborators resolve from workstream A's process-wide store
     factories (``get_app_store`` / ``get_app_data_store`` / ``get_pipeline_run_store``)
     when not passed explicitly (the plugin-manifest build path). A test injects
@@ -152,6 +183,10 @@ class AppDataTool:
     tool_id: str = APP_DATA_TOOL_ID
     schema: dict[str, object] = APP_DATA_SCHEMA
     modes: frozenset[str] = DEFAULT_SESSION_TOOL_MODES
+    # The SessionTool declaration law (tooling/CLAUDE.md): declared here so the
+    # loop's cap and _query's own bound agree — `_query` never produces a
+    # payload past this, so the loop's generic cut is structurally unreachable.
+    max_result_chars: int = _MAX_QUERY_RESULT_CHARS
 
     def __init__(
         self,
@@ -262,18 +297,102 @@ class AppDataTool:
         )
 
     def _query(self, args: AppDataArgs, data_store: AppDataStore) -> MockSpeaker:
-        """Read documents back — key/doc/updated_at per row (updated_at as ISO)."""
+        """Read documents back — key/doc/updated_at per row (updated_at as ISO).
+
+        Two independent bounds, and they fail differently. ``limit`` bounds
+        WHICH documents get fetched from the store — this method asks for
+        ``limit + 1`` (mirroring ``AppsRoutesController.read_data``'s own
+        ``limit + 1`` probe) purely to learn whether the store held more
+        matching documents than ``limit`` allowed through, without widening
+        what a caller may ask for (``AppDataArgs.limit`` still REFUSES
+        anything over :data:`_MAX_QUERY_LIMIT` at the boundary). That answer
+        is ``more_available``. Separately, the char ceiling
+        (:data:`_MAX_QUERY_RESULT_CHARS`, strictly under the loop's generic
+        per-tool cap) bounds whether the documents THIS call already fetched
+        (up to ``limit`` of them) fit in the serialized payload — a large one
+        is trimmed by WHOLE documents dropped from the tail, never cut
+        mid-record the way the loop's undifferentiated character slice would,
+        and that drop is reported via ``output_truncated``/
+        ``documents_omitted``. A caller reading ``more_available=False`` and
+        ``output_truncated=False`` together has the true, complete matching
+        set; either flag alone means more exists somewhere. ``count`` stays
+        ``len(documents)`` throughout — what actually came back.
+        """
         docs = data_store.query(
-            args.app_id, args.collection, filter=args.filter, limit=args.limit, sort=args.sort
+            args.app_id, args.collection, filter=args.filter, limit=args.limit + 1,
+            sort=args.sort,
         )
+        more_available = len(docs) > args.limit
+        docs = docs[: args.limit]
         rows = [
             {"key": d.key, "doc": d.doc, "updated_at": d.updated_at.isoformat()}
             for d in docs
         ]
+        kept, omitted = self._fit_query_rows(args.app_id, args.collection, rows)
         return self._ok(
-            {"operation": "query", "app_id": args.app_id, "collection": args.collection,
-             "count": len(rows), "documents": rows}
+            {
+                "operation": "query",
+                "app_id": args.app_id,
+                "collection": args.collection,
+                "count": len(kept),
+                "documents": kept,
+                "more_available": more_available,
+                "output_truncated": omitted > 0,
+                "documents_omitted": omitted,
+                "result_char_limit": _MAX_QUERY_RESULT_CHARS,
+            }
         )
+
+    @staticmethod
+    def _fit_query_rows(
+        app_id: str, collection: str, rows: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Greedily keep whole rows from the head within :data:`_MAX_QUERY_RESULT_CHARS`.
+
+        Exact, not estimated, and O(n) over the row count — never a re-serialize
+        of the whole growing payload per row (that would be O(n^2) over a
+        200KB-class payload). ``str(dict)``'s ``documents`` value serializes as
+        ``"[" + ", ".join(repr(d) for d in rows) + "]"``, so each row's
+        contribution to the total length is exactly its own ``len(str(row))``
+        plus a 2-char ``", "`` separator for every row after the first — the
+        envelope (everything except ``documents``) is measured ONCE, with
+        ``documents: []``.
+
+        The envelope measurement uses the WORST-CASE width for the fields whose
+        final values depend on how many rows get kept: ``count`` and
+        ``documents_omitted`` are measured at the pre-drop row total (the final
+        values can only have equal or fewer digits, since both are <= that
+        total), and ``output_truncated``/``more_available`` are measured as
+        ``False`` (their longer spelling — this method doesn't know the real
+        ``more_available`` value and doesn't need to, since ``False`` upper-bounds
+        either outcome). That reservation is therefore always >= the real envelope
+        length, so the actual serialized result — envelope plus kept rows —
+        never exceeds the cap.
+        """
+        total = len(rows)
+        worst_case_envelope = {
+            "operation": "query",
+            "app_id": app_id,
+            "collection": collection,
+            "count": total,
+            "documents": [],
+            "more_available": False,
+            "output_truncated": False,
+            "documents_omitted": total,
+            "result_char_limit": _MAX_QUERY_RESULT_CHARS,
+        }
+        budget = _MAX_QUERY_RESULT_CHARS - len(str(worst_case_envelope))
+
+        kept: list[dict[str, Any]] = []
+        used = 0
+        for row in rows:
+            row_len = len(str(row))
+            added = row_len if not kept else row_len + 2  # ", " separator
+            if used + added > budget:
+                break
+            used += added
+            kept.append(row)
+        return kept, total - len(kept)
 
     def _delete(self, args: AppDataArgs, data_store: AppDataStore) -> MockSpeaker:
         """Remove one document by key; report whether it existed."""

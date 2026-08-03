@@ -563,7 +563,7 @@ class TestScheduleTriggerFactory:
 
     def test_built_tool_arms_through_the_real_store(self, store):
         """The factory's build closes over the pushed store+policy end to end."""
-        from mewbo_core.session_tools import SessionToolRegistry
+        from mewbo_core.tooling.session_tools import SessionToolRegistry
         from mewbo_core.triggers.session_tool import (
             register_schedule_trigger_provider,
             schedule_trigger_factory,
@@ -596,11 +596,10 @@ class TestScheduleTriggerFactory:
     def test_spawned_child_scope_gates_delivery(self, store):
         """A STRICT child that names it binds it; a differently-scoped one does not.
 
-        The load-bearing regression: before, NO spawned child could ever
-        hold schedule_trigger. Under a STRICT AgentDef scope (the app-builder
-        shape) the tool must be NAMED to appear.
+        Under a STRICT AgentDef scope (the app-builder shape) the tool must be
+        NAMED to appear — but a spawned child must be able to hold it at all.
         """
-        from mewbo_core.session_tools import SessionToolRegistry
+        from mewbo_core.tooling.session_tools import SessionToolRegistry
         from mewbo_core.triggers.session_tool import (
             register_schedule_trigger_provider,
             schedule_trigger_factory,
@@ -629,10 +628,10 @@ class TestScheduleTriggerFactory:
     def test_permissive_fe_root_still_arms(self, store):
         """A permissive FE root (mcp_tools, no schedule_trigger) still holds it.
 
-        df875 regression guard: the Aura alarm flow arms a time trigger
-        on a permissive root whose ``context.mcp_tools`` never lists built-ins.
+        The Aura alarm flow arms a time trigger on a permissive root whose
+        ``context.mcp_tools`` never lists built-ins.
         """
-        from mewbo_core.session_tools import SessionToolRegistry
+        from mewbo_core.tooling.session_tools import SessionToolRegistry
         from mewbo_core.triggers.session_tool import (
             register_schedule_trigger_provider,
             schedule_trigger_factory,

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Tests for the IDE-style footer StatusLine widget + its installer.
 
-Covers (1) the regression fix — composer and Footer no longer share the bottom
-dock — and (2) the new status line facets (host · model · cwd · branch/stash ·
-session tokens, input/output faceted). Mounts widgets in a minimal host App and
+Covers (1) composer and Footer NOT sharing the bottom dock, and (2) the status
+line facets (host · model · cwd · branch/stash · session tokens, input/output
+faceted). Mounts widgets in a minimal host App and
 drives them via the Pilot API (mirrors test_tui_status_bar.py).
 """
 

@@ -19,7 +19,21 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from mewbo_core.context import (
+from mewbo_core.llm.llm_resilience import (
+    CircuitBreaker,
+    DoomLoopGuard,
+    LlmResilienceExhausted,
+    RetryAction,
+    RetryBudget,
+    RetryStrategy,
+    repair_tool_pairing,
+)
+from mewbo_core.loop.session_runtime import (
+    RunRegistry,
+    SessionRuntime,
+    parse_core_command,
+)
+from mewbo_core.session.context import (
     ContextBuilder,
     ContextSnapshot,
     _iter_attachments,
@@ -29,31 +43,15 @@ from mewbo_core.context import (
     event_payload_text,
     render_event_lines,
 )
-from mewbo_core.llm_resilience import (
-    CircuitBreaker,
-    DoomLoopGuard,
-    LlmResilienceExhausted,
-    RetryAction,
-    RetryBudget,
-    RetryStrategy,
-    repair_tool_pairing,
-)
-from mewbo_core.session_runtime import (
-    RunRegistry,
-    SessionRuntime,
-    _filter_events,
-    _parse_iso,
-    parse_core_command,
-)
-from mewbo_core.session_store import SessionStore
-from mewbo_core.skills import (
+from mewbo_core.session.session_store import SessionStore
+from mewbo_core.tooling.skills import (
     SkillRegistry,
     SkillSpec,
     _parse_skill_file,
     _preprocess_shell,
     activate_skill,
 )
-from mewbo_core.tool_registry import (
+from mewbo_core.tooling.tool_registry import (
     TOOL_SEARCH_TOOL_ID,
     ToolRegistry,
     ToolSpec,
@@ -188,7 +186,7 @@ def test_preprocess_shell_timeout(monkeypatch) -> None:
     def _timeout(*args, **kwargs):
         raise sp_mod.TimeoutExpired(["sleep"], 30)
 
-    monkeypatch.setattr("mewbo_core.skills.subprocess.run", _timeout)
+    monkeypatch.setattr("mewbo_core.tooling.skills.subprocess.run", _timeout)
     result = _preprocess_shell("!`sleep 1000`")
     assert "timed out" in result
 
@@ -199,7 +197,7 @@ def test_preprocess_shell_oserror(monkeypatch) -> None:
     def _oserror(*args, **kwargs):
         raise OSError("no such file")
 
-    monkeypatch.setattr("mewbo_core.skills.subprocess.run", _oserror)
+    monkeypatch.setattr("mewbo_core.tooling.skills.subprocess.run", _oserror)
     result = _preprocess_shell("!`bad-command`")
     assert "[ERROR:" in result
 
@@ -235,7 +233,7 @@ def test_activate_skill_substitutes_positional_args() -> None:
 
 def test_activate_skill_no_tool_scoping_when_no_allowed_tools() -> None:
     """When skill has no allowed_tools, scoped_specs equals the input list."""
-    from mewbo_core.tool_registry import ToolSpec as TSpec
+    from mewbo_core.tooling.tool_registry import ToolSpec as TSpec
 
     spec = _make_spec(allowed_tools=None)
     tool = MagicMock(spec=TSpec)
@@ -246,7 +244,7 @@ def test_activate_skill_no_tool_scoping_when_no_allowed_tools() -> None:
 
 def test_activate_skill_scopes_tools_with_allowlist() -> None:
     """When skill has allowed_tools, only matching specs are returned."""
-    from mewbo_core.tool_registry import ToolSpec as TSpec
+    from mewbo_core.tooling.tool_registry import ToolSpec as TSpec
 
     t1 = MagicMock(spec=TSpec)
     t1.tool_id = "allowed-tool"
@@ -356,7 +354,7 @@ def test_skill_registry_maybe_reload_no_change_returns_false(tmp_path: Path) -> 
 def test_skill_registry_load_plugin_components(tmp_path: Path) -> None:
     """load_plugin_components wires skill_dirs and command_files from PluginFanOut."""
 
-    from mewbo_core.plugins import PluginComponents, PluginFanOut, PluginManifest
+    from mewbo_core.tooling.plugins import PluginComponents, PluginFanOut, PluginManifest
 
     skill_dir = tmp_path / "skills" / "helper"
     skill_dir.mkdir(parents=True)
@@ -389,56 +387,11 @@ def test_skill_registry_load_plugin_components(tmp_path: Path) -> None:
 # session_runtime.py
 # ---------------------------------------------------------------------------
 
-# _parse_iso (lines 63-67)
-
-
-def test_parse_iso_none_input() -> None:
-    assert _parse_iso(None) is None
-
-
-def test_parse_iso_empty_string() -> None:
-    assert _parse_iso("") is None
-
-
-def test_parse_iso_invalid_format() -> None:
-    assert _parse_iso("not-a-date") is None
-
-
-def test_parse_iso_valid() -> None:
-
-    dt = _parse_iso("2024-01-01T00:00:00+00:00")
-    assert dt is not None
-    assert dt.year == 2024
-
-
 # parse_core_command (lines 70-75)
 
 
 def test_parse_core_command_empty_string() -> None:
     assert parse_core_command("") is None
-
-
-# _filter_events (lines 167-178)
-
-
-def test_filter_events_no_cutoff() -> None:
-    events = [{"type": "user", "ts": "2024-01-01T00:00:00+00:00"}]
-    assert _filter_events(events, None) == events
-
-
-def test_filter_events_invalid_cutoff() -> None:
-    events = [{"type": "user", "ts": "2024-01-01T00:00:00+00:00"}]
-    assert _filter_events(events, "not-a-date") == events
-
-
-def test_filter_events_skips_events_with_no_ts() -> None:
-    events = [
-        {"type": "user"},  # No ts field
-        {"type": "user", "ts": "2024-01-02T00:00:00+00:00"},
-    ]
-    result = _filter_events(events, "2024-01-01T00:00:00+00:00")
-    assert len(result) == 1
-    assert result[0]["ts"] == "2024-01-02T00:00:00+00:00"
 
 
 # RunRegistry (lines 109, 157-165)
@@ -1588,7 +1541,7 @@ def test_load_attachment_images_returns_empty_for_non_vision_model(tmp_path: Pat
 
 
 def test_context_builder_build_returns_snapshot(tmp_path: Path) -> None:
-    from mewbo_core.session_store import SessionStore
+    from mewbo_core.session.session_store import SessionStore
 
     store = SessionStore(root_dir=str(tmp_path))
     sid = store.create_session()
@@ -1604,7 +1557,7 @@ def test_context_builder_build_returns_snapshot(tmp_path: Path) -> None:
 def test_context_builder_build_anchors_first_user_event(tmp_path: Path) -> None:
     """The first user event is anchored in recent_events even when it falls outside the window."""
     from mewbo_core.config import reset_config, set_config_override
-    from mewbo_core.session_store import SessionStore
+    from mewbo_core.session.session_store import SessionStore
 
     set_config_override({"context": {"recent_event_limit": 1, "selection_enabled": False}})
     try:

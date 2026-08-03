@@ -9,23 +9,28 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
-from mewbo_core.session_store import SessionStoreBase, create_session_store
+from mewbo_core.session.session_provenance import SessionTag
+from mewbo_core.session.session_store import SessionStoreBase, create_session_store
+
+from mewbo_graph.wiki.types import IndexingJob
 
 if TYPE_CHECKING:
     from mewbo_graph.wiki.resume import ResumePlan
     from mewbo_graph.wiki.store import WikiStoreBase
+    from mewbo_graph.wiki.types import ScopePreview
 
 
 # Process-wide core session store, lazily built ONCE — mirrors the wiki store's
 # ``get_wiki_store()`` singleton. Under the Mongo driver, constructing a store
 # opens a ``MongoClient`` + pings + ensures indexes, so building it per
-# retrieval-tool call (the old ``create_session_store()``-on-every-call path)
-# leaked a connection pool and cost 5–100ms each — straight against the
-# sub-1.5s streaming budget. Caching it here makes ``resolve_workspace_slug`` a
+# retrieval-tool call — a ``create_session_store()`` per call — leaks a
+# connection pool and costs 5–100ms each, straight against the sub-1.5s
+# streaming budget. Caching it here makes ``resolve_workspace_slug`` a
 # pure transcript read with zero per-call construction.
 _SESSION_STORE: SessionStoreBase | None = None
 
@@ -85,6 +90,66 @@ class WikiJobCtx:
     # resolved a sha (the artifacts are then written commit-less).
     commit_sha: str | None = None
 
+    @property
+    def job_bound(self) -> bool:
+        """True when this ctx names a real indexing JOB, not just a project.
+
+        The one predicate separating the two shapes :func:`resolve_job_ctx`
+        returns. A job-bound ctx carries a job record, a checkout of its own and
+        a resume plan; a SLUG-bound one (a maintainer session, which edits an
+        already-indexed project on demand) carries the project and nothing else,
+        so ``job_id`` is empty.
+
+        Everything keyed on ``job_id`` — the phase/progress writers, the
+        submitted-page claim counter, the plan denominator, the job event log —
+        belongs to a job and must be skipped rather than written under an empty
+        id, which would file records nothing can ever read back. Ask this rather
+        than testing ``job_id`` directly, so the rule has one spelling.
+        """
+        return bool(self.job_id)
+
+    @classmethod
+    def for_maintainer(
+        cls, session_id: str, runtime: Any, store: WikiStoreBase
+    ) -> WikiJobCtx | None:
+        """Build the PROJECT-bound ctx for a maintainer session, else ``None``.
+
+        Two conditions, both required. The session must carry the maintainer TAG
+        (:meth:`SessionProject.maintainer_slug` — the authorization, and where
+        the slug comes from), and that slug must name a project row that really
+        exists. The row is what makes the binding real: a slug naming nothing
+        indexed resolves to ``None`` rather than a ctx whose reads return
+        nothing and whose writes land under a key no reader knows, so the tool
+        reports "no wiki here" — a state an agent can learn from in one call.
+
+        Collaborators arrive as ARGUMENTS rather than being reached for, the
+        same shape ``ResumePlan.build(store, job)`` has, so the precedence is
+        testable against fakes with no I/O.
+        """
+        slug = SessionProject.maintainer_slug(session_id, runtime)
+        if not slug:
+            return None
+        try:
+            project = store.get_project(slug)
+        except Exception:  # pragma: no cover — store unavailable
+            return None
+        if project is None:
+            return None
+        return cls(
+            job_id="",
+            slug=slug,
+            session_id=session_id,
+            # The most recent completed index's checkout — what the source tools
+            # resolve for themselves anyway — or a path that provably does not
+            # exist when none survives.
+            clone_dir=(
+                resolve_qa_clone_dir(slug, store) or _clone_dir_for(_NO_CHECKOUT_DIR)
+            ),
+            store=store,
+            resume_plan=None,
+            commit_sha=getattr(project, "commit_sha", None),
+        )
+
 
 @dataclass(frozen=True)
 class WikiQaCtx:
@@ -112,7 +177,7 @@ class SessionProject:
     anywhere a library below the app can read — the app derives one by shelling
     out to ``git remote``, which is an app-layer concern this package must not
     reach up into. So identity is recovered from the session's own two durable
-    signals instead, exactly as :class:`~mewbo_core.session_provenance.SessionOrigin`
+    signals instead, exactly as :class:`~mewbo_core.session.session_provenance.SessionOrigin`
     recovers origin: the transcript's context events and the session's tags.
 
     ``owner_repo`` comes from a ``vcs:<owner/repo>:<kind>:<n>`` pickup tag and is
@@ -139,6 +204,49 @@ class SessionProject:
             return get_session_store()
         except Exception:  # pragma: no cover — no session backend available
             return None
+
+    # The session type the wiki tag grammar gives a MAINTAINER session. Read
+    # through ``SessionTag.parse`` rather than matched as a prefix, so this
+    # package never re-spells a grammar core owns.
+    MAINTAINER_SESSION_TYPE = "wiki_maintain"
+
+    @classmethod
+    def maintainer_slug(cls, session_id: str, runtime: Any) -> str | None:
+        """The project a MAINTAINER session was minted for, or ``None``.
+
+        **The tag is the authorization; the slug is only the address — and both
+        live in the tag for exactly that reason.** A session's ``context`` is
+        writable by any caller (``backend.py``'s ``_build_context_payload``
+        merges a request's ``context`` verbatim, with no unknown-key refusal),
+        so a bare ``slug`` key proves nothing: a client could advertise the
+        ``wiki`` capability, name any project, and — once anything READ that key
+        — reach that project's page-write tools without ever having been given a
+        session for it. Only the api's maintainer route stamps this tag, and
+        only after validating the slug against an indexed project, so carrying
+        it is the proof. Taking the slug from the tag too closes the residual
+        half: a tag cannot be re-pointed by a later turn, where a context key
+        can, which would otherwise let a session authorized for one project be
+        re-addressed at another.
+
+        A session carrying a ``slug`` context value and no tag therefore
+        resolves NOTHING here, exactly as before this tier existed. The context
+        value is still written and still consumed — it is what binds
+        ``SessionSpec.slug`` — it is simply not an authorization.
+
+        Cost: ``O(1)`` — one tag read (a single indexed lookup on both drivers).
+        """
+        store = cls.session_store_of(runtime)
+        if store is None:
+            return None
+        try:
+            tags = store.tags_for_session(session_id)
+        except Exception:  # pragma: no cover — backend error
+            return None
+        for tag in tags:
+            parsed = SessionTag.parse(tag)
+            if parsed is not None and parsed.session_type == cls.MAINTAINER_SESSION_TYPE:
+                return parsed.ids.get("wiki_id") or None
+        return None
 
     @classmethod
     def for_session(cls, session_id: str, runtime: Any) -> SessionProject:
@@ -225,6 +333,13 @@ class SessionProject:
 
 _DEFAULT_CLONE_ROOT = "/tmp/mewbo/wiki/clones"
 
+# The ``clone_dir`` a SLUG-bound ctx reports when the project has no completed
+# index whose checkout survives on disk. A job id is a ``uuid4`` hex, so this
+# name can never collide with one, and nothing writes here — it exists so the
+# field stays a real ``Path`` (an empty one resolves to the process CWD) while
+# still failing every ``exists()`` guard a reader applies.
+_NO_CHECKOUT_DIR = "_no_checkout"
+
 
 def _clone_dir_for(job_id: str) -> Path:
     """Return the on-disk clone directory for a wiki indexing job.
@@ -238,13 +353,45 @@ def _clone_dir_for(job_id: str) -> Path:
 
 
 def resolve_job_ctx(session_id: str, runtime: Any) -> WikiJobCtx | None:
-    """Return the WikiJobCtx for *session_id*, or ``None`` if not a wiki indexing run."""
+    """Return the write-side wiki ctx for *session_id*, or ``None`` if it has none.
+
+    Two tiers, and **the job tier always wins**:
+
+    1. a session bound to an INDEXING JOB (``find_job_by_session``) — the full
+       ctx every phase tool needs: job id, that job's own checkout, its resume
+       plan and the commit it is indexing;
+    2. a session carrying the MAINTAINER TAG (:meth:`WikiJobCtx.for_maintainer`)
+       — opened against an already-indexed project on demand, with no job to
+       attach to and never will have one.
+
+    Tier 2 exists because a page write had no other way in: ``wiki_submit_page``
+    resolves through here, so before it a session could hold the whole page-write
+    ceiling and be unable to use any of it. The tiers are ordered rather than
+    merged so an INDEXING run is completely unaffected — a job-bound session
+    never reaches the tag read, and no ctx it receives changes by one field.
+
+    **Tier 2 is gated on a server-stamped TAG, never on a context key**, and
+    that is a security property rather than a style choice: a caller can put an
+    arbitrary ``slug`` into a session's context, so reading one here would turn
+    an inert dead end into a live write path against a project the caller was
+    never given a session for. :meth:`SessionProject.maintainer_slug` carries
+    the argument.
+
+    A tier-2 ctx reports ``job_bound`` False, carries an empty ``job_id`` and no
+    resume plan, and stamps ``commit_sha`` from the PROJECT (the generation the
+    wiki currently describes). Read ``job_bound`` before anything keyed on a job
+    — the phase writers already do.
+
+    Cost: ``O(one record)`` on the job tier. Tier 2 adds an ``O(1)`` tag read, a
+    project read, and ``O(collection)`` in the slug's own job count for the
+    checkout walk; it is reached only by a session that has no job at all.
+    """
     store = getattr(runtime, "wiki_store", None)
     if store is None:
         return None
     job_id = store.find_job_by_session(session_id)
     if job_id is None:
-        return None
+        return WikiJobCtx.for_maintainer(session_id, runtime, store)
     job = store.get_job(job_id)
     if job is None:
         return None
@@ -265,6 +412,29 @@ def resolve_job_ctx(session_id: str, runtime: Any) -> WikiJobCtx | None:
     )
 
 
+def build_jobless_ctx(
+    *, job_id: str, slug: str, store: WikiStoreBase
+) -> WikiJobCtx:
+    """Build the :class:`WikiJobCtx` a SESSIONLESS runner operates over.
+
+    Shared by every ``JoblessIndexRunner`` — the graph-only indexer and the
+    scoped refresh runner alike. None of them has a Mewbo session, so
+    ``session_id`` is empty and ``resume_plan`` is ``None``: the plan describes
+    which LLM-driven phases an interrupted agent run may reuse, and a
+    deterministic runner has none to reuse. ``clone_dir`` resolves via the same
+    :func:`_clone_dir_for` rule the agent path uses, so the clone lands where
+    the graph view + source endpoint expect it.
+    """
+    return WikiJobCtx(
+        job_id=job_id,
+        slug=slug,
+        session_id="",
+        clone_dir=_clone_dir_for(job_id),
+        store=store,
+        resume_plan=None,
+    )
+
+
 def resolve_workspace_slug(session_id: str, runtime: Any) -> str | None:
     """Return the wiki slug a *structured-response* session is grounded in.
 
@@ -273,6 +443,11 @@ def resolve_workspace_slug(session_id: str, runtime: Any) -> str | None:
     session transcript but is NOT a registered wiki QA answer — so
     :func:`resolve_qa_ctx` alone can't scope its retrieval tools. This recovers
     the slug from the latest such event (last write wins).
+
+    Deliberately the ONLY transcript-walking slug read in this module. The
+    maintainer binding does NOT get a sibling here: it reads a session TAG
+    instead (:meth:`SessionProject.maintainer_slug`), because a context key is
+    re-writable by any later request and a tag is not.
 
     Transcript access is down-only: it prefers a ``session_store`` carried on
     the seam (the production ``resolve_runtime`` puts the process-wide singleton
@@ -299,31 +474,78 @@ def resolve_workspace_slug(session_id: str, runtime: Any) -> str | None:
     return slug
 
 
+def _job_slug(session_id: str, store: WikiStoreBase) -> str | None:
+    """The slug of the indexing job backing *session_id*, if there is one.
+
+    Best-effort by construction: a session with no job, a job row that has since
+    been deleted, or a job carrying an empty slug all resolve to ``None`` so the
+    caller falls through to the next tier rather than grounding on nothing.
+    """
+    job_id = store.find_job_by_session(session_id)
+    if job_id is None:
+        return None
+    job = store.get_job(job_id)
+    return job.slug if job is not None and job.slug else None
+
+
 def resolve_qa_ctx(session_id: str, runtime: Any) -> WikiQaCtx | None:
     """Return the WikiQaCtx for *session_id*, or ``None`` if not grounded.
 
-    Three-tier resolution, strongest binding first (one resolver, so
+    Five-tier resolution, strongest binding first (one resolver, so
     ``_base._qa_ctx`` stays unchanged):
 
     1. a registered QA answer (``find_qa_by_session``);
-    2. a structured-response session scoped to a workspace
+    2. a session bound to an INDEXING JOB (``find_job_by_session``);
+    3. a session carrying the maintainer TAG
+       (:meth:`WikiJobCtx.for_maintainer`) — a project-bound maintainer session;
+    4. a structured-response session scoped to a workspace
        (:func:`resolve_workspace_slug`);
-    3. an ORDINARY task session whose own project is an indexed wiki
+    5. an ORDINARY task session whose own project is an indexed wiki
        (:meth:`SessionProject.resolve_slug`).
 
-    Tiers 2 and 3 both yield a slug-only ctx (``answer_id=None``) so the
+    Tiers 2-5 all yield a slug-only ctx (``answer_id=None``) so the
     read/navigate tools ground while the QA-emit/event tools keep guarding on
-    ``answer_id`` — tier 3 is deliberately shape-identical to tier 2, so every
-    tool already safe under one is safe under the other. ``None`` now means only
+    ``answer_id`` — each is deliberately shape-identical to the others, so every
+    tool already safe under one is safe under the rest. ``None`` means only
     that the session's project has no wiki indexed (or it has no project at all),
     which is an EXPECTED state rather than a fault — see
     ``WikiSessionTool._ungrounded_result``.
+
+    **Tier 2 is what lets ONE session both READ and WRITE pages.** The page
+    read tools resolve through here while ``wiki_submit_page`` resolves through
+    :func:`resolve_job_ctx`, and without this tier no single session can satisfy
+    both: a job-bound session has no QA answer and no workspace, so every read
+    refuses, while a QA/structured session has no job, so every write
+    refuses. An agent that must DECIDE which pages need updating has to read them
+    first, so the two halves had to meet somewhere; they meet here, on the slug,
+    which is the only thing the read tools need and which a job already knows.
+    It sits directly below the QA tier because both are exact registrations,
+    above the two heuristic tiers below it — and a session cannot be both a
+    registered answer and an indexing job, so the ordering is unambiguous rather
+    than a tie-break.
     """
     store = getattr(runtime, "wiki_store", None)
     if store is None:
         return None
     answer_id = store.find_qa_by_session(session_id)
     if answer_id is None:
+        # An indexing job's own session: exact, and its slug is on the job.
+        # Failing that, a session bound to a PROJECT by its own ``slug`` context
+        # value — the same exact binding ``resolve_job_ctx``'s second tier
+        # reads, and it has to be honoured on BOTH sides: a maintainer session
+        # able to rewrite a page it cannot first read is the half-feature that
+        # tier-2 above exists to prevent for indexing sessions.
+        slug = _job_slug(session_id, store)
+        if slug is None:
+            maintainer = WikiJobCtx.for_maintainer(session_id, runtime, store)
+            slug = maintainer.slug if maintainer is not None else None
+        if slug is not None:
+            return WikiQaCtx(
+                answer_id=None,
+                slug=slug,
+                session_id=session_id,
+                store=store,
+            )
         # Fallback: a grounded structured-response session (no QA answer, but a
         # workspace slug on the transcript). Retrieval tools use ctx.slug; the
         # QA-emit/event tools must guard ``if ctx.answer_id is None``.
@@ -363,16 +585,96 @@ def emit_phase(ctx: WikiJobCtx, name: str) -> None:
     persisted snapshot drives the landing-page card (which polls the
     snapshot endpoint, never SSE). Both reads are derived from the same
     write here, so the two surfaces can never disagree.
-    """
-    import datetime as _dt  # noqa: PLC0415
 
-    started_at = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    A BACKWARD move is dropped from both. A resume is instructed to re-clone and
+    re-scan so the source is on disk before pages are written, so those tools
+    re-stamp phases the job passed long ago — a job that had already built its
+    graph reported ``scan`` again with a later ``phase_started_at``, walking the
+    progress bar backwards. Dropping the write on both surfaces rather than one
+    is what preserves the can-never-disagree property above; the phase's own
+    ``log`` lines still show the re-run happening. A deliberate RESTART is
+    exempt: it really is redoing the pipeline from the top, so its phase must be
+    allowed to return there.
+
+    Entering a phase CLEARS the three ``phase_progress_*`` fields and stamps
+    ``last_progress_at``. The clear is the invariant every progress reader leans
+    on: a non-null ``phase_progress_current`` therefore always belongs to the
+    phase named in ``phase``, never a leftover from one that already ended —
+    which is precisely how ``scanned_count``/``current_file`` became
+    untrustworthy. It lives HERE rather than at each phase tool so a phase added
+    later inherits it without knowing it exists.
+
+    ``last_progress_at`` is STAMPED, not cleared, and that asymmetry is
+    deliberate: it answers "when did this job last move at all", and entering a
+    phase is movement. Clearing it would erase the one signal that separates a
+    long phase from a dead one at the exact moment a phase begins.
+
+    A ctx with no job at all (a maintainer session — see
+    :attr:`WikiJobCtx.job_bound`) reports nothing: a phase is a position in an
+    indexing PIPELINE, so there is no progress here to describe, and writing one
+    under an empty job id would append to an event log no stream ever reads.
+    """
+    if not getattr(ctx, "job_id", ""):
+        return
+    # Read defensively: this seam is reached with duck-typed ctx stand-ins that
+    # carry only what their own tool needs, so a hard attribute read here turns
+    # an unrelated tool's test into a crash inside progress reporting.
+    plan = getattr(ctx, "resume_plan", None)
+    if not (plan is not None and getattr(plan, "restart", False)):
+        try:
+            job = ctx.store.get_job(ctx.job_id)
+        except Exception:
+            job = None
+        if job is not None and getattr(job, "regresses_to", None) and job.regresses_to(name):
+            return
+
+    started_at = IndexingJob.format_stamp(datetime.now(timezone.utc))
     try:
         ctx.store.append_job_event(ctx.job_id, {"type": "phase", "name": name})
     except Exception:
         pass
     try:
-        ctx.store.update_job(ctx.job_id, phase=name, phase_started_at=started_at)
+        ctx.store.update_job(
+            ctx.job_id,
+            phase=name,
+            phase_started_at=started_at,
+            last_progress_at=started_at,
+            phase_progress_current=None,
+            phase_progress_total=None,
+            phase_progress_unit=None,
+        )
+    except Exception:
+        pass
+
+
+def emit_scope_preview(ctx: WikiJobCtx, preview: ScopePreview) -> None:
+    """Append a ``scope_preview`` event AND persist it on the job snapshot.
+
+    The same one-writer/two-transports property :func:`emit_phase` holds, for
+    the same reason: the live indexing timeline reads the event stream while the
+    landing card polls the snapshot endpoint, and a preview written down only
+    ONE of those paths would let the two surfaces report different scopes for
+    the same refresh. Both reads are derived from the single call here, so they
+    cannot disagree — and a caller cannot accidentally write one without the
+    other, which is what a second emitter would eventually do.
+
+    The counts are spread FLAT alongside ``type`` rather than nested under a
+    key, matching the ``queued`` event and :class:`ScopePreview`'s own
+    deliberately flat shape: the reader is a panel rendering a row of integers,
+    and the model carries no ``type`` field for the spread to collide with.
+
+    Best-effort on both legs, like every other emitter here — a store hiccup
+    must cost a progress detail, never the refresh that produced it.
+    """
+    try:
+        ctx.store.append_job_event(
+            ctx.job_id,
+            {"type": "scope_preview", **preview.model_dump(by_alias=True)},
+        )
+    except Exception:
+        pass
+    try:
+        ctx.store.update_job(ctx.job_id, scope_preview=preview)
     except Exception:
         pass
 
@@ -385,12 +687,11 @@ def emit_phase_once(ctx: WikiJobCtx, name: str) -> None:
     are no-ops — without the guard the event log would carry one ``phase`` event
     per worker.
 
-    It replaces the alternative that was tried first: stamping the phase from the
-    tail of the PRECEDING tool. That marks a phase as started at the moment its
-    predecessor ENDED, so a run that died in the gap reported a phase whose work
-    never began at all (a job sat at ``enrich`` after being cancelled 43ms after
-    the graph build returned). A phase must be stamped by work that has actually
-    started.
+    Do NOT instead stamp the phase from the tail of the PRECEDING tool: that
+    marks a phase started at the moment its predecessor ENDED, so a run dying in
+    the gap reports a phase whose work never began (a job sits at ``enrich``
+    after being cancelled 43ms after the graph build returned). A phase must be
+    stamped by work that has actually started.
     """
     try:
         job = ctx.store.get_job(ctx.job_id)
@@ -402,7 +703,14 @@ def emit_phase_once(ctx: WikiJobCtx, name: str) -> None:
 
 
 def emit_log(ctx: WikiJobCtx, text: str, *, level: str = "info") -> None:
-    """Append a free-form ``log`` event for the indexing timeline."""
+    """Append a free-form ``log`` event for the indexing timeline.
+
+    Silent for a ctx with no job, for :func:`emit_phase`'s reason: the timeline
+    belongs to an indexing job, and a line written under an empty job id is an
+    orphan record no surface can reach.
+    """
+    if not getattr(ctx, "job_id", ""):
+        return
     try:
         ctx.store.append_job_event(
             ctx.job_id, {"type": "log", "level": level, "text": text}
@@ -411,19 +719,215 @@ def emit_log(ctx: WikiJobCtx, text: str, *, level: str = "info") -> None:
         pass
 
 
-def resolve_qa_clone_dir(slug: str, store: Any) -> Path | None:
-    """Return the on-disk clone dir for *slug*'s most-recent completed job.
+# How long a bulk phase may run without reporting progress. Same order as
+# ``scan.py``'s per-file event flush and chosen the same way: often enough that
+# a reader never mistakes a working phase for a wedged one, rare enough that the
+# write is noise beside the work it reports.
+_PROGRESS_INTERVAL_S: float = 5.0
 
-    Q&A tools that need source-file access (read_file, grep, list_files)
-    use this to scope themselves to the right repo snapshot. We pick the
-    most-recent ``complete`` job's clone dir, because that is the source
-    the wiki was built from — answers stay consistent with the wiki the
-    user is reading.
 
-    Returns ``None`` if no completed job exists or the dir is gone (e.g.
-    the volume was wiped). Callers should report that to the LLM as
-    "source files not available — answer from wiki/graph only".
+class PhaseProgress:
+    """Throttled "this phase is still moving" writer for the bulk phases.
+
+    ``graph`` and ``enrich`` are the two phases whose work is a long loop or a
+    fan-out with no per-unit boundary tool, so nothing at all was written to the
+    job between their start and their end — one real index spent 25 minutes
+    inside the tree-sitter loop emitting nothing, which from outside is
+    indistinguishable from a dead run. This is the throttle ``scan.py`` already
+    applies to its per-file event flush, hoisted onto a class so the two silent
+    phases share one cadence rather than each growing its own.
+
+    **Cross-instance by construction.** The enrich fan-out reaches this through
+    a FRESH tool instance per mint, so a purely instance-local timer would never
+    throttle anything. The first :meth:`advance` therefore seeds its deadline
+    from the job's own persisted ``last_progress_at``; every later call on the
+    same instance uses the in-memory one, which is what keeps the graph loop
+    from reading the job once per file.
+
+    Collaborators are injected — the job ctx carries the store, and the clock is
+    a field so a test can drive the throttle without sleeping.
     """
+
+    def __init__(
+        self,
+        ctx: Any,
+        *,
+        label: str,
+        unit: str,
+        units_of: Any = None,
+        interval_s: float | None = None,
+        clock: Any = None,
+        on_flush: Any = None,
+    ) -> None:
+        """Bind the progress writer to *ctx*'s job.
+
+        *label* names the work in the timeline ("Parsing"); *unit* is the plural
+        noun a progress reader renders ("files", "nodes", "entities") — both are
+        constant for the life of one phase, which is why they are fields rather
+        than per-call arguments.
+
+        ``units_of`` is a ``() -> (current, total)`` supplier for a phase whose
+        position costs a store read — it is invoked ONLY when a write is
+        actually due, which is the whole reason it is a callable rather than the
+        numbers themselves. A loop that already knows where it is passes them
+        straight to :meth:`advance` instead and needs no supplier.
+
+        ``on_flush`` is a callback run on the same due-check, for a caller with
+        writes of its own to batch on this cadence (``scan.py``'s per-file event
+        drain). It exists so there is ONE throttle in the pipeline rather than a
+        second inline copy of the same elapsed-time rule.
+
+        ``interval_s`` defaults to :data:`_PROGRESS_INTERVAL_S` — resolved HERE
+        rather than in the signature, so the module constant stays the single
+        source of truth at call time instead of being frozen into a default at
+        import time.
+        """
+        self._ctx = ctx
+        self._label = label
+        self._unit = unit
+        self._units_of = units_of
+        self._on_flush = on_flush
+        self._interval = _PROGRESS_INTERVAL_S if interval_s is None else interval_s
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._last: datetime | None = None
+
+    def advance(
+        self,
+        current: int | None = None,
+        total: int | None = None,
+        *,
+        detail: str = "",
+        force: bool = False,
+    ) -> None:
+        """Report progress; write only when the interval has elapsed.
+
+        ``force`` writes regardless of the throttle — for the FINAL unit of a
+        loop, so a finished phase's last position is the one on record rather
+        than whatever the last throttled write happened to catch.
+        """
+        now = self._clock()
+        if not (force or self._due(now)):
+            return
+        self._last = now
+        if current is None:
+            current, total = self._supplied_units()
+        if self._on_flush is not None:
+            self._on_flush()
+        if self._label:
+            emit_log(self._ctx, self._text(current, total, detail))
+        fields: dict[str, Any] = {"last_progress_at": IndexingJob.format_stamp(now)}
+        if current is not None:
+            # The ONE generic per-phase progress triple. ``emit_phase`` clears
+            # it on every transition, so what is written here can only ever be
+            # read as belonging to the phase that wrote it.
+            fields["phase_progress_current"] = current
+            fields["phase_progress_total"] = total
+            fields["phase_progress_unit"] = self._unit
+        try:
+            self._ctx.store.update_job(self._ctx.job_id, **fields)
+        except Exception:
+            pass
+
+    def _supplied_units(self) -> tuple[int | None, int | None]:
+        """Resolve ``units_of`` if one was injected — best-effort, like the rest.
+
+        A count that cannot be taken must not cost the run its progress line:
+        the position is dropped and the timeline still records that the phase
+        moved.
+        """
+        if self._units_of is None:
+            return (None, None)
+        try:
+            done, total = self._units_of()
+        except Exception:
+            return (None, None)
+        return (done, total)
+
+    def _due(self, now: datetime) -> bool:
+        """True when *now* is at least one interval past the last progress write."""
+        if self._last is not None:
+            return (now - self._last).total_seconds() >= self._interval
+        elapsed = self._persisted_elapsed(now)
+        # Only an elapsed inside [0, interval) is a reason to stay silent. A
+        # NEGATIVE one means the stored stamp is ahead of our clock — skew, or a
+        # writer on another host — and reading that as "written recently, hold
+        # off" would suppress every progress write for as long as the skew
+        # lasts. An unusable baseline must always mean "write", never "wait".
+        if elapsed is None or not (0.0 <= elapsed < self._interval):
+            return True
+        # Adopt the persisted stamp as this instance's baseline, so a fan-out
+        # worker that arrives mid-interval stays silent instead of writing.
+        self._last = now - timedelta(seconds=elapsed)
+        return False
+
+    def _persisted_elapsed(self, now: datetime) -> float | None:
+        """Seconds since the job's own last progress write, or ``None`` if unknown.
+
+        ``None`` means there is nothing to throttle against — no stamp, an
+        unreadable store, or a duck-typed ctx stand-in whose job is not a real
+        :class:`~mewbo_graph.wiki.types.IndexingJob`. Every one of those says
+        "write", never "stay silent": a missing baseline must not be the reason
+        a phase reports nothing.
+        """
+        try:
+            job = self._ctx.store.get_job(self._ctx.job_id)
+        except Exception:
+            return None
+        reader = getattr(job, "seconds_since_progress", None)
+        return reader(now) if reader is not None else None
+
+    def _text(self, done: int | None, total: int | None, detail: str) -> str:
+        """Compose the timeline line: ``"<label> <done>/<total>: <detail>"``."""
+        head = self._label
+        if done is not None:
+            head = f"{head} {done}/{total}" if total else f"{head} {done}"
+        return f"{head}: {detail}" if detail else head
+
+
+def resolve_qa_clone_dir(
+    slug: str, store: Any, *, session_id: str | None = None
+) -> Path | None:
+    """Return the on-disk clone dir a caller should read *slug*'s source from.
+
+    ONE resolver, two questions — and the answers genuinely differ:
+
+    * **A session bound to an indexing job reads that job's OWN checkout.**
+      Pass ``session_id`` and, when ``find_job_by_session`` hits, the job's
+      clone dir wins. A job is not ``complete`` until its own finalize runs,
+      so the completed-job rule below would hand a live job the PREVIOUS
+      index's clone — the source as it stood BEFORE the changes that job is
+      indexing. That path raises nothing and reads nothing empty; it just
+      answers from stale bytes, which is the worst shape of defect.
+    * **Everything else gets the most-recent ``complete`` job's clone dir.**
+      That is the source the wiki was built from, so a Q&A answer stays
+      consistent with the wiki the user is reading. This is the DEFAULT:
+      omit ``session_id`` (the slug-only source route does) and the
+      behaviour is exactly what it always was.
+
+    The job tier is deliberately NOT filtered on status. A job-bound session
+    should read its own checkout whether or not finalize has run yet —
+    filtering would make the resolution jump to a different directory
+    mid-session at the moment its own job completes. The job's ``slug`` is
+    checked against *slug* so a session bound to some other repo's job can
+    never be handed that repo's checkout.
+
+    Returns ``None`` if nothing resolves or the dir is gone (e.g. the volume
+    was wiped). Callers should report that to the LLM as "source files not
+    available — answer from wiki/graph only".
+
+    Cost: ``O(collection)`` in the slug's job count for the completed-job
+    walk, ``O(one record)`` for the job tier.
+    """
+    if session_id:
+        try:
+            job_id = store.find_job_by_session(session_id)
+            job = store.get_job(job_id) if job_id is not None else None
+        except Exception:
+            job = None
+        if job is not None and getattr(job, "slug", None) == slug:
+            job_clone = _clone_dir_for(job.job_id)
+            if job_clone.is_dir():
+                return job_clone
     try:
         jobs = store.list_jobs(slug=slug)
     except Exception:
@@ -444,6 +948,7 @@ __all__ = [
     "SessionProject",
     "WikiJobCtx",
     "WikiQaCtx",
+    "build_jobless_ctx",
     "get_session_store",
     "resolve_runtime",
     "resolve_job_ctx",
@@ -453,4 +958,5 @@ __all__ = [
     "emit_phase",
     "emit_phase_once",
     "emit_log",
+    "emit_scope_preview",
 ]

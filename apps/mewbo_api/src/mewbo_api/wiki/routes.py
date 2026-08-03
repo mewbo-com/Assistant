@@ -16,8 +16,14 @@ from flask import Blueprint, Response, jsonify, request, stream_with_context
 from mewbo_core.common import get_logger
 from mewbo_graph.wiki.resume import ResumeCountError
 from mewbo_graph.wiki.store import WikiStoreBase
-from mewbo_graph.wiki.types import IndexingJob, WikiError, WikiPage, WizardSubmission
-from pydantic import BaseModel, ConfigDict, Field
+from mewbo_graph.wiki.types import (
+    IndexingJob,
+    RefreshMode,
+    WikiError,
+    WikiPage,
+    WizardSubmission,
+)
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from mewbo_api.auth.guard_registry import guard
 
@@ -28,7 +34,14 @@ from .errors import (
     wiki_error_response,
 )
 from .events import WikiQaSseGenerator, WikiSseGenerator
-from .jobs import QaSessionEndHook, WikiIndexingJob, WikiIndexingSessionEndHook, WikiQaSession
+from .jobs import (
+    QaSessionEndHook,
+    WikiIndexingJob,
+    WikiIndexingSessionEndHook,
+    WikiJobTerminationCascade,
+    WikiMaintainerSession,
+    WikiQaSession,
+)
 from .resume import WikiResume
 from .settings import WikiProjectSettings
 
@@ -107,26 +120,81 @@ def _store() -> WikiStoreBase:
     return _runtime.wiki_store
 
 
-def _resolve_qa_model() -> str:
+def _resolve_qa_model(mode: str = "deep") -> str:
     """Resolve the Q&A model id from config (the one canonical chain).
 
-    Order: ``wiki.default_qa_model`` → ``wiki.default_model`` → ``llm.default_model``.
-    Q&A typically wants a smaller/faster model than indexing, so its own key wins;
-    it then degrades to the shared wiki default and finally the global LLM default.
-    Returns ``""`` when nothing is configured. DRY: the single source for this
-    chain — reused by ``post_qa`` (request default), ``get_wiki_defaults`` (picker
-    pre-select), and ``_make_insight_llm`` (condense/dedup model).
+    Order: (``wiki.default_qa_fast_model`` when *mode* is ``"fast"``) →
+    ``wiki.default_qa_model`` → ``wiki.default_model`` → ``llm.default_model``.
+    Q&A typically wants a smaller/faster model than indexing, so its own key
+    wins; it then degrades to the shared wiki default and finally the global
+    LLM default. Returns ``""`` when nothing is configured. DRY: the single
+    source for this chain — reused by ``post_qa`` (request default, the only
+    caller that ever passes ``mode="fast"``), ``get_wiki_defaults`` (picker
+    pre-select), and ``_make_insight_llm`` (condense/dedup model) — the latter
+    two call with no argument and so resolve the plain (non-fast) chain.
     """
     try:
         from mewbo_core.config import get_config_value  # noqa: PLC0415
 
+        fast_model = (
+            get_config_value("wiki", "default_qa_fast_model", default="")
+            if mode == "fast"
+            else ""
+        )
         return str(
-            get_config_value("wiki", "default_qa_model", default="")
+            fast_model
+            or get_config_value("wiki", "default_qa_model", default="")
             or get_config_value("wiki", "default_model", default="")
             or get_config_value("llm", "default_model", default="")
         )
     except Exception:
         return ""
+
+
+# Every value ``WikiRefreshConfig.default_mode`` advertises, mapped onto the
+# engine's two-member ``RefreshMode``. It is TOTAL over that config literal on
+# purpose: a knob the schema itself offers must not be handled by the
+# unrecognised-value fallback below, or an operator sets a mode the schema told
+# them existed and silently gets a different one.
+#
+# ``"incremental"`` is an ALIAS for ``auto``, not a third strategy. ``auto`` IS
+# the incremental one — it takes the scoped delta pass wherever reuse can be
+# justified and falls back to a full rebuild where it cannot — and there is
+# deliberately no mode that demands a scoped pass unconditionally (see
+# ``RefreshMode``: ``scoped`` is an OUTCOME, not something a caller may request).
+# So ``auto`` is the whole of what "incremental" can honestly mean here, and
+# mapping it to ``full`` would hand an operator asking for the cheap path the
+# expensive one.
+_CONFIG_REFRESH_MODES: dict[str, RefreshMode] = {
+    "auto": "auto",
+    "full": "full",
+    "incremental": "auto",
+}
+
+
+def _configured_refresh_mode() -> RefreshMode:
+    """Resolve the operator's default refresh strategy from config.
+
+    Reads ``wiki.refresh.default_mode`` — the strategy a refresh takes when the
+    CALLER named none. It sits beside ``_resolve_qa_model`` for the same reason
+    that one does: config is I/O, so it is read here at the edge and handed to
+    the wire model as an argument rather than reached for from inside it.
+
+    A value outside ``_CONFIG_REFRESH_MODES`` degrades to ``auto`` — the shipped
+    default, and the one that can never do LESS than a full rebuild. Reaching
+    that branch means config validation was bypassed or the
+    literal gained a member this map was not taught, so it is a genuine unknown
+    rather than a knob the schema advertises.
+    """
+    try:
+        from mewbo_core.config import get_config_value  # noqa: PLC0415
+
+        configured = str(
+            get_config_value("wiki", "refresh", "default_mode", default="auto") or "auto"
+        )
+    except Exception:
+        return "auto"
+    return _CONFIG_REFRESH_MODES.get(configured, "auto")
 
 
 def _make_insight_llm() -> Any | None:
@@ -140,7 +208,7 @@ def _make_insight_llm() -> Any | None:
     """
     try:
         from mewbo_core.config import get_config_value  # noqa: PLC0415
-        from mewbo_core.llm import build_chat_model  # noqa: PLC0415
+        from mewbo_core.llm.llm import build_chat_model  # noqa: PLC0415
 
         model = get_config_value("wiki", "memory", "model", default="") or _resolve_qa_model()
         if not model:
@@ -188,6 +256,41 @@ def _hydrate_platform(job: IndexingJob) -> IndexingJob:
     return job.model_copy(update=patch)
 
 
+def _job_wire(job: IndexingJob) -> dict[str, Any]:
+    """Serialise *job* for the wire — hydrated fields plus its backing session id.
+
+    The ONE job→wire seam, shared by the per-job snapshot and the active-jobs
+    list, so the two endpoints can never disagree about a job's shape (the
+    console types both with a single ``IndexingJob`` interface, so a field
+    stamped by only one of them would make that type lie).
+
+    ``sessionId`` is stamped HERE rather than carried on :class:`IndexingJob`
+    because the job→session binding lives on its own store surface
+    (``attach_job_session``), deliberately outside the job schema — putting it
+    on the snapshot too would mean two writers of one fact, and a resume would
+    have to remember to update both. A graph-only index is sessionless, so the
+    key is simply absent; that is what lets a progress surface offer "watch the
+    indexer" only when there is a session to watch. Best-effort like the
+    platform backfill above: a store hiccup must not fail a progress poll.
+
+    ``isActive`` projects the model's own liveness question onto the wire so the
+    console reads ONE answer instead of re-deriving it from a status list of its
+    own — the drift that let a job read as dead on one surface and still
+    indexing on another. It is derived, never stored (the snapshot is dumped
+    ``exclude_none=True``, and stamping a plain bool here also guarantees the
+    key is always present, so absence never has to be read as false).
+    """
+    data = _hydrate_platform(job).model_dump(mode="json", by_alias=True, exclude_none=True)
+    data["isActive"] = job.is_active
+    try:
+        session_id = _store().get_job_session(job.job_id)
+    except Exception:
+        session_id = None
+    if session_id:
+        data["sessionId"] = session_id
+    return data
+
+
 class BranchListRequest(BaseModel):
     """``POST /v1/wiki/branches`` request body (transport-only — never persisted).
 
@@ -207,7 +310,7 @@ class ResumeIndexRequest(BaseModel):
     """``POST /v1/wiki/index/<job_id>/resume`` request body — every field optional.
 
     Transport-only, never persisted as-is (mirrors ``BranchListRequest`` above).
-    ``restart`` reaches the previously-unwired ``ResumePlan.for_restart()`` — the
+    ``restart`` reaches ``ResumePlan.for_restart()`` — the
     deliberate "rebuild from scratch" intent (as opposed to the default
     checkpoint resume, which skips already-done phases). ``extra="forbid"`` so a
     client typo doesn't silently no-op into the default resume behaviour.
@@ -216,6 +319,87 @@ class ResumeIndexRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     restart: bool = False
+
+
+class MaintainerSessionRequest(BaseModel):
+    """``POST /v1/wiki/projects/<slug>/session`` request body — entirely optional.
+
+    Transport-only, never persisted (mirrors ``ResumeIndexRequest`` above). The
+    body is optional on the wire and the "open" affordance on the project card
+    sends none, so an absent or empty body must validate to the default.
+
+    ``new_session`` names what it does: mint a session that is NOT the project's
+    canonical maintainer. The default is the get-or-create the "open" button
+    depends on — a link into the ongoing conversation as much as a way to start
+    one — while a composer submitting a turn against this project asked for a NEW
+    conversation and must never be handed someone else's transcript to grow.
+    ``extra="forbid"`` so a client that misspells the field gets a 400 rather
+    than the silent reuse this exists to prevent.
+
+    Aliased ``newSession`` because this Blueprint's wire is camelCase
+    (``repoUrl``, ``sessionId``); ``populate_by_name`` keeps the snake spelling
+    working too, so a non-console caller is not tripped by the convention.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    new_session: bool = Field(default=False, alias="newSession")
+
+
+class RefreshProjectRequest(BaseModel):
+    """``POST /v1/wiki/projects/<slug>/refresh`` request body — entirely optional.
+
+    Transport-only, never persisted as-is (mirrors ``ResumeIndexRequest`` above).
+    The body is optional on the wire and most callers send none, so an absent or
+    empty body must keep working — it validates to the default.
+
+    ``mode`` is OPTIONAL, and its absence is a distinct state from any value it
+    could carry: an omitted mode means "whatever this deployment is configured
+    to do" (``wiki.refresh.default_mode``), while a present one is a caller
+    making a choice that always wins. Collapsing the two — defaulting the field
+    to ``"auto"`` at validation — would make the operator setting unreachable,
+    because by the time the route reads the model it could no longer tell a
+    caller that asked for ``auto`` from one that asked for nothing.
+
+    The shipped default of that setting is ``auto``, which is a PRODUCT
+    decision, not a conservative one: the console's Refresh button
+    takes the cheap scoped path, and ``auto`` already falls back to a full
+    rebuild wherever reuse cannot be justified (see ``RefreshDecision.decide``),
+    so it can never do LESS than a full rebuild. ``extra="forbid"`` plus the
+    closed ``RefreshMode`` literal make a typo'd field or an unknown mode a
+    clean 400 naming the field, rather than a silent fall-through to a default
+    — the whole failure this model exists to prevent is a caller believing it
+    asked for one path and being given the other.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: RefreshMode | None = None
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _reject_explicit_null(cls, value: Any) -> Any:
+        """An explicit ``"mode": null`` is a 400, exactly as it always was.
+
+        Omitted and null are DIFFERENT states here — the same rule the settings
+        PATCH applies — and only the first means "consult the configured
+        default". A field validator sees a value only when the key was actually
+        supplied (defaults are not validated), which is what lets one rule
+        separate the two without a second sentinel type.
+        """
+        if value is None:
+            raise ValueError("mode must be 'auto' or 'full'; omit the field to use the default")
+        return value
+
+    def resolve_mode(self, configured_default: RefreshMode) -> RefreshMode:
+        """Return the mode this request runs under.
+
+        An explicitly requested mode always wins; only its absence consults the
+        deployment's configured default. The default arrives as an ARGUMENT
+        because reading config is I/O and a wire model must never reach for it —
+        the same rule that keeps the clock out of ``TriggerSpec``.
+        """
+        return self.mode or configured_default
 
 
 class WikiPageIndexQuery(BaseModel):
@@ -261,6 +445,32 @@ class WikiPageIndexQuery(BaseModel):
         }
 
 
+class WikiQaRequest(BaseModel):
+    """``POST /v1/wiki/qa`` request body.
+
+    Every field defaults rather than being required at the Pydantic layer:
+    ``post_qa`` does its OWN required-field checks by hand (missing
+    ``question``/``project`` → a ``validation`` error naming
+    those fields, not a raw Pydantic 422), so this model's only two jobs are
+    ``extra="forbid"`` rejecting an unknown field, and validating ``mode``
+    against a closed ``Literal`` so an unrecognised value is a clean 400 naming
+    the field.
+
+    The ``answerId`` continuation branch never reads ``mode`` at all — a
+    follow-up keeps the session's existing mode (see ``jobs.py``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = ""
+    project: str = ""
+    slug: str = ""
+    fromPageId: str = ""
+    model: str = ""
+    answerId: str = ""
+    mode: Literal["fast", "deep"] = "fast"
+
+
 def _query_args() -> dict[str, str]:
     """Return the request's query params as a plain dict for model validation.
 
@@ -286,6 +496,15 @@ def register(app, runtime, hook_manager=None) -> None:
       ``interrupted`` when their session ends — defense-in-depth so infra
       failures (tool-internal network / IO errors) hand off to ``JobRecovery``
       on next restart.
+
+    A third callback, :class:`WikiJobTerminationCascade`, is registered on the
+    runtime's ``on_terminate`` seam (the same one the trigger store cascades
+    through) whenever the runtime exposes it. Session END and session
+    TERMINATION are different events with opposite intents — see that class for
+    why one hands the job to recovery and the other settles it — so they cannot
+    share a registration. It is registered unconditionally because the callback
+    is idempotent (a second run finds the job no longer active) and the runtime
+    exposes no readable registry to dedupe against.
     """
     global _runtime, _hook_manager
     _runtime = runtime
@@ -293,9 +512,12 @@ def register(app, runtime, hook_manager=None) -> None:
     if hook_manager is not None:
         existing = hook_manager.on_session_end
         if not any(isinstance(h, QaSessionEndHook) for h in existing):
-            existing.append(QaSessionEndHook(runtime, hook_manager=hook_manager))
+            existing.append(QaSessionEndHook(runtime))
         if not any(isinstance(h, WikiIndexingSessionEndHook) for h in existing):
             existing.append(WikiIndexingSessionEndHook(runtime))
+    on_terminate = getattr(runtime, "register_on_terminate", None)
+    if callable(on_terminate):
+        on_terminate(WikiJobTerminationCascade(runtime))
     register_error_handler(app)
     app.register_blueprint(_build_blueprint(), url_prefix="/v1/wiki")
 
@@ -329,10 +551,22 @@ def _build_blueprint() -> Blueprint:
         # entry is evicted below: a re-created project with this slug must not
         # inherit the dead one's configuration (its model/ref/scope/graph-only).
         _store().delete_project_settings(slug)
+        # Reap everything else the slug ever wrote. Removing only the three
+        # records above would strand the pages, the code graph, the entity and
+        # memory layers, the manifest, every job with its event log, and the Q&A
+        # history: they are reachable only through a slug whose
+        # project row no longer exists, and the one bulk reaper that does exist
+        # (``supersede_graph_artifacts``) fires solely from a COMPLETED index
+        # for that slug — which a deleted project can never run again. Such rows
+        # would not merely leak, they would be unreachable by construction.
+        # Synchronous rather than deferred: a background reaper would be a
+        # second lifecycle to reason about, and the delete is already the slow,
+        # rare, explicitly-confirmed action in this surface.
+        reaped = _store().reap_slug(slug)
         # Evict any cached freshness so a re-created project with the same slug
         # never inherits the deleted one's stale badge.
         _freshness_cache.pop(slug, None)
-        return jsonify({"deleted": deleted})
+        return jsonify({"deleted": deleted, "reaped": reaped})
 
     @bp.route("/projects/<path:slug>/settings", methods=["GET"])
     @guard.requires("wiki.read")
@@ -484,7 +718,7 @@ def _build_blueprint() -> Blueprint:
             node_limit = None
         # ``?hierarchy=1`` (truthy) synthesises a Folder scaffold + per-node
         # parentId so the FE can cluster/collapse by directory. Default off →
-        # the wire is byte-identical to the legacy AST-only payload.
+        # the wire carries the plain AST-only payload.
         hierarchy = request.args.get("hierarchy", "").lower() in {"1", "true", "yes"}
         from mewbo_graph.wiki.graph import KnowledgeGraphView  # noqa: PLC0415
 
@@ -624,18 +858,12 @@ def _build_blueprint() -> Blueprint:
 
         indexed_sha = project.commit_sha
         if not indexed_sha:
-            # job_id is a uuid4 hex — RANDOM, so it can't order jobs by recency
-            # (the old sort picked an arbitrary job's commit as the baseline).
-            # Order the complete-with-commit jobs by phase_started_at (ISO-8601,
-            # so lexicographic == chronological), newest first, jobs missing the
-            # timestamp last.
-            complete = [
-                j for j in store.list_jobs(slug=slug)
-                if j.status == "complete" and j.commit_sha
-            ]
-            complete.sort(key=lambda j: j.phase_started_at or "", reverse=True)
-            if complete:
-                indexed_sha = complete[0].commit_sha
+            # Fallback for projects that predate ``Project.commit_sha``:
+            # the newest ``complete`` job's own commit, via the ONE
+            # latest-job lookup (never job_id — see ``store.latest_job``).
+            latest_complete = store.latest_job(slug, statuses={"complete"})
+            if latest_complete is not None and latest_complete.commit_sha:
+                indexed_sha = latest_complete.commit_sha
         if not indexed_sha:
             return wiki_error_response(
                 WikiError(
@@ -716,35 +944,36 @@ def _build_blueprint() -> Blueprint:
             return wiki_error_response(
                 WikiError(code="not_found", message=f"job {job_id} not found")
             )
-        job = _hydrate_platform(job)
-        return jsonify(job.model_dump(mode="json", by_alias=True, exclude_none=True))
+        return jsonify(_job_wire(job))
 
     @bp.route("/jobs/active", methods=["GET"])
     @guard.requires("wiki.read")
     def list_active_jobs():
         """Return all non-terminal jobs (queued/scanning/finalizing/interrupted).
 
-        Powers the landing-page "Indexing now" surface; platform is
-        hydrated so the FE composes canonical URLs without an extra hop.
-        ``interrupted`` is an in-progress state (a restart-stranded job
-        awaiting recovery), so it belongs here, not in the terminal set.
+        Powers the landing-page "Indexing now" surface; each job goes through
+        the same ``_job_wire`` seam the per-job snapshot uses, so platform is
+        hydrated (the FE composes canonical URLs without an extra hop) and the
+        two endpoints serve one shape. Liveness is the job's OWN question
+        (``IndexingJob.is_active``) — the same one ``_job_wire`` puts on the
+        wire as ``isActive``, so this list and every consumer of that flag can
+        never disagree about which statuses count as in-progress.
         """
-        ACTIVE = {"queued", "scanning", "finalizing", "interrupted"}
-        out = []
-        for job in _store().list_jobs():
-            if job.status not in ACTIVE:
-                continue
-            job = _hydrate_platform(job)
-            out.append(job.model_dump(mode="json", by_alias=True, exclude_none=True))
-        return jsonify(out)
+        return jsonify([
+            _job_wire(job) for job in _store().list_jobs() if job.is_active
+        ])
 
     @bp.route("/jobs/recoverable", methods=["GET"])
     @guard.requires("wiki.read")
     def list_recoverable_jobs():
         """Return non-complete jobs that carry checkpoint artifacts worth resuming.
 
-        Powers the console "Resume indexing" surface. A job qualifies when it is
-        in a recoverable status (failed / interrupted / cancelled) AND has reached
+        Powers the console "Resume indexing" surface. A job qualifies when
+        ``POST .../resume`` would actually accept it (``IndexingJob.is_resumable``
+        — the same predicate ``WikiResume.resume`` guards on, so this listing can
+        never advertise a job resume then refuses; notably ``cancelled`` is
+        EXCLUDED — a deliberate user stop is not a resume candidate), has NOT been
+        superseded by a later completed index for the same slug, AND has reached
         at least the graph or committed a plan / written pages — i.e. resuming it
         would actually save work (else it is a from-scratch re-index, not a
         resume). The payload is the smallest the FE needs per job; the ``recoverable``
@@ -752,12 +981,24 @@ def _build_blueprint() -> Blueprint:
         """
         from mewbo_graph.wiki.resume import ResumePlan  # noqa: PLC0415
 
-        RECOVERABLE_STATUS = {"failed", "interrupted", "cancelled"}
+        store = _store()
         out = []
-        for job in _store().list_jobs():
-            if job.status not in RECOVERABLE_STATUS:
+        for job in store.list_jobs():
+            if not job.is_resumable:
                 continue
-            plan = ResumePlan.build(_store(), job)
+            # Is this terminal signal still true, or did a later index for the
+            # same slug already finish? The job's own status can't answer that
+            # — only the store's authority on "what's the newest completed
+            # attempt" can (never job_id; see ``store.latest_job``). A job with
+            # no ``phase_started_at`` (never even cloned) sorts oldest and is
+            # therefore always superseded by any completed index.
+            latest_complete = store.latest_job(job.slug, statuses={"complete"})
+            if latest_complete is not None and (
+                (latest_complete.phase_started_at or "")
+                >= (job.phase_started_at or "")
+            ):
+                continue
+            plan = ResumePlan.build(store, job)
             # Nothing reusable ⇒ a resume would just rebuild from scratch; don't
             # advertise it as a checkpoint-resume candidate.
             if plan.is_noop():
@@ -803,18 +1044,55 @@ def _build_blueprint() -> Blueprint:
         Returns ``{"slug": <project slug>, "kind": "indexing" | "qa"}``, or a
         404 ``not_found`` :class:`WikiError` when *session_id* isn't a wiki
         session at all.
+
+        The ``indexing`` branch also carries ``jobId`` + ``active``, because
+        "which project" does not answer the question a user watching a RUNNING
+        index actually has. Progress — phase, the node/page counters, ETA —
+        lives only on the indexing screen, which is addressed by job id; the
+        session transcript has no progress rendering of its own, so a session
+        that could only resolve a slug stranded its viewer on a project front
+        door (and on a FIRST index, on the gallery, since the project has no
+        landing page yet). ``active`` is ``IndexingJob.is_active``, the same
+        predicate ``_job_wire`` puts on the wire as ``isActive`` — it is what
+        lets the console send a live run to the progress bar while a finished
+        one still resolves to the project, which is the right destination once
+        there is something to read.
+
+        The ``qa`` branch additionally carries the answer's own coordinates —
+        ``answerId``/``fromPageId``/``question`` — because the two kinds have
+        different destinations: an indexing session belongs to a PROJECT (the
+        console resolves its landing page), while a Q&A session belongs to one
+        ANSWER, which is addressable on its own (``?answer=<id>``). They come
+        off the answer already loaded here, so this costs no extra lookup; the
+        alternative is a console that knows a session is Q&A-backed and routes
+        it to the project's front door anyway. ``fromPageId`` is what keeps the
+        deep link honest — the console route falls back to a hardcoded ``core``
+        page id, which a project need not have, so omitting it would caption
+        the answer with a page it was never generated from and leave the
+        up-link pointing at one that may not resolve.
         """
         store = _store()
         job_id = store.find_job_by_session(session_id)
         if job_id:
             job = store.get_job(job_id)
             if job is not None:
-                return jsonify({"slug": job.slug, "kind": "indexing"})
+                return jsonify({
+                    "slug": job.slug,
+                    "kind": "indexing",
+                    "jobId": job_id,
+                    "active": job.is_active,
+                })
         answer_id = store.find_qa_by_session(session_id)
         if answer_id:
             answer = store.get_qa(answer_id)
             if answer is not None:
-                return jsonify({"slug": answer.slug, "kind": "qa"})
+                return jsonify({
+                    "slug": answer.slug,
+                    "kind": "qa",
+                    "answerId": answer.answer_id,
+                    "fromPageId": answer.from_page_id,
+                    "question": answer.question,
+                })
         return wiki_error_response(
             WikiError(
                 code="not_found",
@@ -825,6 +1103,19 @@ def _build_blueprint() -> Blueprint:
     @bp.route("/qa/<string:answer_id>", methods=["GET"])
     @guard.requires("wiki.read")
     def get_qa_snapshot(answer_id: str):
+        """Replay a persisted answer — the idempotent ``?answer=<id>`` source.
+
+        ``sessionId`` is stamped at READ time from ``store.get_qa_session``,
+        exactly as ``_job_wire`` does for an indexing job and for the same
+        reason: that binding already lives on its own store surface
+        (``attach_qa_session``), deliberately outside :class:`QaAnswer`, so
+        carrying it on the model too would make two writers of one fact and
+        every non-destructive turn update would have to remember both. An
+        answer with no backing session omits the key rather than sending an
+        empty string, so the console reads absence as "nothing to watch" and
+        renders no affordance instead of a dead one. Best-effort like the job
+        seam: a store hiccup must degrade the jump, not fail the replay.
+        """
         ans = _store().get_qa(answer_id)
         if ans is None:
             return wiki_error_response(
@@ -846,12 +1137,17 @@ def _build_blueprint() -> Blueprint:
         data["summarySources"] = AccessedSourceResolver.resolve_refs(
             _store(), ans.slug, ans.summary_sources
         )
+        try:
+            session_id = _store().get_qa_session(answer_id)
+        except Exception:
+            session_id = None
+        if session_id:
+            data["sessionId"] = session_id
         return jsonify(data)
 
     @bp.route("/index", methods=["POST"])
     @guard.requires("wiki.write")
     def post_index():
-        # Per-IP rate-limit check.
         remote = request.remote_addr or "unknown"
         if not _check_rate_limit(remote):
             err = WikiError(
@@ -869,7 +1165,7 @@ def _build_blueprint() -> Blueprint:
             return wiki_error_response(
                 WikiError(code="validation", message=str(exc), fields=fields or None)
             )
-        # Graph-only (zero-LLM) onboarding is a developer-mode feature: honour
+        # Graph-only (zero-LLM) indexing is a developer-mode feature: honour
         # ``graphOnly`` ONLY when ``runtime.developer_mode`` is on; otherwise
         # force it False so an unprivileged caller can never opt into the
         # no-docs path (the wire field is accepted but ignored).
@@ -880,8 +1176,13 @@ def _build_blueprint() -> Blueprint:
         ):
             submission = submission.model_copy(update={"graph_only": False})
         try:
+            # The REAL hook manager, not ``None``: ``Orchestrator`` turns a
+            # missing one into a FRESH EMPTY ``HookManager``, so an index
+            # started here would run without ``WikiIndexingSessionEndHook`` and
+            # a session that died mid-phase would never hand its job to
+            # recovery. Every start path threads the registered instance.
             job = WikiIndexingJob.start(
-                submission, runtime=_runtime, hook_manager=None
+                submission, runtime=_runtime, hook_manager=_hook_manager
             )
         except Exception as exc:
             return wiki_error_response(
@@ -896,14 +1197,14 @@ def _build_blueprint() -> Blueprint:
     @bp.route("/branches", methods=["POST"])
     @guard.requires("wiki.write")
     def post_branches():
-        """List a remote repo's branches so the wizard can pick a ref to onboard.
+        """List a remote repo's branches so the wizard can pick a ref to index.
 
         An explicit body ``token`` is EXCLUSIVE: the wizard is testing a specific,
         not-yet-saved credential, so ONLY that token is tried and an auth-class
         rejection is surfaced (400 ``validation``) instead of being masked by a
         stored/ambient/anonymous fallback that happens to work — masking here would
-        let the wizard "succeed" and then durably persist the untested-bad token at
-        onboarding. When NO explicit token is sent, resolution falls back to the
+        let the wizard "succeed" and then durably persist the untested-bad token
+        at the first index. When NO explicit token is sent, resolution falls back to the
         SAME canonical chain every other consumer uses (``resolve_chain``):
         repo-scoped store → host-scoped store → the ambient (built-in) git
         credential → anonymous, each tried in order with an auth-class failure
@@ -948,7 +1249,7 @@ def _build_blueprint() -> Blueprint:
         # An explicit body token is EXCLUSIVE — try ONLY it, never fall through to
         # the store/ambient/anonymous chain. A stored/ambient success masking a
         # rejected typed token would let the wizard "succeed" here and then durably
-        # persist the untested-bad token at onboarding; an auth-class rejection is
+        # persist the untested-bad token at the first index; an auth-class rejection is
         # a 400 (bad user input), not the generic repo_access envelope.
         if req.token:
             try:
@@ -963,7 +1264,7 @@ def _build_blueprint() -> Blueprint:
                 return wiki_error_response(WikiError(code="repo_access", message=str(exc)))
 
         # No explicit token — resolve via the canonical chain. No job/slug context
-        # yet at onboarding, so fall back to the URL's bare HOST scope so a
+        # yet before the first index, so fall back to the URL's bare HOST scope so a
         # host-scoped credential (and the host-keyed ambient lookup) still resolves
         # even when the wizard hasn't chosen a slug yet. An unparseable slug/URL
         # coerces to no scope at all — the chain then yields anonymous alone, which
@@ -1004,9 +1305,7 @@ def _build_blueprint() -> Blueprint:
             return wiki_error_response(
                 WikiError(code="internal", message=f"job {job_id} vanished after cancel")
             )
-        return jsonify(
-            snapshot.model_dump(mode="json", by_alias=True, exclude_none=True)
-        )
+        return jsonify(_job_wire(snapshot))
 
     @bp.route("/index/<string:job_id>/resume", methods=["POST"])
     @guard.requires("wiki.write")
@@ -1102,14 +1401,24 @@ def _build_blueprint() -> Blueprint:
     @guard.requires("wiki.read")
     def post_qa():
         body = request.get_json(silent=True) or {}
-        question = (body.get("question") or "").strip()
+        try:
+            parsed = WikiQaRequest.model_validate(body)
+        except ValidationError as exc:
+            return wiki_error_response(WikiError(
+                code="validation",
+                message=str(exc),
+                fields=_pydantic_fields(exc),
+            ))
+        question = parsed.question.strip()
         # Optional continuation: an existing answer's session is re-engaged
         # with this question appended as a new turn instead of starting a
         # fresh session. Absent ⇒ today's behaviour, unchanged.
         # Continuation only needs ``question`` — ``project``/``fromPageId``/
-        # ``model`` ride the existing answer, so it validates independently
-        # of the new-session ``{question, project}`` combined check below.
-        answer_id = (body.get("answerId") or "").strip()
+        # ``model``/``mode`` ride the existing answer (mode is NEVER taken
+        # from the request here — a follow-up keeps the session's existing
+        # mode, per ``jobs.py``), so it validates independently of the
+        # new-session ``{question, project}`` combined check below.
+        answer_id = parsed.answerId.strip()
         if answer_id:
             if not question:
                 return wiki_error_response(WikiError(
@@ -1149,13 +1458,15 @@ def _build_blueprint() -> Blueprint:
                     "X-Accel-Buffering": "no",
                 },
             )
-        from_page_id = (body.get("fromPageId") or "").strip()
-        # ``model`` is optional — default it from config (qa → wiki → llm) so the
-        # MCP ``ask_wiki`` tool can omit it entirely.
-        model = (body.get("model") or "").strip() or _resolve_qa_model()
+        from_page_id = parsed.fromPageId.strip()
+        mode = parsed.mode
+        # ``model`` is optional — default it from config (qa → wiki → llm,
+        # fast-mode preferring its own key first) so the MCP ``ask_wiki`` tool
+        # can omit it entirely.
+        model = parsed.model.strip() or _resolve_qa_model(mode)
         # Public param is ``project``; ``slug`` is the internal name. Accept
         # either in the body but report validation against the public ``project``.
-        slug = (body.get("project") or body.get("slug") or "").strip()
+        slug = (parsed.project or parsed.slug).strip()
         missing: dict[str, str] = {}
         if not question:
             missing["question"] = "required"
@@ -1181,6 +1492,7 @@ def _build_blueprint() -> Blueprint:
                 question=question,
                 from_page_id=from_page_id,
                 model=model,
+                mode=mode,
                 runtime=_runtime,
                 hook_manager=_hook_manager,
             )
@@ -1346,7 +1658,29 @@ def _build_blueprint() -> Blueprint:
     @bp.route("/projects/<path:slug>/refresh", methods=["POST"])
     @guard.requires("wiki.write")
     def refresh_project(slug: str):
-        """Re-trigger a full re-index for an existing project (on-demand only)."""
+        """Re-index an existing project (on-demand only), scoped where it is safe.
+
+        Optional body ``{"mode": "auto"|"full"}``. An absent/empty body — or a
+        body that omits ``mode`` — runs the deployment's configured
+        ``wiki.refresh.default_mode`` (shipped as ``auto``, which tries the
+        cheap scoped delta pass and falls back to a full rebuild wherever reuse
+        cannot be justified). An explicitly requested mode always wins over that
+        setting. An unknown mode or an unrecognised field is a 400 naming it,
+        never a silent fall-through to the default.
+
+        Returns ``{queued, jobId, refresh}`` where ``refresh`` is the
+        :class:`RefreshDecision` that was actually taken — a full rebuild names
+        its reason, which is what a console renders beside the scope preview.
+
+        **Cost: `O(1)` plus one fingerprint probe.** The indexing work itself is
+        `O(repo)` and runs on a background thread or an agent session, so the
+        handler only enqueues it. The one thing it does NOT get for free is the
+        refresh decision: it reads the already-loaded project record and calls
+        the no-clone fingerprint probe (config + installed package metadata + a
+        ``shutil.which``), which is bounded and touches no network and no
+        repository — but it IS local I/O on the request path, so it is named
+        here rather than rounded down to `O(1)`.
+        """
         project = _store().get_project(slug)
         if project is None:
             return wiki_error_response(
@@ -1372,13 +1706,100 @@ def _build_blueprint() -> Blueprint:
                 )
             )
         try:
-            WikiIndexingJob.refresh(slug, runtime=_runtime, hook_manager=None)
+            req = RefreshProjectRequest.model_validate(request.get_json(silent=True) or {})
+        except Exception as exc:
+            return wiki_error_response(
+                WikiError(
+                    code="validation", message=str(exc), fields=_pydantic_fields(exc) or None
+                )
+            )
+        try:
+            # Same reason as the index route above: a hookless refresh runs
+            # without the session-end reconciler that hands a stranded job to
+            # recovery.
+            job = WikiIndexingJob.refresh(
+                slug,
+                mode=req.resolve_mode(_configured_refresh_mode()),
+                runtime=_runtime,
+                hook_manager=_hook_manager,
+            )
         except Exception as exc:
             return wiki_error_response(WikiError(code="internal", message=str(exc)))
         # A refresh re-indexes at the latest HEAD, so any cached freshness for
         # this slug is now stale — evict it so the next poll recomputes instead
         # of showing "behind by N" against the commit we just started rebuilding.
         _freshness_cache.pop(slug, None)
-        return jsonify({"queued": True})
+        # Additive: ``queued`` keeps its meaning for every caller, and the two
+        # extra keys answer what it alone cannot — which job to watch, and
+        # whether it will be cheap. ``refresh`` is
+        # stamped on both arms of ``WikiIndexingJob.refresh``; the ``None`` arm
+        # keeps the KEY present rather than letting its absence have to be read
+        # as a third meaning.
+        decision = job.refresh_decision
+        return jsonify({
+            "queued": True,
+            "jobId": job.job_id,
+            "refresh": (
+                decision.model_dump(mode="json", by_alias=True) if decision else None
+            ),
+        })
+
+    @bp.route("/projects/<path:slug>/session", methods=["POST"])
+    @guard.requires("wiki.write")
+    def open_maintainer_session(slug: str):
+        """Get-or-create the maintainer session for an indexed project.
+
+        Returns ``{"sessionId": ..., "created": bool}``. ``created`` is false
+        when the project already had a live maintainer session — the affordance
+        is a "take me to it" link as much as a "start one" button, and a caller
+        that renders the two differently needs to know which happened.
+
+        **Idempotent by construction**, so clicking twice cannot leave two
+        sessions behind: the session is keyed by a slug-derived tag, and the tag
+        collection maps one tag to one session. A session that was permanently
+        TERMINATED is replaced rather than resurrected, since termination is
+        one-way; the caller sees ``created: true`` for that, which is what it is.
+
+        An optional body ``{"newSession": true}`` asks for a session that is NOT the
+        canonical maintainer, always minting and always reporting
+        ``created: true``. That is the composer's shape — a caller starting a new
+        conversation about this project — while the default get-or-create is the
+        project card's. Both are correct for their own caller, which is why the
+        one endpoint serves both rather than the composer reusing a transcript
+        it never opened.
+
+        No run is started and no indexing job is created. The session is created
+        bound to the project — tool ceiling, playbook and slug written to its
+        context — and the first message drives the first turn through
+        ``POST /api/sessions/<id>/query`` like any other session.
+
+        404 when the slug names no indexed project: a maintainer's whole tool
+        surface reads pages, graph and a checkout that only an index produces,
+        so a session against an unindexed slug would open and then be unable to
+        do anything.
+
+        **Cost: `O(one record)`** — a project read, a tag read, and the session
+        create plus its two appends.
+        """
+        store = _store()
+        if store.get_project(slug) is None:
+            return wiki_error_response(
+                WikiError(code="not_found", message=f"project {slug} not found")
+            )
+        try:
+            req = MaintainerSessionRequest.model_validate(request.get_json(silent=True) or {})
+        except Exception as exc:
+            return wiki_error_response(
+                WikiError(
+                    code="validation", message=str(exc), fields=_pydantic_fields(exc) or None
+                )
+            )
+        try:
+            session_id, created = WikiMaintainerSession.open(
+                slug, runtime=_runtime, store=store, fresh=req.new_session
+            )
+        except Exception as exc:
+            return wiki_error_response(WikiError(code="internal", message=str(exc)))
+        return jsonify({"sessionId": session_id, "created": created})
 
     return bp

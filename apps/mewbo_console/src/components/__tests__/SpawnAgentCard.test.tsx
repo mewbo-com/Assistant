@@ -6,8 +6,8 @@ import { SpawnAgentCard } from '../SpawnAgentCard';
 afterEach(cleanup);
 
 const PR_RESEARCH_TASK =
-  'Use the gh CLI and a code-wiki MCP tool to research GitHub PR #142 from bearlike/Assistant.\n\n' +
-  'Run this command to get PR details:\n```\ngh pr view 142 --repo bearlike/Assistant\n```';
+  'Use the gh CLI and a code-wiki MCP tool to research GitHub PR #142 from acme/beacon.\n\n' +
+  'Run this command to get PR details:\n```\ngh pr view 142 --repo acme/beacon\n```';
 
 const PR_RESEARCH_PROPS = {
   caller: '09c085c1',

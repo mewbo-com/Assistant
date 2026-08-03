@@ -11,7 +11,12 @@
  *
  * The terminal `sources` block is NOT rendered here: QAScreen extracts it to
  * drive the right-panel source cards. LiveBlocks paints prose only. Mermaid
- * is off (Q&A answers never contain diagrams).
+ * is ON: a QA answer may embed a ```mermaid fence inside a `p` block's text
+ * when the question is structural (validated backend-side at the
+ * `wiki_emit_answer` seam before it ever streams here). The `diagram` BLOCK
+ * KIND stays unsupported below — that is a reference into a wiki PAGE's
+ * `diagramRegistry`, which a streaming answer has no equivalent of; only the
+ * fence-in-prose path carries a QA diagram.
  *
  * String text inside a block is parsed as markdown. The playbook asks the QA
  * agent to emit structured inline nodes ({"code": …}, {"link": …}), but LLMs
@@ -36,7 +41,7 @@ interface LiveBlocksProps {
 
 export function LiveBlocks({ blocks, onNavigatePage }: LiveBlocksProps) {
   const components = useMemo(
-    () => buildMarkdownComponents({ onNavigatePage, enableMermaid: false }),
+    () => buildMarkdownComponents({ onNavigatePage, enableMermaid: true }),
     [onNavigatePage],
   );
   return (
@@ -85,7 +90,10 @@ function BlockView({
     case "table":
       return <TableBlock head={block.head} rows={block.rows} components={components} onNavigatePage={onNavigatePage} />;
     case "diagram":
-      // Diagrams aren't valid inside QA answers and never stream here.
+      // The `diagram` BLOCK KIND (reference-by-id into a wiki page's
+      // `diagramRegistry`) stays wiki-page-only — a QA answer has no such
+      // registry. A QA diagram instead rides a ```mermaid fence inside a `p`
+      // block's text, rendered by the `code` component above (enableMermaid).
       return null;
     case "accordion":
     case "sources":

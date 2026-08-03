@@ -1,4 +1,4 @@
-"""Unit tests for ``mewbo_api.device_tools`` (Phase 1).
+"""Unit tests for ``mewbo_api.device_tools``.
 
 Covers ``DevicePendingCalls`` registry mechanics (consumed-once resolve,
 token check, opportunistic reaping) and ``ApiDeviceToolDispatcher.dispatch``
@@ -14,12 +14,12 @@ import time
 
 import pytest
 from mewbo_api.device_tools import ApiDeviceToolDispatcher, DevicePendingCalls
-from mewbo_core.session_event_bus import (
+from mewbo_core.loop.session_runtime import SessionRuntime
+from mewbo_core.session.session_event_bus import (
     get_session_event_bus,
     reset_session_event_bus_for_tests,
 )
-from mewbo_core.session_runtime import SessionRuntime
-from mewbo_core.session_store import SessionStore
+from mewbo_core.session.session_store import SessionStore
 
 
 @pytest.fixture(autouse=True)

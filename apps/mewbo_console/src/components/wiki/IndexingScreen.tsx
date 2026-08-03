@@ -33,6 +33,8 @@ import { cn } from "@/lib/utils";
 import { formatModelName } from "@/utils/model";
 
 import { BrandMark } from "../BrandMark";
+import { RefreshScopeSummary } from "./RefreshScopeSummary";
+import { SessionJumpButton } from "./SessionJumpButton";
 import { WikiTopBar } from "./WikiTopBar";
 import { useCancelIndexing, useIndexingJob, useResumeIndexing } from "./api/hooks";
 import { useIndexingStream } from "./api/streamHooks";
@@ -41,6 +43,19 @@ import type { PlatformId } from "./router";
 import { buildHref } from "./router";
 import { IndexingProgress, PHASE_ORDER } from "./progress";
 import { DEFAULT_WIKI_SLUG } from "./slug";
+
+// --- Session jump -----------------------------------------------------------
+// The affordance itself is the shared `SessionJumpButton` (the Q&A screen
+// mounts the same one); only the wording is this surface's. It renders ONLY
+// when the snapshot carries a `sessionId`, never disabled-with-tooltip: a
+// graph-only index is deliberately sessionless, and there is a brief window at
+// queue time before the indexer session is attached. It stays mounted for a
+// stopped run too — a failed index is precisely when the transcript is worth
+// reading.
+const INDEXING_SESSION_JUMP = {
+  label: "Watch the indexing session",
+  title: "Open the Mewbo session running this index",
+} as const;
 
 interface IndexingScreenProps {
   jobId?: string;
@@ -84,6 +99,19 @@ export function IndexingScreen({ jobId, slug, platform }: IndexingScreenProps) {
   const job = stream.job;
   const displaySlug = job?.slug ?? slug ?? DEFAULT_WIKI_SLUG;
   const displayModel = job?.model ?? snapshot.data?.model;
+  // Snapshot-only: the job→session binding rides the job wire shape, not the
+  // SSE event stream (see the BE `_job_wire` seam). The snapshot polls twice a
+  // second while the job is live, so the jump appears as soon as the indexer
+  // session is attached.
+  const sessionId = snapshot.data?.sessionId;
+  // Snapshot-only, same reasoning as `sessionId` above: stamped once at job
+  // creation and never rewritten, so there is nothing for the SSE stream to
+  // carry that the snapshot poll doesn't already have from the first fetch.
+  const refreshDecision = snapshot.data?.refreshDecision;
+  // `scopePreview` rides BOTH transports (one write, two reads — see the
+  // type's own doc) — prefer whichever has it: the stream event arrives the
+  // instant it's emitted, the snapshot poll lands within 500ms either way.
+  const scopePreview = stream.job?.scopePreview ?? snapshot.data?.scopePreview;
 
   // Phase + sub-progress → real percentage. Two transports feed the same
   // atomic class: SSE stream (fresh, but lags the reducer on mount until
@@ -137,7 +165,12 @@ export function IndexingScreen({ jobId, slug, platform }: IndexingScreenProps) {
   // stuck-at-X% bar. The SSE stream surfaces a terminal ``error`` (folded
   // into ``stream.error``) or a ``cancelled`` status; the snapshot poll is
   // authoritative for ``failed``/``interrupted``. ``complete`` is excluded —
-  // that path auto-navigates away above.
+  // that path auto-navigates away above. This status LITERAL is presentation
+  // only (which panel to draw) — it is deliberately NOT consulted for
+  // cancelability below: `interrupted` is stopped-but-incomplete AND still
+  // server-active (see `IndexingJob.isActive`) at the same time, so a status
+  // set can't answer both questions — that conflation is exactly what left a
+  // stuck job with no reachable Cancel.
   const FAILED: ReadonlySet<IndexingStatus> = useMemo(
     () => new Set<IndexingStatus>(["failed", "interrupted", "cancelled"]),
     [],
@@ -151,8 +184,14 @@ export function IndexingScreen({ jobId, slug, platform }: IndexingScreenProps) {
   const isIncomplete = Boolean(terminalStatus) || Boolean(stream.error);
   const incompleteError =
     stream.error?.message ?? snapshot.data?.error?.message ?? null;
-  const canCancel =
-    Boolean(jobId) && !isIncomplete && job?.status !== "complete" && job?.status !== "cancelled";
+  // Cancelability is the server's call, not a local re-derivation from
+  // `status`: `isActive` (`IndexingJob.isActive`) is the ONE authority. Read
+  // ONLY off the snapshot poll — the SSE-folded `job` never carries it (each
+  // stream event sets a handful of narrow fields, never the full wire
+  // object) — and require an explicit `true` rather than `!== false`, so a
+  // pre-rollout snapshot or a job that hasn't loaded yet fails closed instead
+  // of flashing a Cancel button the server hasn't actually endorsed.
+  const canCancel = Boolean(jobId) && snapshot.data?.isActive === true;
 
   const resumeIndexing = () => {
     if (!jobId || resume.isPending) return;
@@ -263,6 +302,16 @@ export function IndexingScreen({ jobId, slug, platform }: IndexingScreenProps) {
             })}
           </div>
 
+          {/* Refresh scope transparency — why a full rebuild was chosen, or
+              what a scoped refresh actually touched. Renders nothing on a
+              first index (no `refreshDecision`) or while a scoped run's
+              delta pass hasn't reported back yet. */}
+          <RefreshScopeSummary
+            refreshDecision={refreshDecision}
+            scopePreview={scopePreview}
+            className="mt-4"
+          />
+
           {/* Recovery panel — terminal-but-incomplete run. Surfaces the
               error and a Resume button instead of a stuck progress bar; the
               percent above already shows what completed. Resume re-drives the
@@ -351,13 +400,28 @@ export function IndexingScreen({ jobId, slug, platform }: IndexingScreenProps) {
             ))}
           </div>
 
-          {/* Footer — info + cancel */}
+          {/* Footer — info + session jump + cancel */}
           <div className="mt-4 pt-3 border-t border-[hsl(var(--border))] flex items-center gap-3 flex-wrap">
             <div className="inline-flex items-center gap-1.5 text-2xs text-[hsl(var(--muted-foreground))] flex-1 min-w-[200px]">
               <Info className="h-3 w-3" />
               Indexing typically takes a few minutes to half an hour. The page
               you'll land on opens automatically when ready.
             </div>
+            {sessionId ? (
+              <SessionJumpButton sessionId={sessionId} {...INDEXING_SESSION_JUMP} />
+            ) : (
+              refreshDecision?.path === "scoped" && (
+                /* TEXT, never a disabled control — a dead button says "this
+                   should work and doesn't", which is exactly the misreading
+                   here. The absence is CORRECT (a scoped refresh is sessionless
+                   by design); it was simply unreadable as anything but a
+                   flaky button, because 18 consecutive runs had shown one. */
+                <span className="text-2xs text-[hsl(var(--muted-foreground))]">
+                  A scoped refresh runs without an agent session, so there is no
+                  transcript to watch.
+                </span>
+              )
+            )}
             {canCancel && (
               <button
                 type="button"

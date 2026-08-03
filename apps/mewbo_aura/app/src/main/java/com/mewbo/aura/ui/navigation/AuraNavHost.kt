@@ -85,7 +85,7 @@ private const val DRAWER_SCRIM_ALPHA = 0.32f
 
 /**
  * `SavedStateHandle` key the assist-overlay pull-up handoff stashes its carried composer draft under,
- * on the chat destination's back-stack entry (user directive 2026-07-04). Public so the chat lane's
+ * on the chat destination's back-stack entry (user directive). Public so the chat lane's
  * `ChatViewModel` can read it and seed its composer (via the existing `DictationState.Final` ->
  * composer-draft path) - a raw value, deliberately not a URL-unsafe nav-route arg.
  */
@@ -112,12 +112,12 @@ fun AuraNavHost(
      * [AuraRoutes.MODALITY_ARG]'s KDoc), never re-read after that. `null` (the default) is a no-op,
      * same as [pendingHandoffSessionId]. */
     pendingHandoffModality: String? = null,
-    /** The composer draft carried by a pull-up handoff (user directive 2026-07-04,
+    /** The composer draft carried by a pull-up handoff (user directive,
      * `MainActivity.EXTRA_HANDOFF_DRAFT`) - stashed as a RAW value on the chat destination's
      * `SavedStateHandle` (see [HANDOFF_DRAFT_KEY]), never baked into the route (arbitrary composer
      * text isn't URL-safe). `null` (the default) is a no-op. */
     pendingHandoffDraft: String? = null,
-    /** `true` when a pull-up handoff had no session yet (user directive 2026-07-04,
+    /** `true` when a pull-up handoff had no session yet (user directive,
      * `MainActivity.EXTRA_HANDOFF_NEW_CHAT`): forces navigation to a fresh new chat even when there's
      * no session id to route to. `false` (the default) leaves ordinary/session handoffs unchanged. */
     pendingHandoffNewChat: Boolean = false,
@@ -166,7 +166,7 @@ fun AuraNavHost(
                 ) { backStackEntry ->
                     val sessionId = backStackEntry.arguments?.getString(AuraRoutes.SESSION_ID_ARG)
                     val handoffModality = backStackEntry.arguments?.getString(AuraRoutes.MODALITY_ARG)
-                    // Pull-up draft consume side (user directive 2026-07-04): observed as a
+                    // Pull-up draft consume side (user directive): observed as a
                     // StateFlow, not a one-shot read, because a launchSingleTop handoff onto an
                     // ALREADY-current chat entry reuses the entry - a plain LaunchedEffect(entry)
                     // would never re-fire for a second pull-up. hiltViewModel() here resolves the

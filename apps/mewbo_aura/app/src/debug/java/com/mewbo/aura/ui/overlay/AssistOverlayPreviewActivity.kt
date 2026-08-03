@@ -101,7 +101,7 @@ class AssistOverlayPreviewActivity : ComponentActivity() {
             haptics = haptics,
             refreshSessions = { sessionRepository.refreshSessions() },
             // Pull-up (composer-pill swipe-up) handoff, mirroring onHandoff above but with the
-            // session-vs-new-chat + draft extras AuraSession.launchApp sets (user directive 2026-07-04).
+            // session-vs-new-chat + draft extras AuraSession.launchApp sets (user directive).
             onPullUp = { sessionId, draft, modality ->
                 startActivity(
                     Intent(this, MainActivity::class.java).apply {
@@ -133,7 +133,7 @@ class AssistOverlayPreviewActivity : ComponentActivity() {
         }
 
         setContent {
-            // [R4 2026-07-10] This host called AuraTheme() bare (defaulted reducedMotion = false),
+            // [R4] This host called AuraTheme() bare (defaulted reducedMotion = false),
             // silently dropping the in-app SettingsStore toggle - the OS "Remove animations" signal
             // still applied (it's OR-ed inside AuraTheme itself), but a user who only set the
             // in-app toggle saw no effect here. Same fix AuraSession.onCreateContentView() already

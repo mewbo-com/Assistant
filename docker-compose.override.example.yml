@@ -1,19 +1,32 @@
 # Local overrides — copy to docker-compose.override.yml (auto-loaded by Compose).
 #
 # Post-init scripts: docker/init.d/*.sh run at container startup before the API.
-# Mount the directory read-only so scripts can be added/edited without rebuilding.
-# The images already bake the tracked scripts, so this mount is OPTIONAL — it is
-# how you add local-only ones (an internal CA trust script, extra tooling).
-# Mounting SHADOWS the baked copies, so the mounted directory must still carry
-# the tracked scripts you want to keep; copy them in rather than starting empty.
+# You do NOT need to mount them here — docker-compose.yml already bind-mounts the
+# whole directory read-only for both api and mcp, because the images bake none of
+# it. Add a local-only script (an internal CA trust script, extra tooling) by
+# dropping the file into docker/init.d and restarting; the mount picks it up with
+# no rebuild and no edit to this file.
 #
 # Project directories: mount at identical paths so configs/app.json works as-is.
 services:
   api:
     volumes:
-      - ./docker/init.d:/app/docker/init.d:ro
       - /home/you/Projects/my-project:/home/you/Projects/my-project
       - /home/you/Projects/another-repo:/home/you/Projects/another-repo
+
+  # Web IDE workspace roots: the mewbo-ide broker (the only service holding
+  # /var/run/docker.sock) refuses to start unless MEWBO_IDE_ALLOWED_ROOTS is
+  # set, and it can only validate a workspace path it can itself see. Mount
+  # every root you list there, read-only, at the SAME path as on the host —
+  # the broker realpath-resolves the requested path in its own mount
+  # namespace to catch a symlink escape, so an unmounted root always 403s
+  # even though the string is allowlisted. Set
+  # MEWBO_IDE_ALLOWED_ROOTS=/home/you/Projects/my-project:/home/you/Projects/another-repo
+  # in .env to match.
+  mewbo-ide:
+    volumes:
+      - /home/you/Projects/my-project:/home/you/Projects/my-project:ro
+      - /home/you/Projects/another-repo:/home/you/Projects/another-repo:ro
 
   # Uncomment and adjust if an upstream edge proxy / L7 gateway on a
   # different host on your LAN needs to forward requests to /ide/ at
@@ -27,21 +40,29 @@ services:
   #     - "192.168.1.10:5126:8080"    # a specific LAN IP
 
   # Web IDE on a bridge-networked API: the base compose runs the api with
-  # network_mode: host, where it reaches the ide-proxy on loopback
-  # (the default web_ide.proxy_url = http://127.0.0.1:5126). If you instead
-  # drop host networking here (e.g. to get LAN-accessible DNAT or to join
-  # other compose networks), the api can no longer reach that loopback —
-  # join it to the `mewbo-ide` network and point the probe at the proxy's
-  # in-network name via app.json: agent.web_ide.proxy_url =
-  # "http://mewbo-ide-proxy:8080". Otherwise readiness probes silently fail
-  # and the IDE loader times out waiting for the container to become ready.
+  # network_mode: host, where it reaches the ide-proxy AND the mewbo-ide
+  # broker on loopback (web_ide.proxy_url = http://127.0.0.1:5126,
+  # MEWBO_IDE_BROKER_URL = http://127.0.0.1:5128). If you instead drop host
+  # networking here (e.g. to get LAN-accessible DNAT or to join other
+  # compose networks), the api can no longer reach either loopback address —
+  # fix both the same way, by DNS name instead of by port:
+  #   - The broker sits on this project's `default` network already (same as
+  #     mongo), so joining `default` below is enough to reach it at
+  #     MEWBO_IDE_BROKER_URL=http://mewbo-ide:5128.
+  #   - The ide-proxy sits on the separate `mewbo-ide` bridge network, so
+  #     that one needs an explicit join too, and its probe URL moves into
+  #     app.json: agent.web_ide.proxy_url = "http://mewbo-ide-proxy:8080".
+  # Skip either fix and its readiness probe silently fails — the IDE loader
+  # times out waiting for a container that never gets marked ready.
   #
   # api:
   #   network_mode: !reset null
   #   networks:
-  #     - default
-  #     - mewbo-ide          # <-- reach the ide-proxy by DNS name
+  #     - default            # <-- reach the mewbo-ide broker by DNS name
+  #     - mewbo-ide           # <-- reach the ide-proxy by DNS name
   #     # ...your other networks
+  #   environment:
+  #     - MEWBO_IDE_BROKER_URL=http://mewbo-ide:5128
 
   # mewbo-mcp uses network_mode: host so it binds 0.0.0.0 inside the host
   # network by default (MEWBO_MCP_HOST=0.0.0.0 in docker-compose.yml).

@@ -8,21 +8,20 @@ the same discipline ``TriggerSpec``/``TriggerService`` follow.
 
 Collaborators are DI'd FIELDS (atomic-class rule): the app-manifest store, the
 trigger store + policy (triggers stay owned by the trigger subsystem — this only
-arms/pauses them, spec §2.10), a minimal :class:`AppSessionBackend` for the
+arms/pauses them), a minimal :class:`AppSessionBackend` for the
 session operations it needs, and ``now_fn``. Tests inject fakes + a fixed NOW;
 nothing here imports a concrete ``SessionRuntime`` or reaches for a real clock.
 
 The maintainer session is the app's durable agent home: created + tagged
 ``app:<app_id>`` at submit, advertising the ``apps`` capability so a trigger
 that later re-engages it sees the maintainer/repair AgentDefs. Pipeline triggers
-are **armed on it** at submit from each pipeline's DECLARED ``schedule`` (Phase
-1): the builder declares a ``time.cron``/``time.at`` schedule in its
+are **armed on it** at submit from each pipeline's DECLARED ``schedule``: the
+builder declares a ``time.cron``/``time.at`` schedule in its
 manifest and the PLATFORM mints the trigger on the maintainer, stamping the id
-into the (platform-owned) ``trigger_ref``. This retired builder self-arming — the
-old flow where the builder hand-armed a trigger on its own ephemeral session and
-submit re-homed it is still honoured for a legacy chat-builder (see
+into the (platform-owned) ``trigger_ref``. The builder does not self-arm on this
+path. The secondary flow — the builder hand-arms a trigger on its own ephemeral
+session and submit re-homes it — is still honoured for a chat-builder (see
 ``_rehome_pipeline_trigger``), but declared schedules are the primary path. See
-the design spec §5.
 """
 
 from __future__ import annotations
@@ -33,7 +32,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Protocol
 
 from mewbo_core.common import get_logger
-from mewbo_core.session_provenance import APPS_TAG_PREFIX
+from mewbo_core.session.session_provenance import APPS_TAG_PREFIX, SessionTag
 from mewbo_core.triggers.spec import TriggerProvenance
 
 from .models import (
@@ -49,14 +48,16 @@ from .models import (
     WorkspaceRef,
 )
 from .pipeline_runner import PipelineExecutionError
+from .staging import AppStagingArea
 from .store import new_app_id
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from mewbo_core.triggers.policy import TriggerPolicy
     from mewbo_core.triggers.spec import TriggerSpec
     from mewbo_core.triggers.store import TriggerStoreBase
+    from mewbo_core.workspaces.project_catalog import ProjectCatalog
 
     from .models import PipelineVerdict
     from .pipeline_tracker import AppPipelineRunTracker
@@ -68,19 +69,21 @@ logging = get_logger(name="api.apps.lifecycle")
 # sees the app maintainer/repair AgentDefs (capability-gated, workstream B).
 APPS_CAPABILITY = "apps"
 
-# Session tag that binds a maintainer session to its app (spec §5.1). The
-# ``/system/triggers`` + ``/triggers`` routes resolve triggers through it. The
-# literal is owned by core's ``session_provenance`` (so ``SessionOrigin.classify``
-# and this stamp site read the same string and can never drift); re-exported
-# under this name since it's this module's public/documented seam.
+# Session tag PREFIX that binds a session to its app. The ``/system/triggers`` +
+# ``/triggers`` routes match on it. The literal is owned by core's
+# ``session_provenance`` (so ``SessionOrigin.classify`` and this module read the
+# same string and can never drift); re-exported under this name since it's this
+# module's public/documented seam. The stamp sites build the WHOLE tag through
+# ``SessionTag.app`` / ``SessionTag.app_fresh`` rather than concatenating this,
+# so the two-segment and per-session-unique spellings stay in one home.
 MAINTAINER_TAG_PREFIX = APPS_TAG_PREFIX
 
 # A declared-schedule trigger is the app's durable heartbeat — it lives as long
 # as the app does (cancelled by pause/archive, never by lapsing on its own). This
 # far-future expiry is stamped EXPLICITLY at arm time precisely so
 # ``TriggerPolicy.admit`` cannot stamp its 7-day ``default_expiry`` (which it
-# applies ONLY when ``expires_at`` is None) and silently kill the heartbeat — the
-# live-verified trap that left app-a2a5f299e0ad refreshing exactly once, then dying.
+# applies ONLY when ``expires_at`` is None) and silently kill the heartbeat.
+# Leaving it None makes an app refresh exactly once and then die.
 _SCHEDULE_TRIGGER_TTL = timedelta(days=3650)
 
 # Placeholder frontend for a freshly-created draft (ledger decision): a valid
@@ -121,6 +124,20 @@ class AppSessionBackend(Protocol):
 
     def append_event(self, session_id: str, event: dict[str, object]) -> None:
         """Append a transcript event (the ``app_ready`` / ``app_updated`` wire event)."""
+        ...
+
+    def is_terminated(self, session_id: str) -> bool:
+        """Whether *session_id* was permanently terminated (a dead end — never reusable)."""
+        ...
+
+    def tags_for_session(self, session_id: str) -> Sequence[str]:
+        """The server-stamped tags on *session_id* (``()`` when it has none).
+
+        The tag tier is what binds a session the server OPENED against an app but
+        never made its maintainer — see :meth:`AppLifecycle._bound_app_for_session`.
+        A backend that does not implement it degrades to no tag tier (the
+        pre-tag behaviour), so it is read defensively rather than required.
+        """
         ...
 
 
@@ -166,6 +183,7 @@ class AppLifecycle:
         tracker: AppPipelineRunTracker | None = None,
         background_runner: Callable[[Callable[[], None]], None] | None = None,
         now_fn: Callable[[], datetime] | None = None,
+        project_catalog: ProjectCatalog | None = None,
     ) -> None:
         """Capture the injected collaborators; default ``now_fn`` is UTC now.
 
@@ -184,6 +202,13 @@ class AppLifecycle:
         fire executes synchronously, so seeding one inline would block ``submit`` /
         ``rearm``); default spawns a daemon thread. A test injects a synchronous
         ``lambda fn: fn()`` for determinism.
+
+        *project_catalog* is the ONE name→directory catalog the rest of the API
+        resolves a session's ``project`` through. It is read at the submit
+        boundary only, to refuse a ``workspace_ref`` whose key no project answers
+        to (:meth:`_validate_workspace_ref`). ``None`` means the deployment has
+        not wired it: the check is SKIPPED and a warning is logged once, so an
+        unwired deployment is visible rather than silently unguarded.
         """
         self.app_store = app_store
         self.trigger_store = trigger_store
@@ -193,11 +218,18 @@ class AppLifecycle:
         self.tracker = tracker
         self.background_runner = background_runner or self._spawn_daemon
         self.now_fn = now_fn or self._utcnow
+        self.project_catalog = project_catalog
+        # One warning per lifecycle for an unwired catalog: a submit must not
+        # crash over missing wiring, but a deployment running the submit
+        # boundary with the check disabled has to be readable in the log.
+        self._catalog_unwired_logged = False
         # Per-app locks serializing :meth:`rearm` — two concurrent re-arm POSTs for
         # the same app would otherwise both mint a fresh trigger off a stale in-memory
         # copy, and the lost ``app_store.save`` update would orphan one armed trigger
-        # (double-firing forever, with no sweep to reap it). Prod is gunicorn
-        # ``--workers 1 --threads 8``, so in-process locks suffice. Keyed by app_id so
+        # (double-firing forever, with no sweep to reap it). Prod is gunicorn with a
+        # SINGLE worker, so in-process locks suffice — it is the one-process
+        # invariant that carries this, not the thread count, which is tunable.
+        # Keyed by app_id so
         # one app's repair never blocks another's; the map is bounded by the app count.
         self._rearm_locks: dict[str, threading.Lock] = {}
         self._rearm_locks_guard = threading.Lock()
@@ -211,13 +243,13 @@ class AppLifecycle:
         """Run *task* on a fire-and-forget daemon thread (the default seed executor)."""
         threading.Thread(target=task, daemon=True).start()
 
-    # -- workspace scope (spec §2.3) ---------------------------------------
+    # -- workspace scope ---------------------------------------
 
     @staticmethod
     def _workspace_scope(workspace_ref: WorkspaceRef) -> dict[str, object]:
         """Map a workspace binding to the agent session's project-scope context.
 
-        The maintainer + builder are the app's agent side, and spec §2.3 binds
+        The maintainer + builder are the app's agent side, and the workspace binds
         them to the SAME project/workspace primitive ordinary sessions anchor to
         (the convention) — never a new workspace-like entity:
 
@@ -227,13 +259,101 @@ class AppLifecycle:
           through ``_resolve_session_cwd`` exactly like a console-created session.
         * ``kind="own"`` → v1 isolated default scope: NO ``project`` key (the
           session runs in its default temp cwd), tagged to the app by ``app_id``
-          alone. No workspace entity is minted (spec §2.3).
+          alone. No workspace entity is minted.
 
         The frontend never inherits any of this — it is agent-side only.
         """
         if workspace_ref.kind == "shared" and workspace_ref.key.strip():
             return {"project": workspace_ref.key.strip()}
         return {}
+
+    def _validate_workspace_ref(self, workspace_ref: WorkspaceRef) -> None:
+        """Refuse a ``kind="shared"`` key no project answers to (submit boundary).
+
+        :meth:`_workspace_scope` stamps that key verbatim as the agent session's
+        ``project`` context field, and nothing between the two namespaces ever
+        compared them: a key the catalog does not know (an app id, a title, a
+        directory name) persisted happily and then failed on EVERY turn of the
+        maintainer session, which resolves the same field through the catalog.
+        The submit boundary is where model-authored data crosses into storage,
+        so it is where the two namespaces are made to agree.
+
+        **A method here, NOT a ``model_validator`` on ``WorkspaceRef``** — the
+        ``ensure_unique_pipeline_names`` precedent, and the reason is
+        load-bearing: the app store is append-only, so stored ``AppVersion``
+        snapshots already holding a bad key MUST keep parsing, or every detail
+        read of an affected app 500s. Validation of NEW data belongs at the
+        trust boundary it crosses; stored history re-crosses the parse seam
+        under the contract it was written with.
+
+        **``resolve`` rather than ``find``**, because ``resolve`` is what the
+        key eventually reaches. ``find`` would accept a key that is listed but
+        has no usable directory (a registered repository with no checkout), so
+        submit-time acceptance would stop meaning run-time resolvability — the
+        same silent wedge in a narrower form. Its refusal message already embeds
+        the catalog's own available-list, so the reask is correctable in one turn
+        without reaching into the private ``_available_hint``.
+
+        **But the runtime is not ``resolve`` — it is
+        ``backend.py:_resolve_project_cwd``, which RECOVERS from one refusal**:
+        an ``unavailable`` MANAGED project (or worktree) is a directory Mewbo
+        owns, so the runtime creates it and succeeds. Refusing that here would
+        make submit STRICTER than the thing it predicts, which is the opposite
+        of the property this check exists for, and would block a builder binding
+        to a perfectly good managed workspace. So that one arm is mirrored:
+        ``unavailable`` + a managed/worktree entry with a path ⇒ accept. Every
+        other code — ``not_found``, ``no_checkout``, ``auto_sentinel``,
+        ``empty``, and ``unavailable`` on a CONFIGURED project, whose directory
+        belongs to the operator — still refuses.
+
+        **That mirroring is a SECOND COPY of a rule, and that is a cost, not a
+        win.** ``backend.py:_resolve_project_cwd`` is the authority; this copy
+        will drift the day that recovery changes. The real cure is for the
+        recovery to live on :class:`ProjectCatalog` so both callers read one
+        implementation — worth doing, deliberately not done here.
+
+        **No side effects.** Unlike the runtime, this makes no directory: a
+        validator that mutates the filesystem is the wrong shape. Only the
+        accept/refuse DECISION is mirrored, never the repair.
+
+        ``kind="own"`` writes no ``project`` at all and is never checked.
+        """
+        if workspace_ref.kind != "shared":
+            return
+        key = workspace_ref.key.strip()
+        if not key:
+            # An empty shared key writes no project either — same scope as own.
+            return
+        catalog = self.project_catalog
+        if catalog is None:
+            if not self._catalog_unwired_logged:
+                self._catalog_unwired_logged = True
+                logging.warning(
+                    "No project catalog wired into AppLifecycle — a shared workspace_ref "
+                    "key is being accepted unchecked, so an app can bind its agent "
+                    "sessions to a project that does not exist."
+                )
+            return
+        try:
+            catalog.resolve(key)
+        except ValueError as exc:
+            # ProjectResolutionError IS a ValueError and carries a ``code``;
+            # read it defensively so a plain ValueError still refuses.
+            if getattr(exc, "code", None) == "unavailable":
+                # The ONE arm ``_resolve_project_cwd`` recovers from: a managed
+                # project's directory is Mewbo's own to create, so the runtime
+                # makes it and succeeds. Mirror the DECISION only — no makedirs.
+                entry = catalog.find(key)
+                if entry is not None and entry.kind in {"managed", "worktree"} and entry.path:
+                    return
+            # ``submit`` already surfaces a ValueError to the builder as an
+            # actionable reask.
+            raise ValueError(
+                f"workspace_ref key {key!r} is not a project this platform can resolve: "
+                f"{exc} A kind='shared' key must be an EXISTING project key from the "
+                "platform's project list — an app id, an app title or a directory name is "
+                "never one. Use kind='own' if the app needs no project workspace."
+            ) from exc
 
     def _agent_session_context(self, app_id: str, workspace_ref: WorkspaceRef) -> dict[str, object]:
         """The context event every app agent session carries: capability + app tag + scope."""
@@ -242,6 +362,108 @@ class AppLifecycle:
             "app_id": app_id,
             **self._workspace_scope(workspace_ref),
         }
+
+    def _mint_maintainer_session(
+        self, app_id: str, workspace_ref: WorkspaceRef, *, canonical: bool = True
+    ) -> str:
+        """Mint + tag + scope a session bound to *app_id* — the ONE place one is minted.
+
+        Shared by :meth:`submit` (the fresh-maintainer branch),
+        :meth:`get_or_create_maintainer_session` and its ``fresh`` path, so the
+        capability stamp and the workspace scope are written once rather than
+        drifting between copies.
+
+        ``canonical=False`` takes the per-session-unique ``app:<id>:<session>``
+        tag instead of the bare ``app:<id>``. The bare one is held by the app's
+        builder-or-maintainer session and a tag maps to exactly ONE session, so a
+        second claimant would steal it — the additional session gets an
+        un-stealable variant that still carries the same ``app_id`` facet, which
+        is what :meth:`AppStagingArea.app_for_session` resolves it by.
+        """
+        session_id = self.sessions.create_session()
+        self.sessions.tag_session(
+            session_id,
+            SessionTag.app(app_id)
+            if canonical
+            else SessionTag.app_fresh(app_id, session_id),
+        )
+        self.sessions.append_context_event(
+            session_id, self._agent_session_context(app_id, workspace_ref)
+        )
+        return session_id
+
+    # -- maintainer session (get-or-create) ---------------------------------
+
+    def get_or_create_maintainer_session(
+        self, app_id: str, *, fresh: bool = False
+    ) -> tuple[str, bool] | None:
+        """Return this app's durable maintainer session, minting one if it has none.
+
+        ``submit`` mints (or reuses) a maintainer session implicitly, but nothing
+        hands it back — an app whose console-streamed builder session already
+        ended, or one reached only via REST/an operator, previously had NO way to
+        open a conversation with its own maintainer. This is that route back.
+
+        Resolution mirrors ``get_app``/``submit_app``'s ``_resolve_app`` scan
+        (maintainer, then owner) so the session handed back is one that scan can
+        already find: minting a THIRD session here would give the app two live
+        claimants and make the scan's first-match order load-bearing. A builder
+        session that never submitted (``owner_session_id`` set,
+        ``maintainer_session_id`` still ``None``) is therefore REUSED, never
+        replaced — the draft-in-progress case.
+
+        **Decision: an ``archived`` app is NOT refused.** `submit`'s
+        maintainer-resubmit branch overwrites ``status`` to ``"building"`` in
+        memory before calling ``AppSpec.transition("live", ...)``, bypassing
+        ``_ALLOWED_TRANSITIONS["archived"]`` (the empty, otherwise-terminal set)
+        — the documented way an app's own maintainer revives an archived app (see
+        :meth:`submit`'s docstring). Refusing this route for an archived app would
+        strand the one session that can ever reach that revival path again, for
+        no corresponding safety gain — archiving already cancelled every trigger
+        the app owned, so a reachable maintainer session grants no more than an
+        agent conversation, not a live re-arm.
+
+        A session that was PERMANENTLY TERMINATED is never handed back (a
+        terminated session is a documented dead end — it cannot be steered or
+        re-engaged) — that case mints a replacement instead.
+
+        **``fresh=True`` skips the reuse entirely and always mints**, for a caller
+        that asked to START a conversation about this app rather than be handed
+        the one already in progress — a composer submitting a turn, as against
+        the "open session" action on the app detail header, which wants exactly
+        the reuse above and is why that stays the default.
+
+        A fresh session is deliberately NOT written back to
+        ``maintainer_session_id``: the repair wake dereferences that field, and a
+        second claimant would make the resolvers' first-match scan order decide
+        which session keeps working. It is bound by its TAG instead, and it is
+        therefore READ-plus-STAGE only — see :meth:`AppStagingArea.app_for_session`
+        for what that tier resolves and this class's ``submit`` for why a
+        non-maintainer can never overwrite a live app.
+
+        Returns ``None`` for an unknown *app_id*; else ``(session_id, created)``.
+        """
+        app = self.app_store.get(app_id)
+        if app is None:
+            return None
+        if fresh:
+            return self._mint_maintainer_session(
+                app_id, app.workspace_ref, canonical=False
+            ), True
+        if app.maintainer_session_id is not None and not self.sessions.is_terminated(
+            app.maintainer_session_id
+        ):
+            return app.maintainer_session_id, False
+        if app.owner_session_id is not None and not self.sessions.is_terminated(
+            app.owner_session_id
+        ):
+            return app.owner_session_id, False
+        session_id = self._mint_maintainer_session(app_id, app.workspace_ref)
+        now = self.now_fn()
+        self.app_store.save(
+            app.model_copy(update={"maintainer_session_id": session_id, "updated_at": now})
+        )
+        return session_id, True
 
     # -- draft -------------------------------------------------------------
 
@@ -254,7 +476,7 @@ class AppLifecycle:
         from and the ``owner_session_id`` ``submit`` later reconciles. No version
         snapshot is written yet; ``submit`` records v1 with the real design.
 
-        The builder RUN is started here (spec §5.1): the session advertises the
+        The builder RUN is started here: the session advertises the
         ``apps`` capability so the ``app-builder`` skill + AgentDef surface, and
         the kick-off message hands the root the intent + workspace choice + the
         assigned ``app_id`` (so ``submit_app`` reuses it) so the root spawns the
@@ -263,7 +485,7 @@ class AppLifecycle:
         now = self.now_fn()
         app_id = new_app_id()
         builder_session_id = self.sessions.create_session()
-        self.sessions.tag_session(builder_session_id, f"{MAINTAINER_TAG_PREFIX}{app_id}")
+        self.sessions.tag_session(builder_session_id, SessionTag.app(app_id))
         self.sessions.append_context_event(
             builder_session_id,
             self._agent_session_context(app_id, workspace_ref),
@@ -319,31 +541,79 @@ class AppLifecycle:
 
     # -- submit (build → live) ---------------------------------------------
 
+    def _bound_app_for_session(self, session_id: str) -> AppSpec | None:
+        """The app the SERVER bound *session_id* to, or ``None`` if it bound none.
+
+        ONE resolution path, shared with ``get_app``:
+        :meth:`AppStagingArea.app_for_session` — the two id FIELDS
+        (``maintainer_session_id`` / ``owner_session_id``) first, then the
+        server-stamped ``app:<id>[:<session>]`` TAG. Widening submit's membership
+        test to the tag tier is what lets a session the console composer opened
+        against an existing app update THAT app instead of being told to fork a
+        new one; re-deriving the rule here instead would give the read surface and
+        the write surface two answers that drift.
+
+        **The tag, never the ``app_id`` CONTEXT key.** A request's context is
+        merged verbatim into the session and is re-writable on any later turn, so
+        it addresses an app while proving nothing about it. The tag is stamped
+        only by this class, only for an app it just read.
+
+        Reading the tags is a defensive call: an :class:`AppSessionBackend` that
+        does not implement ``tags_for_session``, or a session store that is
+        momentarily unavailable, degrades to no tag tier — i.e. exactly the
+        pre-tag behaviour, which is the fail-CLOSED direction here (the tier only
+        ever widens what a session may do).
+
+        Cost: ``O(collection)`` in the number of stored apps, plus one ``O(1)``
+        get per apps tag — the same scan ``get_app`` already performs per call.
+        """
+        reader = getattr(self.sessions, "tags_for_session", None)
+        tags: tuple[str, ...] = ()
+        if callable(reader):
+            try:
+                tags = tuple(reader(session_id))
+            except Exception as exc:  # noqa: BLE001 - an unreadable tag is "no tag"
+                logging.warning(
+                    "apps: session tag read failed for {} ({}); submit falls back to "
+                    "the id fields alone",
+                    session_id,
+                    exc,
+                )
+        return AppStagingArea(session_id=session_id).app_for_session(
+            self.app_store, session_tags=tags
+        )
+
     def submit(self, draft: AppSpec, *, builder_session_id: str) -> AppSpec:
         """Persist the built app as a new version, arm triggers, go live.
 
         Reconciles with the ``building`` draft row the gallery-create flow already
-        wrote (spec §5.1). When a row exists for ``draft.app_id`` it is the
+        wrote. When a row exists for ``draft.app_id`` it is the
         authority for the app's IDENTITY — ``owner_session_id`` / ``created_at`` /
         ``workspace_ref`` are preserved from it and only the builder-authored
         CONTENT (frontend, collections, pipelines, policies, title/summary/icon)
         is taken from *draft*.
 
-        A submit for an app whose row is NOT ``building``/``draft`` is normally
-        REFUSED — the double-submit + live-overwrite guard (a chat builder reusing
-        a live ``app_id`` would otherwise silently clobber it), surfaced to the
-        builder as a reask. The ONE exception: the app's OWN maintainer resubmitting
-        (``builder_session_id == existing.maintainer_session_id``) is the
-        ``app-repair`` AgentDef's documented "resubmit with the same ``app_id`` to
-        ship a new version" flow (`app-repair.md`), not the collision this guard
-        exists to catch — it proceeds as a version bump, reusing the SAME
-        maintainer session (never minting a second one, which would orphan the
-        live maintainer's armed triggers) and recording the new snapshot as a
+        A submit for an app whose row is NOT ``building``/``draft`` is REFUSED
+        unless the calling session is one the SERVER bound to this app — the
+        double-submit + live-overwrite guard (a chat builder reusing a live
+        ``app_id`` would otherwise silently clobber it), surfaced to the builder
+        as a reask. Membership is :meth:`_bound_app_for_session`, so BOTH the
+        app's own maintainer (the ``app-repair`` AgentDef's documented "resubmit
+        with the same ``app_id``" flow) and a session the console composer opened
+        against the app (bound by its stamped tag) take the update branch: it
+        proceeds as a version bump, reusing the app's EXISTING maintainer session
+        — never the submitter, never a second mint, which would orphan the live
+        maintainer's armed triggers — and recording the snapshot as a
         ``"repair"``-authored version.
+
+        The mirror-image refusal guards the INSERT path: a session already bound
+        to one app cannot mint a different one. Before it, a refused update left
+        the model holding an edited bundle and a refusal that read as advice to
+        fork, and a second app is what the operator got.
 
         Steps: reconcile identity, mint (or reuse) + tag the maintainer session,
         arm each pipeline's DECLARED schedule on it within :class:`TriggerPolicy`
-        caps (re-homing a legacy builder-armed trigger where there is no schedule),
+        caps (re-homing a builder-armed trigger where there is no schedule),
         persist the manifest + version snapshot, transition to ``live``, and emit
         ``app_ready`` on the builder session the console is streaming.
         """
@@ -353,14 +623,49 @@ class AppLifecycle:
         # resolver (the fire seam, the ledger, the trigger binding), so refuse them
         # at the submit boundary before anything arms.
         draft.ensure_unique_pipeline_names()
+        # timeout_seconds parses up to 600 (the append-only-store bound — see the
+        # field's own comment) but the real ceiling a pipeline may EXECUTE at is
+        # narrower; refuse a new/updated pipeline over it here rather than let it
+        # go live and get silently clamped at run time.
+        draft.ensure_pipeline_timeouts_fit()
+        # A shared workspace key becomes the agent sessions' ``project`` context
+        # field, which the maintainer resolves through the SAME catalog on every
+        # turn — so a key that catalog cannot resolve wedges the app's whole
+        # agent side. Refuse it here, before anything persists.
+        self._validate_workspace_ref(draft.workspace_ref)
         app_id = draft.app_id
         existing = self.app_store.get(app_id)
+        # The app the SERVER bound this session to, if any — the id fields it owns
+        # OR the stamped tag it was opened against. It decides BOTH branches below:
+        # which app this session may update, and which it may not create.
+        bound = self._bound_app_for_session(builder_session_id)
         is_maintainer_resubmit = False
+        if bound is not None and bound.app_id != app_id:
+            # A session bound to app A minting app B is the FORK this guard exists
+            # to stop: a composer session opened against an existing app that is
+            # refused an update must report the refusal, never create a second app
+            # for the same purpose. It fires on the INSERT path too (where the
+            # live-overwrite guard below never runs), which is where the fork
+            # actually landed.
+            raise ValueError(
+                f"this session is bound to app {bound.app_id!r}, so it cannot submit "
+                f"app {app_id!r}. Resubmit with app_id {bound.app_id!r} to ship a new "
+                "version of the app this session was opened against; a genuinely "
+                "different app has to be created from its own session."
+            )
         if existing is not None and existing.status not in ("building", "draft"):
-            if existing.maintainer_session_id != builder_session_id:
+            if bound is None:
+                # Not the maintainer, not tag-bound to this app: the chat-builder
+                # collision this guard exists to catch. The remedy is NOT a new
+                # app_id — that sentence is what produced a duplicate app — so the
+                # message names the real next move and forbids the fork explicitly.
                 raise ValueError(
-                    f"app {app_id!r} is already {existing.status!r}, not building/draft — "
-                    "refusing to overwrite a live app (submit a new app_id instead)"
+                    f"app {app_id!r} is already {existing.status!r}, not building/draft, and "
+                    "this session is not bound to it — refusing to overwrite a live app. "
+                    "Do NOT submit under a different app_id: that creates a SECOND app "
+                    "rather than updating this one. Report this refusal; an update has to "
+                    "come from a session the server opened against this app (its maintainer, "
+                    "or one minted by POST /api/apps/<app_id>/session)."
                 )
             is_maintainer_resubmit = True
         # Verify every code pipeline actually RUNS before anything persists/arms — a
@@ -379,27 +684,38 @@ class AppLifecycle:
             # tag/context stay intact; a second mint would orphan the live app). But
             # CANCEL its prior pipeline triggers before re-arming from the fresh
             # draft: the declared-schedule path mints a NEW trigger per pipeline
-            # (unlike the legacy re-home path, which cancels its own source), so
-            # without this every repair resubmit would LEAK the previous armed
+            # and cancels nothing (only the re-home path cancels its own source),
+            # so without this every repair resubmit would LEAK the previous armed
             # trigger — it keeps firing a stale wake_prompt, its now-unmatched
             # trigger_id yields no pipeline_scope (broad session grants),
             # self-amplifies under on_pipeline_failure="repair", and accretes
             # against max_armed_per_session until admit rejects the CURRENT
             # schedule while the orphans keep firing. The fresh draft is the whole
             # truth for the trigger set, so every prior maintainer trigger is stale.
-            maintainer = builder_session_id
-            self.trigger_store.cancel_for_session(maintainer)
+            #
+            # ⚠️ THE MAINTAINER IS THE APP'S OWN SESSION, NEVER THE SUBMITTER.
+            # The two coincide for an app-repair resubmit and DIVERGE for a
+            # tag-bound composer session, which owns no triggers: reading the
+            # submitter here would cancel an empty set while the real maintainer's
+            # armed triggers survive and keep firing a stale wake_prompt — exactly
+            # the leak the paragraph above exists to prevent — and would then arm
+            # the new schedule on a session `maintainer_session_id` does not point
+            # at, so the repair wake could never reach it. Do not "simplify" this
+            # back to ``builder_session_id``.
+            maintainer = existing.maintainer_session_id if existing is not None else None
+            if maintainer is None:
+                # A live app with no maintainer session is not reachable through
+                # the normal paths (submit always stamps one); minting one is the
+                # honest recovery and there are no prior triggers to cancel.
+                maintainer = self._mint_maintainer_session(app_id, base.workspace_ref)
+            else:
+                self.trigger_store.cancel_for_session(maintainer)
         else:
-            maintainer = self.sessions.create_session()
-            self.sessions.tag_session(maintainer, f"{MAINTAINER_TAG_PREFIX}{app_id}")
-            self.sessions.append_context_event(
-                maintainer,
-                self._agent_session_context(app_id, base.workspace_ref),
-            )
+            maintainer = self._mint_maintainer_session(app_id, base.workspace_ref)
 
         # The wakeability floor is enforced HERE, on the incoming draft — not at
-        # model parse, where it would reject the append-only version history's
-        # legacy snapshots (see PipelineSpec.ensure_wakeable's docstring).
+        # model parse, where it would reject stored version snapshots carrying
+        # none of the three fields (see PipelineSpec.ensure_wakeable).
         for p in draft.pipelines:
             p.ensure_wakeable()
         pipelines = [
@@ -626,7 +942,7 @@ class AppLifecycle:
     ) -> None:
         """Log (never raise) the pipelines that end up with no ARMED trigger.
 
-        Honesty, not enforcement (spec §6): an on-demand pipeline (``trigger_ref``
+        Honesty, not enforcement: an on-demand pipeline (``trigger_ref``
         left ``None``) is a legitimate shape, but so is the less obvious gap this
         also catches — a policy-capped or already-terminal ``trigger_ref`` that
         ``_arm_pipeline_trigger`` left POINTING AT a trigger that isn't armed on
@@ -649,19 +965,17 @@ class AppLifecycle:
     def _arm_pipeline(
         self, pipeline: PipelineSpec, *, maintainer: str, now: datetime
     ) -> PipelineSpec:
-        """Arm *pipeline*'s declared wake on the maintainer session (Phase 1).
+        """Arm *pipeline*'s declared wake on the maintainer session.
 
         Two paths, dispatched off the model (no service-side ``if kind ==``):
 
         * **PRIMARY — a declared ``schedule``.** The PLATFORM mints a fresh
           trigger on the maintainer from ``schedule.to_trigger_spec`` and stamps
-          its id into ``trigger_ref`` (which is platform-owned output). This
-          retires builder self-arming for apps — the builder no longer touches
-          the trigger store at all.
-        * **LEGACY — a builder-supplied ``trigger_ref`` with no schedule.** The
-          legacy flow where the builder hand-armed a trigger on its own session
-          is still honoured: :meth:`_rehome_pipeline_trigger` re-homes it onto the
-          maintainer. Deprecated, kept working for the chat-builder path.
+          its id into ``trigger_ref`` (which is platform-owned output). The
+          builder does not touch the trigger store at all on this path.
+        * **A builder-supplied ``trigger_ref`` with no schedule.** The builder
+          armed a trigger on its own session; :meth:`_rehome_pipeline_trigger`
+          re-homes it onto the maintainer. The chat-builder path.
 
         Neither ⇒ an on-demand pipeline, returned unchanged (no armed wake).
         """
@@ -700,11 +1014,11 @@ class AppLifecycle:
     def _rehome_pipeline_trigger(
         self, pipeline: PipelineSpec, *, maintainer: str
     ) -> PipelineSpec:
-        """LEGACY (Phase 1): re-home a builder-armed trigger onto the maintainer.
+        """Re-home a builder-armed trigger onto the maintainer.
 
-        The deprecated legacy path — declared ``schedule`` is now the primary
-        one (see :meth:`_arm_pipeline`). Kept working for a chat-builder that still
-        arms its own trigger during the build: returns the pipeline with
+        The secondary arming path (a declared ``schedule`` is the primary one — see
+        :meth:`_arm_pipeline`), for a chat-builder that arms its own trigger during
+        the build: returns the pipeline with
         ``trigger_ref`` repointed to a fresh maintainer-owned copy. A pipeline
         whose ``trigger_ref`` is unresolvable / already-terminal is returned
         unchanged; a policy rejection skips arming that one trigger rather than
@@ -742,7 +1056,7 @@ class AppLifecycle:
     # -- pause / resume (app == its triggers) ------------------------------
 
     def pause(self, app_id: str) -> AppSpec | None:
-        """Pause the app and every armed trigger it owns (spec §2.10)."""
+        """Pause the app and every armed trigger it owns."""
         app = self.app_store.get(app_id)
         if app is None:
             return None
@@ -859,7 +1173,7 @@ class AppLifecycle:
     def rollback(self, app_id: str, version: int) -> AppSpec | None:
         """Repoint the app to an earlier version's design as a NEW version.
 
-        History is append-only (spec §2.9): rollback never rewrites a snapshot —
+        History is append-only: rollback never rewrites a snapshot —
         it copies the target version's design forward as ``latest + 1`` (keeping
         the live maintainer/owner/status) and records a new ``user`` snapshot.
         Returns ``None`` if the app or the target version is absent.
@@ -947,17 +1261,17 @@ class AppLifecycle:
         except KeyError:  # pragma: no cover - trigger removed concurrently
             pass
 
-    # -- pipeline-failure policy (spec §2.11, wired at the run-tracker close seam) --
+    # -- pipeline-failure policy --
 
     def handle_pipeline_failure(self, app: AppSpec, issue: PipelineIssue) -> None:
         """React to a pipeline needing attention per ``policies.on_pipeline_failure``.
 
         Called by :class:`AppPipelineRunTracker` for the two reasons an autonomous
         pipeline needs a human or an agent: a run that closed ``failed``, and a run
-        that SUCCEEDED while regressing a collection it used to write
+        that SUCCEEDED while regressing a collection earlier runs wrote
         (:class:`PipelineIssue` carries which, and owns the prose for each). Three
-        declarative reactions wired onto EXISTING seams (no new hook engine, spec
-        §2.11): ``repair`` starts a repair run on the maintainer via the same
+        declarative reactions wired onto EXISTING seams (no new hook engine):
+        ``repair`` starts a repair run on the maintainer via the same
         run-starter that kicks off the builder; ``pause`` pauses the app + its
         triggers; ``notify`` emits an ``app_issue`` event and does nothing else.
 
@@ -1084,9 +1398,9 @@ class AppLifecycle:
 class RuntimeSessionBackend:
     """Adapts a ``SessionRuntime`` to the :class:`AppSessionBackend` Protocol.
 
-    Thin translation only — ``create_session`` lives on the runtime's session
-    store, the rest are runtime methods. Kept out of ``backend.py`` so the
-    lifecycle's whole session dependency stays in the package that owns it.
+    Thin translation only — every method is a runtime method. Kept out of
+    ``backend.py`` so the lifecycle's whole session dependency stays in the
+    package that owns it.
     """
 
     def __init__(self, runtime: object) -> None:
@@ -1094,8 +1408,13 @@ class RuntimeSessionBackend:
         self._runtime = runtime
 
     def create_session(self) -> str:
-        """Mint a new empty session via the runtime's session store."""
-        return self._runtime.session_store.create_session()  # type: ignore[attr-defined]
+        """Mint a new empty session.
+
+        ``resolve_session`` with no tag is the runtime's mint-a-session seam;
+        the app tags it separately because the two app sessions that use this
+        (builder, maintainer) pick their session by branch, not by tag lookup.
+        """
+        return self._runtime.resolve_session()  # type: ignore[attr-defined]
 
     def tag_session(self, session_id: str, tag: str) -> None:
         """Attach a resolution tag to a session."""
@@ -1108,6 +1427,23 @@ class RuntimeSessionBackend:
     def append_event(self, session_id: str, event: dict[str, object]) -> None:
         """Append a transcript event onto a session."""
         self._runtime.append_event(session_id, event)  # type: ignore[attr-defined]
+
+    def is_terminated(self, session_id: str) -> bool:
+        """Whether the session was permanently terminated."""
+        return self._runtime.is_terminated(session_id)  # type: ignore[attr-defined]
+
+    def tags_for_session(self, session_id: str) -> list[str]:
+        """The server-stamped tags on *session_id* (the store's own read).
+
+        This is the PRODUCTION half of ``submit``'s tag tier: without it the
+        deployment resolves no tags and the widened membership test is dead code
+        — the fix would pass every test and change nothing for the operator whose
+        composer session is refused. Reached through the runtime's session store,
+        the same object ``backend.py`` reads tags from elsewhere.
+        """
+        return list(
+            self._runtime.session_store.tags_for_session(session_id)  # type: ignore[attr-defined]
+        )
 
 
 __all__ = [

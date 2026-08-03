@@ -10,7 +10,7 @@ the cause into a coarse, machine-filterable ``reason``.
 
 This is the single shared home for the unwrap + classify primitives: the MCP
 connection pool (`mcp_pool`) reuses them for its structured failure logs and
-its quarantine/backoff policy, and the legacy one-shot path
+its quarantine/backoff policy, and the one-shot path
 (`mcp`) reuses them for its discovery/runtime failure logs.
 
 Duck-typed on the ``exceptions`` attribute (a tuple of sub-exceptions) rather

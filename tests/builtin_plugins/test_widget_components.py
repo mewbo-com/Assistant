@@ -252,8 +252,8 @@ class TestReadmeParity:
 
 class TestFutureImportAllowed:
     """``from __future__ import annotations`` is the idiomatic way to get
-    PEP 563-style type hints on any Python 3.7+.  It was historically
-    missing from the widget allowlist; guard against regression."""
+    PEP 563-style type hints on any Python 3.7+, so the widget allowlist
+    must carry it."""
 
     def test_future_in_allowlist(self):
         assert "__future__" in ALLOWED_MODULES

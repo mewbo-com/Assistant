@@ -15,6 +15,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -46,6 +47,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -55,6 +57,7 @@ import com.mewbo.aura.ui.aurora.AuroraEdgeGlow
 import com.mewbo.aura.ui.aurora.EdgeGlowState
 import com.mewbo.aura.ui.common.ChatOverflowMenu
 import com.mewbo.aura.ui.common.OverflowMenuItem
+import com.mewbo.aura.ui.common.ProjectRowKind
 import com.mewbo.aura.ui.composer.ComposerOptionsSheet
 import com.mewbo.aura.ui.theme.AuraColors
 import com.mewbo.aura.ui.theme.AuraMotion
@@ -137,18 +140,17 @@ fun ChatScreen(
     // as a shared flag (both read the one source of truth, `state.runPhase`).
     val overWash = state.runPhase == RunPhase.Sending || state.runPhase == RunPhase.Streaming
 
-    // (user directive, two rounds): the landing/chat liveness glow is the BOTTOM
-    // bloom (the overlay's own AuroraEdgeGlow, reused - one shader family, no wash fork), the top
-    // stays clean, and it renders HERE behind a TRANSPARENT Scaffold so the canvas + glow run
-    // truly edge-to-edge under the header, status bar, and navigation bar (frameless, reference
-    // parity). Inside the Scaffold body it stopped at the topBar slot's edge and the header sat on
-    // a solid containerColor band. Same greeting/runPhase source of truth ChatSurface reads;
-    // duplicated per the overWash precedent above rather than threaded.
-    // User directive 2026-07-04: the resting state is a SOLID background - the ambient bottom glow is
-    // NOT permanent. It appears briefly on a fresh invocation (this screen freshly opened) AND is
-    // re-armed each time a run COMPLETES for AMBIENT_INVOCATION_WINDOW_MS, then fades to
-    // Hidden; the Thinking glow owns the Sending/Streaming phase and always wins over either linger.
-    // Cheap + testable: delayed flag flips, and the pure `chatGlowState` decision below. reducedMotion
+    // The landing/chat liveness glow is the BOTTOM bloom (the overlay's own AuroraEdgeGlow,
+    // reused - one shader family, no wash fork); the top stays clean. It renders HERE behind a
+    // TRANSPARENT Scaffold so the canvas + glow run truly edge-to-edge under the header, status
+    // bar, and navigation bar - inside the Scaffold body it would stop at the topBar slot's edge
+    // with the header sitting on a solid containerColor band. Same greeting/runPhase source of
+    // truth ChatSurface reads; duplicated per the overWash precedent above rather than threaded.
+    // The resting state is a SOLID background - the ambient bottom glow is NOT permanent. It
+    // appears briefly on a fresh invocation AND is re-armed each time a run COMPLETES for
+    // AMBIENT_INVOCATION_WINDOW_MS, then fades to Hidden; the Thinking glow owns the
+    // Sending/Streaming phase and always wins over either linger. Cheap + testable: delayed flag
+    // flips, and the pure `chatGlowState` decision below. reducedMotion
     // needs no branch here - AuroraEdgeGlow already snaps its visibility (no fade) and renders a
     // static frame, so this reads as "static frame then hide" for it, and a smooth fade otherwise.
     // Fresh-invocation ambient breathe (existing): active for the linger window on a truly-fresh
@@ -190,7 +192,7 @@ fun ChatScreen(
         transcriptEmpty = state.items.isEmpty(),
         loadingHistory = state.isLoadingHistory,
     )
-    // User directive 2026-07-04: the ACTIVE (processing/invocation) glow should read slightly
+    // User directive: the ACTIVE (processing/invocation) glow should read slightly
     // livelier - "speed of the Aura slightly visibly higher" - while an idle chat stays exactly as
     // tuned. Smallest mechanism: bump ONLY the wave-drift speed for the Thinking state; the ambient
     // Listening/Hidden states keep the default 1f, and the user-tuned reach/center-weight/alpha are
@@ -218,6 +220,13 @@ fun ChatScreen(
                 sessionOpen = sessionId != null,
                 overWash = overWash,
                 modelDisplayName = state.models?.effectiveShortName(state.selectedModel) ?: "Core",
+                // Reads the live composer scope, which ChatViewModel.publish re-points on every
+                // persisted `context` event - so this follows the model's own switch_project
+                // mid-run rather than freezing at whatever the turn opened in. Suppressed while
+                // ChatSurface's pre-session scope row is on screen (the ONE predicate, read from
+                // both sides) so the project is stated exactly once at any moment.
+                projectLabel = state.composerScope.activeProjectLabel.takeIf { !state.showsComposerScopeIndicator },
+                projectKind = ProjectRowKind.of(state.composerScope.selectedProjectKey),
                 pickerExpanded = modelPickerOpen,
                 onMenuTap = onMenuTap,
                 onNewChat = onNewChat,
@@ -234,7 +243,7 @@ fun ChatScreen(
         // here would hand ChatSurface's whole subtree a brand-new (non-referentially-equal)
         // `onReadAloudToggle`/`onNotice` on every one of those emissions, which breaks downstream
         // rows' parameter stability and forces them to recompose for updates that have nothing to
-        // do with them (fix-round item 2 measurement caught exactly this one layer down, in
+        // do with them (a recomposition-count measurement caught exactly this one layer down, in
         // ChatTranscript's per-item dispatch - this is the same instability's other end).
         val callbacks = remember(viewModel, onNotice) {
             ChatCallbacks(
@@ -379,35 +388,33 @@ internal fun chatGlowState(
 /** `packages/mewbo_core/src/mewbo_core/attachments.py`'s `DOCUMENT_MIME_TYPES` - the Files picker
  * is restricted to this set (images go through the separate Photos picker, matching the reference
  * plus-menu's own Gallery-vs-Files split). */
-/** In-app bottom-glow reach multiplier over the overlay's capture-measured decay length (user
- * directive: on the full app screen the glow must rise at least a bit above the composer area -
- * the overlay-measured reach reads tiny under the app's taller bottom stack). Behavioral tuning
- * constant, caller-side by design (ui/aurora/CLAUDE.md provenance rule). */
-private const val IN_APP_GLOW_REACH_SCALE = 5.5f // raised 2.6->4.0->5.5 over three user rounds: the wave flows up through the center of the screen
+/** In-app bottom-glow reach multiplier over the overlay's capture-measured decay length - on the
+ * full app screen the glow must rise above the composer area, since the overlay-measured reach
+ * reads tiny under the app's taller bottom stack. Behavioral tuning constant, caller-side by
+ * design (ui/aurora/CLAUDE.md provenance rule). */
+private const val IN_APP_GLOW_REACH_SCALE = 5.5f
 
-/** Near-flat horizontal spread for the in-app bloom (user directive: cover the entire bottom edge
- * smoothly, "not a tick coming from the center") - the overlay keeps its state defaults, whose
+/** Near-flat horizontal spread for the in-app bloom - covers the entire bottom edge smoothly
+ * instead of visibly anchoring at the center. The overlay keeps its state defaults, whose
  * center-anchoring is correct there (its glow radiates from the pill). */
 private const val IN_APP_GLOW_CENTER_WEIGHT = 0.12f
 
-/** Softer than the overlay's capture-measured peak (user directive: less opaque, smoother). */
+/** Softer than the overlay's capture-measured peak. */
 private const val IN_APP_GLOW_ALPHA_SCALE = 0.65f
 
 /** Slightly-faster wave drift for the ACTIVE (Sending/Streaming -> EdgeGlowState.Thinking) in-app
- * bottom glow only (user directive 2026-07-04: the processing/invocation liveness should read a
- * touch livelier, "speed of the Aura slightly visibly higher"; the idle chat stays as-is). Passed as
- * AuroraEdgeGlow's `speedScale` for the Thinking state; a caller-side behavioral tuning constant,
- * same provenance rule as the IN_APP_GLOW_* reach/center-weight/alpha knobs above. */
+ * bottom glow only - the idle chat stays at the base pace. Passed as AuroraEdgeGlow's
+ * `speedScale` for the Thinking state; a caller-side behavioral tuning constant, same provenance
+ * rule as the IN_APP_GLOW_* reach/center-weight/alpha knobs above. */
 private const val IN_APP_GLOW_ACTIVE_SPEED_SCALE = 1.35f
 
 /** How long the ambient bottom glow lingers on a fresh chat-screen invocation before fading to
- * Hidden (user directive 2026-07-04: resting state is a solid background - ambient glow only briefly
- * on fresh invocation, then only while running). A behavioral tuning constant.
+ * Hidden - resting state is a solid background, so the ambient glow only shows briefly on fresh
+ * invocation, then only while running. A behavioral tuning constant.
  *
- * User directive 2026-07-14: the glow dimmed too quickly on a fresh session/screen — lengthened to
- * AT LEAST 3× the prior 10s window (10s → 30s), so the invocation aurora lingers noticeably before
- * settling to the solid resting state. Still only the FRESH-invocation ambient breathe; a live run's
- * Thinking glow and the ≥3s run-end ease-off are unaffected. */
+ * 30s so the invocation aurora lingers noticeably before settling to the solid resting state.
+ * Still only the FRESH-invocation ambient breathe; a live run's Thinking glow and the ≥3s
+ * run-end ease-off are unaffected. */
 private const val AMBIENT_INVOCATION_WINDOW_MS = 30_000L
 
 private val DOCUMENT_MIME_TYPES = arrayOf(
@@ -457,6 +464,8 @@ private fun ChatTopBar(
     onModelTap: () -> Unit,
     onCopyConversation: () -> Unit,
     modifier: Modifier = Modifier,
+    projectLabel: String? = null,
+    projectKind: ProjectRowKind = ProjectRowKind.Temporary,
 ) {
     var overflowExpanded by remember { mutableStateOf(false) }
     val chevronRotation by animateFloatAsState(
@@ -479,24 +488,38 @@ private fun ChatTopBar(
     ) {
         TopBarGlyphButton(icon = ChatIcons.TwoLineMenu, description = "Menu", overWash = overWash, onClick = onMenuTap)
 
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(TitleGap),
-            modifier = Modifier
-                .weight(1f)
-                .clickable(onClick = onModelTap)
-                .padding(horizontal = AuraSpacing.Composer.gapTight),
-        ) {
-            Text(text = "Mewbo", style = AuraType.titleBar, color = AuraColors.textPrimary)
-            Text(text = modelDisplayName, style = AuraType.titleBar.copy(fontWeight = FontWeight.Normal, color = AuraColors.textSecondary))
-            Icon(
-                imageVector = Icons.Filled.KeyboardArrowDown,
-                contentDescription = null,
-                tint = AuraColors.textSecondary,
+        Column(modifier = Modifier.weight(1f)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(TitleGap),
                 modifier = Modifier
-                    .size(ChevronSize)
-                    .graphicsLayer { rotationZ = chevronRotation },
-            )
+                    .fillMaxWidth()
+                    .clickable(onClick = onModelTap)
+                    .padding(horizontal = AuraSpacing.Composer.gapTight),
+            ) {
+                Text(text = "Mewbo", style = AuraType.titleBar, color = AuraColors.textPrimary)
+                // The model name is backend-supplied and unbounded - a long one ("Anthropic Qwen3.6
+                // Flash") wrapped to three lines, inflating the whole bar and colliding with the glyph
+                // buttons either side. It takes the leftover width and ellipsizes instead; `fill =
+                // false` keeps a SHORT name tight against the chevron rather than pushing it to the
+                // far edge, and the chevron stays outside the weight so it can never be squeezed out.
+                Text(
+                    text = modelDisplayName,
+                    style = AuraType.titleBar.copy(fontWeight = FontWeight.Normal, color = AuraColors.textSecondary),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                Icon(
+                    imageVector = Icons.Filled.KeyboardArrowDown,
+                    contentDescription = null,
+                    tint = AuraColors.textSecondary,
+                    modifier = Modifier
+                        .size(ChevronSize)
+                        .graphicsLayer { rotationZ = chevronRotation },
+                )
+            }
+            projectLabel?.let { label -> TopBarProjectLine(label = label, kind = projectKind) }
         }
 
         TopBarGlyphButton(icon = Icons.Filled.Edit, description = "New chat", overWash = overWash, onClick = onNewChat)
@@ -516,6 +539,44 @@ private fun ChatTopBar(
                 )
             }
         }
+    }
+}
+
+/**
+ * "Where am I working" under the title - the open session's current project, as a scope glyph plus
+ * its name in [AuraType.caption]. It is the same `<glyph> <name>` pair the pre-session
+ * `ComposerScopeIndicator` uses, at the smaller scale a title's second line wants: border and space
+ * carry it, never weight (no chip fill, no accent text), so a bar that gains a line does not gain
+ * a band.
+ *
+ * **Deliberately not interactive.** This is a status readout, not a control: the project is already
+ * editable through the composer's own "+" sheet, and the scope is frozen anyway while the turn that
+ * would move it is in flight. A second affordance here would either duplicate that one or need a
+ * 48dp touch cell in a bar whose whole title block is 32dp tall.
+ *
+ * Rendered only when the session HAS a project ([ComposerScope.activeProjectLabel] is `null`
+ * otherwise), so an ordinary temp-dir chat keeps a single-line bar.
+ */
+@Composable
+private fun TopBarProjectLine(label: String, kind: ProjectRowKind, modifier: Modifier = Modifier) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(AuraSpacing.Composer.gapTight),
+        modifier = modifier.padding(horizontal = AuraSpacing.Composer.gapTight),
+    ) {
+        Icon(
+            imageVector = kind.glyph,
+            contentDescription = null, // the project name beside it carries the meaning for TalkBack
+            tint = kind.tint,
+            modifier = Modifier.size(AuraSpacing.Composer.scopeRowIconSize),
+        )
+        Text(
+            text = label,
+            style = AuraType.caption,
+            color = AuraColors.textSecondary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -559,7 +620,7 @@ private val TopBarVerticalPadding = 8.dp
  * existing states unchanged). Visible only while [ChatUiState.speakingKey] is non-null, whether
  * that's a P3 speak-along or a P4 manual read-aloud - [ChatViewModel.stopSpeaking] doesn't
  * distinguish the two either, so neither does this control. Tokens only, no new one needed: the
- * reference app's capture (2026-07-03 comment) measured this at exactly a 48dp square
+ * reference app's capture measured this at exactly a 48dp square
  * touch target with a 16dp right margin - already [AuraSpacing.ActionRow.cellSize] and
  * [AuraSpacing.Composer.horizontalMargin] verbatim. The appear/disappear crossfade reuses the M8
  * "flat fade" token ([AuraMotion.reducedBlockFadeMs]) rather than [AuraMotion.actionRowFadeMs]'s own

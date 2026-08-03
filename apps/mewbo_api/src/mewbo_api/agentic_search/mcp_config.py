@@ -73,8 +73,12 @@ class WorkspaceMcpConfig:
         can actually reach. Selection order is preserved; a config-read failure
         degrades to an empty list, never an error (mirrors ``SourceCatalog``).
         """
+        # ``project`` arrives from request input, so this deployment did not
+        # author whatever is at that path. A server entry is a command the
+        # process SPAWNS during config resolution — before any tool ceiling
+        # is consulted — so the directory tier must contribute nothing.
         try:
-            merged = get_merged_mcp_config(project)
+            merged = get_merged_mcp_config(project, trust_cwd=False)
         except Exception:
             return []
         servers = merged.get("servers") or merged.get("mcpServers") or {}
@@ -105,7 +109,7 @@ class WorkspaceMcpConfig:
 
         ``nl_fingerprint`` stamps the workspace-prose digest that last drove a
         map-time enrich (server-internal bookkeeping); default empty keeps
-        the legacy shape for callers that don't track it.
+        the shape for callers that don't track it.
         """
         return WorkspaceMcpConfigRecord(
             workspace_id=workspace_id,

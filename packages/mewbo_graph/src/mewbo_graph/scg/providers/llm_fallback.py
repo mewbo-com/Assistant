@@ -1,7 +1,7 @@
 """LLM-fallback structure provider — schemaless sources.
 
-For a source with no machine-readable schema (a free-text connector blurb, a
-legacy API with only prose docs), there is nothing to parse deterministically.
+For a source with no machine-readable schema (a free-text connector blurb, an
+API documented only in prose), there is nothing to parse deterministically.
 This provider asks an injected LLM for a single coarse *capability label* and
 emits one ``capability`` node so the source is at least reachable by the router
 — the RML pattern's escape hatch ("LLM fallback for schemaless sources").

@@ -1,4 +1,4 @@
-"""Tests for :class:`mewbo_core.run_error.RunError`.
+"""Tests for :class:`mewbo_core.contracts.run_error.RunError`.
 
 The load-bearing invariant under test: classification and the rendered
 ``title`` derive from the exception TYPE and the LiteLLM error-class NAME,
@@ -15,11 +15,11 @@ from unittest.mock import patch
 
 import pytest
 from mewbo_core.classes import OrchestrationState, TaskQueue
+from mewbo_core.contracts.run_error import RunError
 from mewbo_core.hooks import HookManager
-from mewbo_core.orchestrator import Orchestrator
-from mewbo_core.run_error import RunError
-from mewbo_core.session_store import SessionStore
-from mewbo_core.tool_use_loop import ToolUseLoop
+from mewbo_core.loop.orchestrator import Orchestrator
+from mewbo_core.loop.tool_use_loop import ToolUseLoop
+from mewbo_core.session.session_store import SessionStore
 
 # The shape LiteLLM produced on a real 502: an entire HTML document spliced
 # into the exception message. Hostname is fictional on purpose.
@@ -473,7 +473,7 @@ class TestOrchestratorWiring:
         completion = next(e for e in transcript if e.get("type") == "completion")
         payload = completion["payload"]
 
-        # The flat keys legacy clients read (Aura's error card, the CLI) stay
+        # The flat keys some clients read (Aura's error card, the CLI) stay
         # present, bounded AND markup-free — they are persisted here, so a raw
         # slice would republish the page on every history replay.
         for key in ("error", "last_error"):
@@ -594,13 +594,12 @@ class TestOrchestratorWiring:
         gating the CLAMP on "not completed" let a raw provider page escape
         through a SUCCESSFUL run.
 
-        The payload keys used to be gated on the same condition. They no longer
-        are: the runs that gate silenced were overwhelmingly the LAUNDERED ones
-        — a halt or an unmet outcome presenting as success — and withholding the
-        one field able to contradict the status is what made a wrong status
-        unfalsifiable. Both the clamp and the emission are asserted here; what
-        must never regress is that either one lets an unbounded provider page
-        through.
+        The payload keys are NOT gated on that condition. Such a gate silences
+        overwhelmingly the LAUNDERED runs — a halt or an unmet outcome
+        presenting as success — and withholding the one field able to
+        contradict the status is what makes a wrong status unfalsifiable. Both
+        the clamp and the emission are asserted here; what must never regress is
+        that either one lets an unbounded provider page through.
         """
         store = SessionStore(root_dir=str(tmp_path))
         orch = Orchestrator(session_store=store)

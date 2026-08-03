@@ -5,7 +5,7 @@ Frontend → backend mapping (Mewbo API):
 - `GET /api/sessions` → `listSessions()` → `useSessions()`
 - `POST /api/sessions` → `createSession()` → `useSessions()`
 - `POST /api/sessions/{id}/query` → `postQuery()` → `useSessionQuery()`
-- `GET /api/sessions/{id}/events` → `fetchEvents()` → `useSessionEvents()`
+- `GET /api/sessions/{id}/stream` → `streamSession()` → `useSessionEvents()`
 - `POST /api/sessions/{id}/archive` → `archiveSession()` → `useSessions()`
 - `DELETE /api/sessions/{id}/archive` → `unarchiveSession()` → `useSessions()`
 - `GET /api/tools` → `listTools()` → `useMcpTools()`

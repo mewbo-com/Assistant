@@ -12,9 +12,9 @@ MECHANISM and the token-discipline law.** When a value here disagrees with DESIG
 the only design-language `Color(` sites; `AuraMotion` is the only `spring(...)` construction site (M1–M8
 named springs — including the `Color`-typed `composerMorphColorSpring`, because spring construction is
 reserved here). Need a new value? Add a token, then consume it — literals ship looking right and rot the
-first palette change. `AuraSpacing` dp values carry provenance in KDoc (Rev C estimate / Rev F measured /
-real-device capture / a dated user directive); governance when sources conflict is DESIGN.md §1's
-precedence ladder — the newest directive wins over any measured reference.
+first palette change. `AuraSpacing` dp values carry provenance in KDoc (estimate / measured /
+real-device capture / user directive); when sources conflict, DESIGN.md's precedence ladder governs
+— the newest directive wins over any measured reference.
 
 ## The two mechanism facts
 
@@ -28,12 +28,12 @@ precedence ladder — the newest directive wins over any measured reference.
   `Settings.Global.ANIMATOR_DURATION_SCALE == 0f`, in `remember(context)` (once per composition; a
   ContentObserver is deliberate YAGNI). **Trap:** `AuraTheme(reducedMotion = …)` is a defaulted param, so
   a bare `AuraTheme { }` silently drops the in-app toggle — both hosts (`MainActivity`, `AuraSession`)
-  must thread it (this bit `AuraSession` for a full release cycle).
+  must thread it (this bit `AuraSession`).
 
-## New tokens this wave (2026-07-14) — see DESIGN.md for canonical values
+## Tokens whose REASON isn't obvious from the value — see DESIGN.md for canonical values
 
 - `AuraColors.surfaceDrawer` (#0F1012) — the left rail's fill, midway canvas→surfaceInput. Its OWN token,
-  never `surfaceSelected` (the selected-row pill fill — whole-canvas use erases the highlight, §7.8) nor
+  never `surfaceSelected` (the selected-row pill fill — whole-canvas use erases the highlight) nor
   `surfaceInput` (bubbles/composer/chips).
 - `AuraColors.scopeProject` (#B79CE8 amethyst) / `scopeTool` (#5CC8D6 cyan) — the composer scope-row +
   picker GLYPH tints (never body text); a cool violet↔cyan pair distinct from `accentPrimary`/`accentError`
@@ -46,6 +46,6 @@ precedence ladder — the newest directive wins over any measured reference.
   `Modifier.shadow(...)` at the call site ([`ui/navigation/CLAUDE.md`](../navigation/CLAUDE.md)).
 - `AuraMotion.transcriptItemPlacementSpring` (`FiniteAnimationSpec<IntOffset>`, `DampingRatioNoBouncy` /
   `StiffnessMediumLow`) — the placement spring for the transcript `LazyColumn`'s `Modifier.animateItem`,
-  smoothing a live turn's mount/shuffle/unmount reflow (DESIGN.md §7.23). Reduced motion
+  smoothing a live turn's mount/shuffle/unmount reflow (DESIGN.md). Reduced motion
   drops the placement travel (rows snap); the opacity fades stay. It is a `spring(...)` construction, so
   it lives here in `AuraMotion` per the discipline law above, never at the `ChatTranscript` call site.

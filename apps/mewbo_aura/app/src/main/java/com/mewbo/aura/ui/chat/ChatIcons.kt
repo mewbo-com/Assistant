@@ -1,6 +1,7 @@
 package com.mewbo.aura.ui.chat
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Schedule
@@ -12,7 +13,7 @@ import com.mewbo.aura.ui.theme.VectorGlyphFill
 
 /**
  * FROZEN LEGACY hand-rolled glyph set. These vectors predate `material-icons-extended`, which was
- * added to the dependency catalog on 2026-07-14 (apps/mewbo_aura/CLAUDE.md § Iconography). They cover
+ * added to the dependency catalog (apps/mewbo_aura/CLAUDE.md § Iconography). They cover
  * glyphs the app's original `material-icons-core`-only floor lacked (composer: mic, stop, waveform,
  * stop-tile, up-arrow; chat chrome: two-line menu, content-copy, volume-up; tool cards: clock) plus a
  * few with no Material analog at all (StopTile/TwoLineMenu/ContentCopy - see their own docs). The set
@@ -27,10 +28,10 @@ import com.mewbo.aura.ui.theme.VectorGlyphFill
 object ChatIcons {
 
     // --- Scope glyphs: off-the-shelf material-icons-extended aliases (NOT hand-rolled) ---
-    // Composer scope row + project/tool pickers (user directive 2026-07-14). One-line library
+    // Composer scope row + project/tool pickers. One-line library
     // references, centralized so every scope glyph choice lives in one place. These are NOT part of
     // this file's legacy hand-rolled path set (frozen — new glyphs pull from material-icons-extended,
-    // added to the dependency catalog 2026-07-14). Filled weight, matching every other icon surface.
+    // added to the dependency catalog). Filled weight, matching every other icon surface.
 
     /** The "project / workspace" scope prefix (composer scope row + real project rows) — a folder.
      * Tinted [com.mewbo.aura.ui.theme.AuraColors.scopeProject]. */
@@ -41,6 +42,13 @@ object ChatIcons {
      * it, §F). Reads "time-bound / transient" without the destructive-action ambiguity a trash glyph
      * would carry next to a selectable row. */
     val TemporaryProjectScope: ImageVector get() = Icons.Filled.Schedule
+
+    /** The auto-select project mode's prefix (project pickers) — a sparkle (`auto_awesome`), the
+     * off-the-shelf glyph for "chosen for you". Distinct from both [ProjectScope] (a project you
+     * picked) and [TemporaryProjectScope] (a throwaway cwd): in auto mode a project WILL be chosen,
+     * it just has not been yet. Tinted [com.mewbo.aura.ui.theme.AuraColors.scopeProject] — it
+     * resolves to a real project scope, so it wears the project tint rather than the muted one. */
+    val AutoProjectScope: ImageVector get() = Icons.Filled.AutoAwesome
 
     /** The "tools" scope prefix (composer scope row) — a wrench (`build`). Tinted
      * [com.mewbo.aura.ui.theme.AuraColors.scopeTool]. */
@@ -331,7 +339,7 @@ object ChatIcons {
     }
 
     /** The widget card's "enter full screen" affordance glyph, mirroring Material
-     * "fullscreen" - four corner brackets. Predates `material-icons-extended` (added 2026-07-14); a
+     * "fullscreen" - four corner brackets. Predates `material-icons-extended`; a
      * legacy hand-roll kept as-is under the frozen-set rule above, not evidence extended is
      * unavailable. Four disjoint corners, one `.path {}` each (house style). */
     val Fullscreen: ImageVector by lazy {

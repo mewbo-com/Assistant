@@ -44,10 +44,6 @@
   "compaction": {
     "caveman_mode": false
   },
-  "reflection": {
-    "enabled": true,
-    "model": ""
-  },
   "langfuse": {
     "enabled": false,
     "host": "https://langfuse.server.local",
@@ -65,26 +61,19 @@
   },
   "cli": {
     "disable_textual": false,
-    "approval_style": "inline",
     "remote": {
       "base_url": "",
       "token": ""
     }
   },
-  "chat": {
-    "port": 8501,
-    "address": "127.0.0.1"
-  },
   "api": {
     "master_token": "msk-strong-password"
   },
   "agent": {
-    "enabled": true,
     "max_depth": 5,
     "max_concurrent": 20,
     "default_sub_model": "",
     "allowed_models": [],
-    "sub_agent_max_steps": 10,
     "default_denied_tools": [],
     "edit_tool": "search_replace_block",
     "llm_call_timeout": 120.0,
@@ -93,7 +82,7 @@
       "backoff_base": 1.0,
       "backoff_cap": 60.0,
       "retry_after_cap": 60.0,
-      "turn_deadline": 240.0,
+      "turn_deadline": 420.0,
       "fallback_retries": 1,
       "circuit_breaker_threshold": 3,
       "circuit_breaker_cooldown": 30.0,
@@ -158,7 +147,9 @@
     "embedding": {
       "enabled": true,
       "model": "openai/text-embedding-3-small",
-      "batch_size": 64
+      "batch_size": 64,
+      "concurrency": 4,
+      "max_retries": 5
     },
     "memory": {
       "enabled": true,
@@ -180,8 +171,7 @@
       "page_keep": 0.05,
       "page_edit": 0.35,
       "page_regen": 0.70,
-      "new_page_min": 5,
-      "require_scope_confirm": false
+      "new_page_min": 5
     }
   },
   "scg": {

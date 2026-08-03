@@ -1,15 +1,17 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, ChevronDown, FoldVertical, Info, Link2, MoreHorizontal, Pencil } from 'lucide-react';
+import { Activity, ChevronDown, FoldVertical, Info, Link2, MoreHorizontal, Pencil, Shield, ShieldAlert } from 'lucide-react';
 import { MessageBubble, MarkdownContent } from './MessageBubble';
 import { AttachmentCards } from './AttachmentCards';
 import { WidgetCard } from './WidgetCard';
+import { GenerativeUICard } from './GenerativeUICard';
 import { CopyButton } from './CopyButton';
 import { ScrollToBottom } from './ScrollToBottom';
 import { TurnScroller } from './TurnScroller';
-import { CompactionMeta, DiffFile, QuestionAnswerItemPayload, RecoveryMeta, SessionUsage, TimelineEntry, TurnMeta } from '../types';
+import { CompactionMeta, DiffFile, QuestionAnswerItemPayload, RecoveryMeta, SafetyPlaneMeta, SessionUsage, TimelineEntry, TurnMeta } from '../types';
 import type { AnswerQuestionResult } from '../api/contracts';
 import { FileList } from './FileList';
 import { PlanCard } from './PlanCard';
+import { ProjectSwitchCard } from './ProjectSwitchCard';
 import { QuestionCard } from './QuestionCard';
 import { RunFailedCard } from './RunFailedCard';
 import { TodoCard } from './TodoCard';
@@ -70,11 +72,13 @@ function formatTurnTimestamp(iso: string, now = new Date()): string {
 const ROLE_SPACING: Partial<Record<TimelineEntry['role'], string>> = {
   plan: 'pt-3',
   widget: 'pt-3',
+  generative_ui: 'pt-3',
   todos: 'pt-3',
   question: 'pt-3',
   trigger: 'pt-2.5',
   recovery: 'pt-2.5',
   compaction: 'pt-2.5',
+  project_switch: 'pt-3',
   run_failed: 'pt-3',
   session_terminated: 'pt-6',
 };
@@ -85,6 +89,10 @@ interface ConversationTimelineProps {
   onOpenFiles: (turn: TurnMeta, file?: DiffFile) => void;
   activeTurnId?: string | null;
   isRunning?: boolean;
+  /** The run has been accepted but has not opened its turn yet — renders the
+   *  starting beat at the tail. Mutually exclusive with the pending beat by
+   *  construction (that one needs an open turn). */
+  isStarting?: boolean;
   /** Live assistant text streamed from the in-flight turn. */
   streamingText?: string;
   onShowActiveTrace?: () => void;
@@ -93,6 +101,7 @@ interface ConversationTimelineProps {
     callId: string,
     callToken: string,
     answers: QuestionAnswerItemPayload[],
+    notes?: string,
   ) => Promise<AnswerQuestionResult>;
   onRetryFrom?: (fromTs: string) => void;
   onForkFrom?: (fromTs: string) => void;
@@ -131,9 +140,9 @@ interface ConversationTimelineProps {
 /**
  * Mid-run entry point to the trace/logs panel. Shared by BOTH in-flight
  * assistant rows: the "Working…" beat before the first token and
- * the live streaming bubble after it. Extracting it fixes the regression where
- * the pill vanished the instant streaming began — the only mid-run door
- * into the trace panel must live on both rows, not just the pending one.
+ * the live streaming bubble after it. It must live on both rows, not just the
+ * pending one — otherwise the only mid-run door into the trace panel vanishes
+ * the instant streaming begins.
  */
 function TracePill({ onClick }: { onClick: () => void }) {
   return (
@@ -162,6 +171,27 @@ function PendingAssistantRow({ onShowTrace }: { onShowTrace?: () => void }) {
         <span className="pending-dot" aria-hidden />
         <span className="pending-label">Working</span>
         {onShowTrace && <TracePill onClick={onShowTrace} />}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Inline beat for the window between a run being accepted and it opening its
+ * turn — the orchestrator's setup, before any event the transcript can render.
+ * Same vocabulary as {@link PendingAssistantRow} (it is the same class of
+ * transient in-flight state, one beat earlier) minus the trace pill: there is
+ * no turn to open a trace on yet.
+ *
+ * The copy states only what is known — the run was accepted and has not
+ * produced anything yet. It never stands in for the prompt or the answer.
+ */
+function StartingRunRow() {
+  return (
+    <div className="pt-4">
+      <div className="pending-line" role="status" aria-live="polite">
+        <span className="pending-dot" aria-hidden />
+        <span className="pending-label">Starting…</span>
       </div>
     </div>
   );
@@ -268,6 +298,51 @@ export function CompactionMarkerRow({ compaction }: { compaction: CompactionMeta
           <span className="opacity-80">{freed}</span>
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * Compact marker for the safety plane. Same quiet weight class as
+ * {@link RecoveryMarkerRow} — a `role="note"` lifecycle beat, not a card,
+ * because disclosure must be SEEN, not force expanded reading. `disclosed`
+ * fires once, listing every active rule and what it inspects, BEFORE any of
+ * them evaluate anything — the disclosure-before-invocation contract this row
+ * exists to satisfy. `deny` names the rule and reason that stopped a call.
+ */
+function SafetyPlaneMarkerRow({ safetyPlane }: { safetyPlane: SafetyPlaneMeta }) {
+  if (safetyPlane.phase === 'deny') {
+    return (
+      <div
+        className="flex items-center gap-2 text-xs text-[hsl(var(--warning-text))]"
+        role="note"
+      >
+        <span className="inline-flex items-center gap-1.5 font-medium">
+          <ShieldAlert className="w-3.5 h-3.5" aria-hidden />
+          Blocked by safety policy &ldquo;{safetyPlane.rule}&rdquo;
+        </span>
+        {safetyPlane.reason && <span className="opacity-80">{safetyPlane.reason}</span>}
+      </div>
+    );
+  }
+  return (
+    <div
+      className="flex flex-col gap-1 text-xs text-[hsl(var(--muted-foreground))]"
+      role="note"
+      title="Every tool call is checked against these rules before it runs."
+    >
+      <span className="inline-flex items-center gap-1.5 font-medium text-[hsl(var(--primary-text))]">
+        <Shield className="w-3.5 h-3.5" aria-hidden />
+        Safety plane active — {safetyPlane.rules.length} rule
+        {safetyPlane.rules.length === 1 ? '' : 's'}
+      </span>
+      <ul className="ml-5 list-disc opacity-80">
+        {safetyPlane.rules.map((rule) => (
+          <li key={rule.name}>
+            {rule.name}: {rule.inspects}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -475,6 +550,7 @@ export function ConversationTimeline({
   onOpenFiles,
   activeTurnId,
   isRunning = false,
+  isStarting = false,
   streamingText,
   onShowActiveTrace,
   onApprovePlan,
@@ -568,6 +644,14 @@ export function ConversationTimeline({
             return <div {...rowProps}>{entry.widget && <WidgetCard widget={entry.widget} />}</div>;
           }
 
+          if (entry.role === 'generative_ui') {
+            return (
+              <div {...rowProps}>
+                {entry.generativeUi && <GenerativeUICard ui={entry.generativeUi} />}
+              </div>
+            );
+          }
+
           if (entry.role === 'plan') {
             return (
               <div {...rowProps}>
@@ -610,10 +694,28 @@ export function ConversationTimeline({
             );
           }
 
+          if (entry.role === 'safety_plane') {
+            return (
+              <div {...rowProps}>
+                {entry.safetyPlane && <SafetyPlaneMarkerRow safetyPlane={entry.safetyPlane} />}
+              </div>
+            );
+          }
+
           if (entry.role === 'compaction') {
             return (
               <div {...rowProps}>
                 {entry.compaction && <CompactionMarkerRow compaction={entry.compaction} />}
+              </div>
+            );
+          }
+
+          if (entry.role === 'project_switch') {
+            return (
+              <div {...rowProps}>
+                {entry.projectSwitch && (
+                  <ProjectSwitchCard meta={entry.projectSwitch} timestamp={entry.ts} />
+                )}
               </div>
             );
           }
@@ -822,6 +924,8 @@ export function ConversationTimeline({
             </div>
           );
         })}
+
+        {isStarting && <StartingRunRow />}
 
         {systemBlock && (
           <div className="pt-6">

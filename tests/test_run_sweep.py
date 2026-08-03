@@ -15,8 +15,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from mewbo_api.run_sweep import SessionRunSweeper
-from mewbo_core.session_runtime import SessionRuntime
-from mewbo_core.session_store import SessionStore
+from mewbo_core.loop.session_runtime import SessionRuntime
+from mewbo_core.session.session_store import SessionStore
 
 
 @pytest.fixture(autouse=True)

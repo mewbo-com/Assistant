@@ -1,0 +1,64 @@
+# syntax=docker/dockerfile:1
+
+# Dockerfile.ide — Mewbo Web IDE broker
+#
+# The only image in this stack that ends up with Docker socket access at
+# runtime (granted by docker-compose.yml, not by anything here — see below).
+# It is deliberately a thin Node service: no LLM client, no session store, no
+# git tooling. Its whole job is validating a launch request against its own
+# allowlist and asking the daemon to run/stop a sibling code-server container
+# on the API's behalf, so the container that runs an agent's arbitrary shell
+# tool never has to hold that access itself.
+#
+# Mirrors Dockerfile.console's shape (build stage → slim runtime), not
+# Dockerfile.api/.mcp's (no Python base, no uv, no workspace-wide COPY).
+
+# ---------- build stage ----------
+# Node major pinned to match apps/mewbo_console's Dockerfile.console and
+# .github/workflows/console.yml — one Node version across every JS surface
+# this repo builds, so a toolchain quirk only ever needs fixing once.
+FROM node:20-slim AS build
+
+WORKDIR /app
+COPY apps/mewbo_ide/package.json apps/mewbo_ide/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --ignore-scripts
+
+COPY apps/mewbo_ide/ .
+RUN npm run build
+
+# Prune devDependencies out of the SAME node_modules the build just used,
+# rather than a second `npm ci --omit=dev` in the runtime stage — the broker
+# has no build-vs-runtime dependency split worth a second install pass, and
+# pruning keeps the lockfile the single source of truth for both.
+RUN npm prune --omit=dev
+
+# ---------- runtime stage ----------
+FROM node:20-slim AS runtime
+
+# In lockstep with apps/mewbo_ide/package.json and the other images — see
+# Dockerfile.base.
+ARG VERSION="0.0.13"
+
+LABEL org.opencontainers.image.title="Mewbo IDE Broker" \
+      org.opencontainers.image.description="Docker-socket broker for Mewbo's per-session Web IDE containers" \
+      org.opencontainers.image.source="https://github.com/bearlike/Assistant" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.vendor="Krishnakanth Alagiri" \
+      org.opencontainers.image.licenses="MIT"
+
+WORKDIR /app
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/package.json ./package.json
+
+# No USER here, deliberately — same reasoning as the api service.
+# docker-compose.yml sets `user: "${MEWBO_HOST_UID}:${MEWBO_HOST_GID}"` and
+# `group_add: ["${MEWBO_DOCKER_GID}"]` at the compose level, which is what makes
+# /var/run/docker.sock readable/writable for that specific host-matching
+# uid/gid pair. Baking a fixed non-root USER here would fight that override
+# instead of combining with it, so the identity is left entirely to compose.
+
+EXPOSE 5128
+
+CMD ["node", "dist/index.js"]

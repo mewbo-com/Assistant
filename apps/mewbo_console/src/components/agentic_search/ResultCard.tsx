@@ -105,8 +105,7 @@ export function ResultCard({
   // The card is a reading surface, not a button — the TITLE links to the target
   // (the user expectation), and an explicit "More" affordance reveals the
   // expandable tier. Expandable content = overflow meta chips, an insight, refs,
-  // or a long snippet. Nothing expandable ⇒ no More/Less button at all (the old
-  // anti-pattern was a no-op toggle that revealed dead fixture data).
+  // or a long snippet. Nothing expandable ⇒ no More/Less button at all.
   const insight = result.insight ?? null
   const refs = result.refs && result.refs.length > 0 ? result.refs : null
   const longSnippet = result.snippet.length > SNIPPET_CLAMP_CHARS
@@ -142,8 +141,7 @@ export function ResultCard({
         <span className="ml-auto flex items-center gap-2 flex-none">
           {/* Agent-emitted cards carry the emitter's per-card confidence;
               connector-era cards have none — render nothing, never a fake 0%.
-              Accessible via aria-label (the old title-only tooltip was a sweep
-              anti-pattern). */}
+              Accessible via aria-label. */}
           {result.confidence != null && result.confidence > 0 && (
             <span
               className="font-mono tabular-nums text-[hsl(var(--muted-foreground))]"

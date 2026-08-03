@@ -6,8 +6,54 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from mewbo_core.agent_context import AgentContext, AgentDepthExceeded
-from mewbo_core.hypervisor import AgentHandle, AgentHypervisor, DelegationContract
+from mewbo_core.agents.agent_context import AgentContext, AgentDepthExceeded
+from mewbo_core.agents.hypervisor import (
+    AgentHandle,
+    AgentHypervisor,
+    DelegationContract,
+    ScheduledSpawn,
+    SpawnUnit,
+)
+
+# ---------------------------------------------------------------------------
+# Admission-scheduler helpers
+# ---------------------------------------------------------------------------
+
+
+class _Launches:
+    """Records the order in which the scheduler actually STARTED units.
+
+    The launcher is the only observable that separates "accepted" from
+    "running", which is the whole distinction the queue exists to draw.
+    """
+
+    def __init__(self) -> None:
+        self.ids: list[str] = []
+
+
+def _unit(
+    agent_id: str,
+    started: _Launches,
+    *,
+    priority: str = "normal",
+    batch_index: int = 0,
+    enqueued_at: float = 0.0,
+) -> SpawnUnit:
+    """A schedulable unit whose launcher just records that it ran."""
+
+    async def _launch() -> None:
+        started.ids.append(agent_id)
+
+    return SpawnUnit(
+        spawn=ScheduledSpawn(
+            agent_id=agent_id,
+            batch_index=batch_index,
+            priority=priority,  # type: ignore[arg-type]
+            enqueued_at=enqueued_at,
+        ),
+        launch=_launch,
+    )
+
 
 # ---------------------------------------------------------------------------
 # AgentContext
@@ -62,7 +108,7 @@ class TestAgentContext:
         assert exc_info.value.maximum == 1
 
     def test_child_gets_own_message_queue(self):
-        """Ref: [DeepMind-Delegation §4.4] Children get their own queue
+        """Children get their own queue
         for bidirectional parent→child steering."""
         root = AgentContext.root(model_name="m")
         assert root.message_queue is not None
@@ -97,7 +143,7 @@ class TestAgentContext:
 
 
 # ---------------------------------------------------------------------------
-# capability_mode monotonic narrowing (Phase 1a)
+# capability_mode monotonic narrowing
 # ---------------------------------------------------------------------------
 
 
@@ -440,46 +486,111 @@ class TestAgentHypervisor:
 
         asyncio.run(_test())
 
-    def test_admit_and_release(self):
-        async def _test():
-            reg = AgentHypervisor(max_concurrent=2)
-            assert await reg.admit() is True
-            assert await reg.admit() is True
-            # Third should timeout (set very short timeout for test).
-            reg._semaphore = asyncio.Semaphore(0)
-            try:
-                result = await asyncio.wait_for(reg.admit(), timeout=0.1)
-                assert result is False
-            except asyncio.TimeoutError:
-                pass  # Also acceptable — the admit timed out.
-
-        asyncio.run(_test())
-
-    def test_try_admit_non_blocking(self):
-        """try_admit grabs a free slot, returns False immediately when full."""
+    def test_accept_dispatches_up_to_capacity_then_defers(self):
+        """Over-cap work WAITS. Admission has three answers, not two."""
 
         async def _test():
             reg = AgentHypervisor(max_concurrent=1)
-            assert await reg.try_admit() is True  # one slot taken
-            assert await reg.try_admit() is False  # full → no wait, no block
-            reg.release()
-            assert await reg.try_admit() is True  # slot freed → admits again
+            started = _Launches()
+            queue = reg._queue
+            assert (queue.capacity, queue.running, queue.waiting) == (1, 0, 0)
+
+            assert await reg.accept(_unit("a", started)) is True  # dispatched
+            assert (queue.running, queue.waiting) == (1, 0)
+            assert await reg.accept(_unit("b", started)) is False  # deferred, not refused
+            assert started.ids == ["a"]
+            assert reg.free_slots == 0
+            assert reg.pending_dispatch == 1
+
+            # The settle path is the pump: 'b' starts on the slot 'a' gave up.
+            await reg.release()
+            assert started.ids == ["a", "b"]
+            assert reg.pending_dispatch == 0
+            assert reg.free_slots == 0
+
+            await reg.release()
+            assert reg.free_slots == 1
 
         asyncio.run(_test())
 
-    def test_try_admit_is_race_free_under_concurrency(self):
-        """Concurrent try_admit on N slots admits EXACTLY N (the contract).
-
-        Pins the non-blocking admission's atomicity: an unlocked semaphore's
-        acquire() does not suspend, so the locked()-check + acquire() runs as
-        one synchronous unit and over-admission is impossible even when many
-        callers race via asyncio.gather.
-        """
+    def test_accept_batch_is_atomic_in_acceptance(self):
+        """Every entry is accepted; capacity decides only who starts NOW."""
 
         async def _test():
             reg = AgentHypervisor(max_concurrent=3)
-            results = await asyncio.gather(*[reg.try_admit() for _ in range(20)])
-            assert sum(1 for r in results if r) == 3
+            started = _Launches()
+
+            decisions = await reg.accept_batch(
+                [_unit(f"a{i}", started) for i in range(20)]
+            )
+
+            # 20 accepted (nothing refused), 3 dispatched, 17 waiting.
+            assert len(decisions) == 20
+            assert sum(1 for d in decisions if d) == 3
+            assert decisions[:3] == [True, True, True]
+            assert started.ids == ["a0", "a1", "a2"]
+            assert reg.pending_dispatch == 17
+
+        asyncio.run(_test())
+
+    def test_scheduler_drains_in_priority_then_arrival_order(self):
+        """A single deliberate spawn is not starved behind a wide fan-out."""
+
+        async def _test():
+            reg = AgentHypervisor(max_concurrent=1)
+            started = _Launches()
+
+            await reg.accept(_unit("running", started))
+            await reg.accept_batch(
+                [_unit("batch0", started, batch_index=0, enqueued_at=1.0)]
+            )
+            await reg.accept_batch(
+                [_unit("batch1", started, batch_index=1, enqueued_at=1.0)]
+            )
+            # Arrives LAST but outranks both batch entries.
+            await reg.accept(
+                _unit("single", started, priority="critical", enqueued_at=2.0)
+            )
+
+            for _ in range(3):
+                await reg.release()
+            assert started.ids == ["running", "single", "batch0", "batch1"]
+
+        asyncio.run(_test())
+
+    def test_cancel_pending_settles_units_that_never_started(self):
+        """A waiting agent owns no task, so only this can end it."""
+
+        async def _test():
+            reg = AgentHypervisor(max_concurrent=1)
+            started = _Launches()
+            await reg.accept(_unit("running", started))
+            await reg.accept(_unit("waiting", started))
+            await reg.register(
+                AgentHandle(
+                    agent_id="waiting",
+                    parent_id="root",
+                    depth=1,
+                    model_name="m",
+                    task_description="never started",
+                    status="submitted",
+                )
+            )
+
+            assert await reg.collect_running("root") == [
+                h for h in await reg.list_all() if h.agent_id == "waiting"
+            ]
+
+            assert await reg.cancel_pending() == ["waiting"]
+
+            handle = await reg.get("waiting")
+            assert handle is not None
+            assert handle.status == "cancelled"
+            assert handle.done_event.is_set()
+            assert await reg.collect_running("root") == []
+            # And the dropped unit is never dispatched by a later settle.
+            await reg.release()
+            assert started.ids == ["running"]
 
         asyncio.run(_test())
 
@@ -532,7 +643,7 @@ class TestAgentHypervisor:
 
 
 class TestHypervisorBudget:
-    """Ref: [AgentCgroup §4.2] Session-wide budget tracking with graduated enforcement."""
+    """Session-wide budget tracking with graduated enforcement."""
 
     def test_total_steps_tracks_across_agents(self):
         async def _test():
@@ -580,7 +691,7 @@ class TestHypervisorBudget:
 
 
 class TestHypervisorStallDetection:
-    """Ref: [DeepMind-Delegation §4.4] Internal trigger: unresponsive delegatee."""
+    """Internal trigger: unresponsive delegatee."""
 
     def test_last_step_at_updated(self):
         async def _test():
@@ -638,7 +749,7 @@ class TestHypervisorStallDetection:
 
 
 class TestHypervisorMessagePassing:
-    """Ref: [DeepMind-Delegation §4.4] Bidirectional adaptive coordination."""
+    """Bidirectional adaptive coordination."""
 
     def test_send_message_to_running_agent(self):
         async def _test():
@@ -694,7 +805,7 @@ class TestHypervisorMessagePassing:
 
 
 class TestHypervisorGlobalEye:
-    """Ref: [DeepMind-Delegation §4.5] Root agent's global eye via render_agent_tree."""
+    """Root agent's global eye via render_agent_tree."""
 
     def test_empty_tree(self):
         async def _test():
@@ -871,10 +982,10 @@ class TestHypervisorCompaction:
 
 
 class TestAgentResultStructure:
-    """Ref: [CoA §3.1] Communication Units enable structured inter-agent context."""
+    """Communication Units enable structured inter-agent context."""
 
     def test_agent_result_fields(self):
-        from mewbo_core.hypervisor import AgentResult
+        from mewbo_core.agents.hypervisor import AgentResult
 
         result = AgentResult(
             content="Task completed",
@@ -888,8 +999,7 @@ class TestAgentResultStructure:
         assert result.summary == "Found the answer"
         assert result.warnings == []
         assert result.artifacts == []
-        # Ref: Phase 1b — additive default, byte-identical to the
-        # historical untyped-summary path when the caller never declares a kind.
+        # Additive default: an undeclared kind yields the untyped summary.
         assert result.summary_kind == "generic"
 
     def test_agent_result_serialization(self):
@@ -897,7 +1007,7 @@ class TestAgentResultStructure:
         import json
         from dataclasses import asdict
 
-        from mewbo_core.hypervisor import AgentResult
+        from mewbo_core.agents.hypervisor import AgentResult
 
         result = AgentResult(
             content="output",
@@ -914,11 +1024,11 @@ class TestAgentResultStructure:
         assert deserialized["summary_kind"] == "generic"
 
     def test_agent_result_summary_kind_explicit(self):
-        """Ref: Phase 1b — task-typed CU shape (Ref: [CoA §3])."""
+        """A task-typed CU shape."""
         import json
         from dataclasses import asdict
 
-        from mewbo_core.hypervisor import AgentResult
+        from mewbo_core.agents.hypervisor import AgentResult
 
         result = AgentResult(
             content="output",
@@ -932,8 +1042,8 @@ class TestAgentResultStructure:
         assert deserialized["summary_kind"] == "evidence"
 
     def test_cannot_solve_status(self):
-        """Ref: [Aletheia §3] Explicit failure admission as first-class outcome."""
-        from mewbo_core.hypervisor import AgentResult
+        """Explicit failure admission as first-class outcome."""
+        from mewbo_core.agents.hypervisor import AgentResult
 
         result = AgentResult(
             content="Cannot solve: depth exceeded",
@@ -944,7 +1054,7 @@ class TestAgentResultStructure:
 
 
 class TestAgentStatusExpansion:
-    """Ref: [A2A v1.0] Expanded state machine with submitted/rejected states."""
+    """Expanded state machine with submitted/rejected states."""
 
     def test_submitted_status(self):
         h = AgentHandle(
@@ -1002,3 +1112,230 @@ class TestDoneEvent:
             assert handle.done_event.is_set()
 
         asyncio.run(_run())
+
+
+class TestScheduledSpawnRecord:
+    """The scheduling record owns its own ordering and validates at definition."""
+
+    def test_ordering_key_ranks_priority_then_arrival_then_batch_index(self):
+        late_critical = ScheduledSpawn(
+            agent_id="c", priority="critical", enqueued_at=99.0
+        )
+        early_normal = ScheduledSpawn(agent_id="n", priority="normal", enqueued_at=1.0)
+        assert late_critical.ordering_key() < early_normal.ordering_key()
+
+        first = ScheduledSpawn(agent_id="b0", batch_index=0, enqueued_at=5.0)
+        second = ScheduledSpawn(agent_id="b1", batch_index=1, enqueued_at=5.0)
+        assert first.ordering_key() < second.ordering_key()
+
+    def test_waited_for_takes_the_clock_as_an_argument(self):
+        """No clock is read inside the model — a test injects one instead."""
+        spawn = ScheduledSpawn(agent_id="a", enqueued_at=10.0)
+        assert spawn.waited_for(now=25.0) == 15.0
+        # A clock that ran backwards never reports a negative wait.
+        assert spawn.waited_for(now=4.0) == 0.0
+
+    def test_extra_keys_and_bad_values_are_refused_at_definition(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ScheduledSpawn(agent_id="a", enqueued_at=1.0, urgency="high")
+        with pytest.raises(ValidationError):
+            ScheduledSpawn(agent_id="", enqueued_at=1.0)
+        with pytest.raises(ValidationError):
+            ScheduledSpawn(agent_id="a", enqueued_at=1.0, batch_index=-1)
+        with pytest.raises(ValidationError):
+            ScheduledSpawn(agent_id="a", enqueued_at=1.0, priority="urgent")
+
+
+class TestDeferredUnitCancellation:
+    """A unit that has not been dispatched must still be cancellable.
+
+    ``asyncio_task`` is populated by the child driver, which runs only AFTER
+    dispatch — so before this the cancel path reported ``no asyncio task`` and
+    the agent STARTED anyway when a sibling freed a slot. Refusing to cancel
+    something and then running it is worse than either answer alone, and it
+    became reachable the moment a fan-out could exceed the concurrency limit.
+    """
+
+    def test_cancelling_a_deferred_unit_settles_it_and_it_never_starts(self):
+        async def _test():
+            reg = AgentHypervisor(max_concurrent=1)
+            started = _Launches()
+            for agent_id in ("a1", "a2"):
+                await reg.register(
+                    AgentHandle(
+                        agent_id=agent_id,
+                        parent_id="root",
+                        depth=1,
+                        model_name="m",
+                        task_description="t",
+                        status="submitted",
+                    )
+                )
+            await reg.accept(_unit("a1", started))
+            assert await reg.accept(_unit("a2", started)) is False  # deferred
+
+            assert await reg.cancel_agent("a2") is None, "cancel must succeed"
+
+            handle = await reg.get("a2")
+            assert handle is not None
+            assert handle.status == "cancelled"
+            assert handle.done_event.is_set()
+            assert reg.pending_dispatch == 0
+
+            # THE REGRESSION: the settling sibling must not resurrect it.
+            await reg.release()
+            assert started.ids == ["a1"], "a cancelled unit must never start"
+
+        asyncio.run(_test())
+
+    def test_cancelling_a_running_agent_still_takes_the_task_path(self):
+        """The deferred arm must not swallow the ordinary cancellation."""
+
+        async def _test():
+            reg = AgentHypervisor(max_concurrent=1)
+
+            async def _sleep() -> None:
+                await asyncio.sleep(999)
+
+            task = asyncio.create_task(_sleep())
+            await reg.register(
+                AgentHandle(
+                    agent_id="live",
+                    parent_id="root",
+                    depth=1,
+                    model_name="m",
+                    task_description="t",
+                    status="running",
+                    asyncio_task=task,
+                )
+            )
+            assert await reg.cancel_agent("live") is None
+            assert task.cancelled() or task.cancelling() > 0
+
+        asyncio.run(_test())
+
+
+class TestFailedDispatchIsNeverSilent:
+    """A launcher that raises must strand neither the SLOT nor the AGENT.
+
+    Both halves are load-bearing and neither raises: losing the slot shrinks
+    fleet capacity by one permanently, and losing the agent leaves a
+    registered handle that answers ``collect_running`` forever, holding the
+    run's completion gate open. Under a green suite, in both cases.
+    """
+
+    @staticmethod
+    def _exploding_unit(agent_id: str) -> SpawnUnit:
+        async def _launch() -> None:
+            raise RuntimeError("launcher exploded")
+
+        return SpawnUnit(
+            spawn=ScheduledSpawn(agent_id=agent_id, enqueued_at=0.0), launch=_launch
+        )
+
+    def test_a_failed_launcher_is_never_reported_as_started(self):
+        async def _test():
+            reg = AgentHypervisor(max_concurrent=1)
+            started = _Launches()
+            for agent_id in ("boom", "ok"):
+                await reg.register(
+                    AgentHandle(
+                        agent_id=agent_id,
+                        parent_id="root",
+                        depth=1,
+                        model_name="m",
+                        task_description="t",
+                        status="submitted",
+                    )
+                )
+
+            decisions = await reg.accept_batch(
+                [self._exploding_unit("boom"), _unit("ok", started)]
+            )
+
+            # 'boom' never ran, so it must not read as started; 'ok' was
+            # deferred and then PROMOTED onto the freed slot, so its flag has
+            # to be corrected upward rather than left at its decision-time
+            # value. Both directions matter — the caller turns these into a
+            # count it reports to the model.
+            assert decisions == [False, True]
+            assert started.ids == ["ok"]
+
+        asyncio.run(_test())
+
+    def test_a_failed_launcher_settles_its_agent_rather_than_orphaning_it(self):
+        async def _test():
+            reg = AgentHypervisor(max_concurrent=2)
+            await reg.register(
+                AgentHandle(
+                    agent_id="boom",
+                    parent_id="root",
+                    depth=1,
+                    model_name="m",
+                    task_description="t",
+                    status="submitted",
+                )
+            )
+
+            assert await reg.accept(self._exploding_unit("boom")) is False
+
+            handle = await reg.get("boom")
+            assert handle is not None
+            assert handle.status == "failed"
+            assert "never started" in str(handle.error)
+            assert isinstance(handle.error, str) and "RuntimeError" in handle.error
+            # It must drop out of the liveness index, or the promise-as-
+            # completion gate waits on it for the rest of the session.
+            assert await reg.collect_running("root") == []
+
+        asyncio.run(_test())
+
+    def test_a_failed_launcher_does_not_shrink_fleet_capacity(self):
+        """The compensating hand-on, executed — not merely reachable."""
+
+        async def _test():
+            reg = AgentHypervisor(max_concurrent=2)
+            for agent_id in ("boom1", "boom2"):
+                await reg.register(
+                    AgentHandle(
+                        agent_id=agent_id,
+                        parent_id="root",
+                        depth=1,
+                        model_name="m",
+                        task_description="t",
+                        status="submitted",
+                    )
+                )
+
+            await reg.accept(self._exploding_unit("boom1"))
+            await reg.accept(self._exploding_unit("boom2"))
+
+            # Two failed dispatches in a row: if either dropped its slot
+            # instead of handing it back, capacity would now be 1 or 0 with
+            # nothing running and no test failing.
+            assert reg.free_slots == 2
+            assert reg.pending_dispatch == 0
+
+        asyncio.run(_test())
+
+    def test_a_launcher_failing_inside_the_pump_hands_the_slot_on(self):
+        """The release-path arm — a different call site from accept_batch."""
+
+        async def _test():
+            reg = AgentHypervisor(max_concurrent=1)
+            started = _Launches()
+            await reg.accept(_unit("running", started))
+            # Two deferred units: the first explodes when promoted, so the
+            # pump must keep the slot and try the next rather than return.
+            await reg.accept(self._exploding_unit("boom"))
+            await reg.accept(_unit("survivor", started))
+
+            await reg.release()
+
+            assert started.ids == ["running", "survivor"]
+            assert reg.pending_dispatch == 0
+            assert reg.free_slots == 0  # the survivor holds the one slot
+
+        asyncio.run(_test())

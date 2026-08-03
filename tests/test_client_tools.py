@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for ``mewbo_core.client_tools`` (Phase 1).
+"""Unit tests for ``mewbo_core.tooling.client_tools``.
 
 Covers ``ClientToolSpec`` validation (tool_id pattern, extra-forbid,
 non-object parameters), the ``DeviceToolDispatcher`` registration seam, and
@@ -14,7 +14,7 @@ import asyncio
 
 import pytest
 from mewbo_core.classes import ActionStep
-from mewbo_core.client_tools import (
+from mewbo_core.tooling.client_tools import (
     ClientDeclaredTool,
     ClientToolSpec,
     DeviceToolDispatcher,
@@ -199,7 +199,7 @@ class TestClientDeclaredTool:
         test: feed ``handle()``'s output straight into the loop's real
         detector and assert it recognizes a FAILED step (not just that our
         own string check thinks it looks right)."""
-        from mewbo_core.tool_use_loop import _session_tool_error_envelope
+        from mewbo_core.loop.tool_use_loop import _session_tool_error_envelope
 
         class _FakeTimeoutDispatcher:
             async def dispatch(self, session_id, tool_id, tool_input):
@@ -226,7 +226,7 @@ class TestClientDeclaredTool:
 
     def test_handle_success_status_stays_verbatim_json(self):
         """Success results must NOT be reshaped — only ``status: "error"`` is."""
-        from mewbo_core.tool_use_loop import _session_tool_error_envelope
+        from mewbo_core.loop.tool_use_loop import _session_tool_error_envelope
 
         class _FakeOkDispatcher:
             async def dispatch(self, session_id, tool_id, tool_input):
@@ -246,7 +246,7 @@ class TestClientDeclaredTool:
         (both empty ⇒ None), so a naive passthrough would silently record
         success=True for a genuine dispatcher-reported failure. Reachable:
         the result route accepts ``{"status":"error","error":{}}``."""
-        from mewbo_core.tool_use_loop import _session_tool_error_envelope
+        from mewbo_core.loop.tool_use_loop import _session_tool_error_envelope
 
         class _FakeBlankErrDispatcher:
             async def dispatch(self, session_id, tool_id, tool_input):

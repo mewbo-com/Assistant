@@ -13,15 +13,14 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -43,10 +42,10 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.mewbo.aura.data.model.SessionSummary
+import com.mewbo.aura.ui.common.AuraBottomSheet
 import com.mewbo.aura.ui.common.SheetActionRow
 import com.mewbo.aura.ui.common.SheetErrorCaption
 import com.mewbo.aura.ui.common.SheetHeader
-import com.mewbo.aura.ui.common.SheetShape
 import com.mewbo.aura.ui.theme.AuraColors
 import com.mewbo.aura.ui.theme.AuraSpacing
 import com.mewbo.aura.ui.theme.AuraType
@@ -58,9 +57,9 @@ private sealed interface ActionsPane {
 }
 
 /**
- * Long-press session-row actions (drawer's Recents rail): Rename / Archive, reference-app-like
- * anatomy over house tokens (same `surfaceInput`/`radiusBubble`/56dp-row shape as
- * `ComposerOptionsSheet`/`ModelPickerSheet`). [onRename]/[onArchive] delegate to
+ * Long-press session-row actions (drawer's Recents rail): Pin/Unpin / Rename / Archive,
+ * reference-app-like anatomy over house tokens (same `surfaceInput`/`radiusBubble`/56dp-row shape as
+ * `ComposerOptionsSheet`/`ModelPickerSheet`). [onRename]/[onArchive]/[onSetPinned] delegate to
  * [com.mewbo.aura.ui.sessions.SessionsViewModel]'s action methods — this composable owns no
  * repository access, only the in-sheet pane/busy/error UI state; each callback's own
  * `onResult: (Boolean) -> Unit` is invoked once the caller's coroutine settles. On success this
@@ -68,26 +67,20 @@ private sealed interface ActionsPane {
  * caption and the attempted action is retryable. Long-press already fired the row's one haptic
  * ([AuraDrawerContent]'s `combinedClickable`) — nothing in here fires a second.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SessionActionsSheet(
     session: SessionSummary,
     onDismiss: () -> Unit,
     onRename: (title: String, onResult: (Boolean) -> Unit) -> Unit,
     onArchive: (onResult: (Boolean) -> Unit) -> Unit,
+    onSetPinned: (pinned: Boolean, onResult: (Boolean) -> Unit) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var pane by remember { mutableStateOf<ActionsPane>(ActionsPane.Root) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(),
-        containerColor = AuraColors.surfaceInput,
-        shape = SheetShape,
-        modifier = modifier,
-    ) {
+    AuraBottomSheet(onDismiss = onDismiss, modifier = modifier) {
         when (pane) {
             ActionsPane.Root -> RootActionsPane(
                 session = session,
@@ -100,6 +93,19 @@ fun SessionActionsSheet(
                     onArchive { success ->
                         busy = false
                         if (success) onDismiss() else error = "Couldn't archive session"
+                    }
+                },
+                onPinTap = {
+                    error = null
+                    busy = true
+                    val nextPinned = !session.pinned
+                    onSetPinned(nextPinned) { success ->
+                        busy = false
+                        if (success) {
+                            onDismiss()
+                        } else {
+                            error = if (nextPinned) "Couldn't pin session" else "Couldn't unpin session"
+                        }
                     }
                 },
             )
@@ -128,12 +134,22 @@ private fun RootActionsPane(
     error: String?,
     onRenameTap: () -> Unit,
     onArchiveTap: () -> Unit,
+    onPinTap: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Column(modifier = modifier.fillMaxWidth().padding(bottom = AuraSpacing.Composer.internalPadding)) {
+    Column(modifier = modifier.fillMaxWidth()) {
         // "Untitled session" fallback identical to `RecentSessionRow`.
         SheetHeader(text = session.title?.takeIf { it.isNotBlank() } ?: "Untitled session")
         HorizontalDivider(color = AuraColors.outlineHairline)
+        // Filled glyph when pinned (an already-true state reads as a solid icon), outlined
+        // otherwise — the same fill-vs-outline convention `RecentSessionRow`'s running dot doesn't
+        // need but `ChatIcons` establishes elsewhere for toggled state.
+        SheetActionRow(
+            label = if (session.pinned) "Unpin" else "Pin",
+            icon = if (session.pinned) Icons.Filled.PushPin else Icons.Outlined.PushPin,
+            enabled = !busy,
+            onClick = onPinTap,
+        )
         SheetActionRow(label = "Rename", icon = Icons.Outlined.Edit, enabled = !busy, onClick = onRenameTap)
         SheetActionRow(label = "Archive", icon = ArchiveGlyph, enabled = !busy, onClick = onArchiveTap)
         if (error != null) {
@@ -180,7 +196,7 @@ private fun RenamePane(
         onCommit(trimmed)
     }
 
-    Column(modifier = modifier.fillMaxWidth().padding(bottom = AuraSpacing.Composer.internalPadding)) {
+    Column(modifier = modifier.fillMaxWidth()) {
         RenamePaneHeader(
             onBack = onBack,
             onConfirm = commit,
@@ -261,8 +277,8 @@ private val ConfirmSpinnerSize: Dp = 16.dp
 private val ConfirmSpinnerStroke: Dp = 2.dp
 
 /**
- * Hand-ported "archive box" glyph, predating `material-icons-extended` (added to the catalog
- * 2026-07-14; apps/mewbo_aura/CLAUDE.md § Iconography). A legacy hand-roll kept as-is — an existing
+ * Hand-ported "archive box" glyph, predating `material-icons-extended` (added to the catalog;
+ * apps/mewbo_aura/CLAUDE.md § Iconography). A legacy hand-roll kept as-is — an existing
  * reuse is not a "new hand-roll" — though it is now replaceable by an extended glyph. Simplified
  * stroked house style, same convention as `ui/chat/ChatIcons`' `PhotoGlyph`/`FileGlyph`/`StopTile`:
  * a lid rectangle, a box body below it, and a small filled pull-tab slot — recognizable as

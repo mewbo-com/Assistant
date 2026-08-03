@@ -22,7 +22,7 @@ import pytest
 from mewbo_graph.entities.types import Entity, EntityRelation
 from mewbo_graph.wiki.graph import GraphIndex, GraphParseResult, KnowledgeGraphView
 from mewbo_graph.wiki.memory_types import MemoryEdge, MemoryNode, MemoryProvenance
-from mewbo_graph.wiki.types import GraphEdge, GraphNode, make_graph_node
+from mewbo_graph.wiki.types import CommitScope, GraphEdge, GraphNode, make_graph_node
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -66,17 +66,31 @@ class _FakeStore:
         self._memory = memory or []
         self._memory_edges = memory_edges or []
 
+    def live_scope(self, slug: str) -> CommitScope:
+        # No commits are modelled here, so every fixture node is in scope; the
+        # commit-scoped reads are pinned in ``test_graph_commit_scope.py``
+        # against the real stores instead.
+        return CommitScope.every()
+
     def query_graph(
         self,
         slug: str,
         *,
+        scope: CommitScope,
         node_type=None,
         name_match=None,
         neighbors_of=None,
+        node_ids=None,
     ) -> list[GraphNode]:
+        # ``node_ids`` IS honoured — the anchor-repair path fetches superseded
+        # nodes by explicit id, and a fake that ignored the filter would hand
+        # it the whole graph and repair anchors a real store never would.
+        if node_ids is not None:
+            wanted = set(node_ids)
+            return [n for n in self._nodes if n.node_id in wanted]
         return list(self._nodes)
 
-    def list_edges(self, slug: str) -> list[GraphEdge]:
+    def list_edges(self, slug: str, *, scope: CommitScope) -> list[GraphEdge]:
         return list(self._edges)
 
     def query_entities(self, slug: str, *, filt=None):
@@ -632,39 +646,81 @@ def test_node_limit_prunes_only_ast_layer() -> None:
     assert "hub" in {n["data"]["id"] for n in ast_nodes}
 
 
-def test_truncated_stays_true_when_cap_and_externals_coexist() -> None:
-    """A node cap + synthesized External nodes must NOT mask truncation.
-
-    Regression: ``truncated`` once compared ``node_count`` (real AST + External)
-    against ``total_nodes``; with enough externals the sum exceeded the total and
-    falsely read un-truncated. It must compare REAL kept AST nodes only.
-    """
-    # 5 real AST nodes; the hub imports 3 distinct out-of-repo modules.
+def _hub_with_externals() -> _FakeStore:
+    """5 real AST nodes under one hub, which also imports 3 out-of-repo modules."""
     hub = _gn("hub", "main.py", typ="File", f="main.py")
     others = [_gn(f"n{i}", f"sym{i}", typ="Function", f="main.py") for i in range(4)]
-    # hub CONTAINS the 4 others (gives hub degree 4 so it survives the cap).
+    # hub CONTAINS the 4 others (gives hub the highest degree, so it survives a cap).
     contains = [_ge("hub", o.node_id, "CONTAINS") for o in others]
     # hub imports 3 externals → 3 External nodes synthesized in-view.
     ext_edges = [
         _ce("hub", f"syn{m}", typ="IMPORTS", target_name=m)
         for m in ("os", "sys", "json")
     ]
-    store = _FakeStore([hub, *others], contains + ext_edges)
+    return _FakeStore([hub, *others], contains + ext_edges)
 
-    view = KnowledgeGraphView.for_slug(store, SLUG, node_limit=3)
+
+def _ast_split(wire: dict) -> tuple[list, list]:
+    """Split the wire's AST layer into (real nodes, view-synthesized externals)."""
+    ast = [n for n in wire["nodes"] if n["data"]["layer"] == "ast"]
+    externals = [n for n in ast if n["data"]["kind"] == "External"]
+    real = [n for n in ast if n["data"]["kind"] != "External"]
+    return real, externals
+
+
+def test_node_limit_caps_the_whole_ast_payload_externals_included() -> None:
+    """A cap the AST layer spends in full leaves externals ZERO budget.
+
+    ``node_limit`` governs the whole AST payload, not the persisted layer alone:
+    a caller that asked for 3 nodes once received 3 + every live external. The
+    cap is honoured here, and ``truncated`` still tells the truth about it.
+    """
+    view = KnowledgeGraphView.for_slug(_hub_with_externals(), SLUG, node_limit=3)
     wire = view.to_wire()
 
-    externals = [n for n in wire["nodes"] if n["data"]["kind"] == "External"]
-    real_ast = [
-        n
-        for n in wire["nodes"]
-        if n["data"]["layer"] == "ast" and n["data"]["kind"] != "External"
-    ]
+    real_ast, externals = _ast_split(wire)
     assert len(real_ast) == 3  # genuinely capped (5 → 3)
-    assert len(externals) >= 1  # at least one external survived alongside the hub
-    # node_count (real + external) exceeds total — yet truncated must stay True.
-    assert wire["stats"]["nodeCount"] > wire["stats"]["totalNodes"] - len(externals)
+    assert externals == []  # the AST prune spent the entire budget
+    assert len(real_ast) + len(externals) <= 3  # the cap governs the payload
+    assert wire["stats"]["nodeCount"] == 3
     assert wire["stats"]["truncated"] is True
+    # No edge may survive pointing at an external the cap removed.
+    ast_edges = [e["data"] for e in wire["edges"] if e["data"]["layer"] == "ast"]
+    kept_ids = {n["data"]["id"] for n in real_ast}
+    assert all(e["target"] in kept_ids for e in ast_edges)
+
+
+def test_externals_get_the_budget_the_ast_prune_left_over() -> None:
+    """A limit the AST layer alone does not exceed still caps externals down.
+
+    5 real nodes under a limit of 6: the AST layer is not pruned, so exactly one
+    of the three externals fits in what is left — ranked by the same
+    degree-then-``node_id`` rule — and the two dropped ones take their inbound
+    edges with them.
+    """
+    view = KnowledgeGraphView.for_slug(_hub_with_externals(), SLUG, node_limit=6)
+    wire = view.to_wire()
+
+    real_ast, externals = _ast_split(wire)
+    assert len(real_ast) == 5  # the persisted layer fits under the limit
+    assert len(externals) == 1  # 3 live externals, budget of 1
+    assert len(real_ast) + len(externals) == 6
+    kept_ids = {n["data"]["id"] for n in real_ast + externals}
+    ast_edges = [e["data"] for e in wire["edges"] if e["data"]["layer"] == "ast"]
+    assert ast_edges  # not vacuous — edges really are present to be checked
+    assert all(e["target"] in kept_ids for e in ast_edges)
+    # The two capped-away externals took their IMPORTS edges with them: 4
+    # CONTAINS + the one surviving IMPORTS.
+    assert len(ast_edges) == 5
+
+
+def test_no_limit_keeps_every_external() -> None:
+    """The cap is the only thing that drops an external — uncapped keeps all 3."""
+    wire = KnowledgeGraphView.for_slug(_hub_with_externals(), SLUG).to_wire()
+    real_ast, externals = _ast_split(wire)
+    assert len(real_ast) == 5
+    assert len(externals) == 3
+    assert wire["stats"]["truncated"] is False
 
 
 def test_total_edges_excludes_dropped_orphan_edges() -> None:
@@ -841,3 +897,34 @@ def test_query_captures_do_not_mispair_node_names(tmp_path) -> None:
         assert head.startswith(f"def {n.name}"), (
             f"Method node {n.name!r} mispaired onto range starting {head!r}"
         )
+
+
+def test_truncated_is_true_when_only_externals_were_capped() -> None:
+    """A cap that drops ONLY externals must still report the payload truncated.
+
+    The banner's "showing N of M" and its ``truncated`` flag both used to be
+    computed against the persisted AST layer alone, while ``totalNodes`` counted
+    the externals that SURVIVED. So a cap that left every real node in place and
+    dropped externals reported "showing 6 of 6, truncated: false" for a payload
+    that had silently lost a quarter of its nodes — a response that is wrong in
+    the one direction a caller cannot detect.
+    """
+    view = KnowledgeGraphView.for_slug(_hub_with_externals(), SLUG, node_limit=6)
+    wire = view.to_wire()
+
+    real_ast, externals = _ast_split(wire)
+    assert len(real_ast) == 5  # every real node survived — the AST layer is intact
+    assert len(externals) == 1  # 1 of 3 externals fits the leftover budget
+    stats = wire["stats"]
+    assert stats["nodeCount"] == 6
+    assert stats["totalNodes"] == 8  # 5 real + all 3 synthesizable externals
+    assert stats["truncated"] is True
+
+
+def test_uncapped_payload_reports_itself_complete() -> None:
+    """The control: with no cap, N == M and nothing claims truncation."""
+    view = KnowledgeGraphView.for_slug(_hub_with_externals(), SLUG)
+    stats = view.to_wire()["stats"]
+
+    assert stats["nodeCount"] == stats["totalNodes"] == 8
+    assert stats["truncated"] is False

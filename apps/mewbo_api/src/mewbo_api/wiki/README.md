@@ -47,8 +47,3 @@ smoke tests.
 If the cloned repo contains `.mewbo/wiki.json` (or, for back-compat,
 `.devin/wiki.json`), the indexer adopts its `pages[]` as the page plan
 and injects `repo_notes[].content` into the sub-agent task prompts.
-
-## Design + plan
-
-- Design: `docs/specs/2026-05-14-wiki-style-gen-design.md`
-- Plan: `docs/plans/2026-05-14-wiki-style-gen-plan.md`

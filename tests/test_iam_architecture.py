@@ -31,7 +31,7 @@ from typing import Literal, get_args, get_origin
 import pytest
 import tomllib
 from flask import Flask, g, request
-from mewbo_core.key_store import KeyScopes, KeyStore
+from mewbo_core.secrets.key_store import KeyScopes, KeyStore
 from mewbo_iam import (
     ADMIN_ROLE,
     BUILTIN_ROLES,
@@ -371,12 +371,18 @@ def test_disabled_auth_writes_no_iam_store_file(tmp_path: Path) -> None:
     home.mkdir()
     env = {**os.environ, "MEWBO_HOME": str(home)}
     env.pop("MEWBO_CONFIG", None)
+    # The probe must resolve its stores into the temp home, which means the
+    # storage driver has to come from the config-free CWD and not from the
+    # ambient environment. The repo-root .env names a driver, and python-dotenv
+    # loads it into this process, so it would otherwise be inherited here.
+    for inherited in ("MEWBO_STORAGE_DRIVER", "MEWBO_MONGODB_URI", "MEWBO_MONGODB_DATABASE"):
+        env.pop(inherited, None)
 
     probe = """
 import json, os
 from pathlib import Path
 from flask import Flask, g, request
-from mewbo_core.key_store import KeyStore
+from mewbo_core.secrets.key_store import KeyStore
 from mewbo_iam import AuthSettings
 from mewbo_api.auth import AuthKit
 from mewbo_api.iam import init_iam_routes

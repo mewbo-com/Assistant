@@ -86,7 +86,7 @@ def map_recorder(monkeypatch: pytest.MonkeyPatch) -> _MapRecorder:
     monkeypatch.setattr(sync_mod.ScgConfig, "enabled", staticmethod(lambda: True))
     monkeypatch.setattr(routes_mod, "_runtime", _FakeRuntime())
     monkeypatch.setattr(
-        mcp_config_mod, "get_merged_mcp_config", lambda project=None: _MERGED
+        mcp_config_mod, "get_merged_mcp_config", lambda project=None, **_kw: _MERGED
     )
     # The re-enrich gate reads GLOBAL-SCG membership; tests drive it via rec.mapped
     # rather than standing up a live SCG store (monkeypatch restores on teardown).

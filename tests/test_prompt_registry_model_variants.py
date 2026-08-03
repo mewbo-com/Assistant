@@ -10,7 +10,7 @@ survives the append (the whole point of `mode: append`).
 
 from __future__ import annotations
 
-from mewbo_core.prompt_registry import get_prompt_registry
+from mewbo_core.llm.prompt_registry import get_prompt_registry
 
 # Markers from the shared base contract in `loop.depth.root` (must survive append).
 _BASE_DIRECT_EXECUTION = "## Default: Direct execution"

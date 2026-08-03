@@ -32,9 +32,22 @@ test("wikiIndexingProgress — finalizing job", async ({ page, demo }) => {
   // progress; "finalize" is the last, reached one.
   await expect(page.getByText("finalize", { exact: true })).toBeVisible();
 
-  // Seeded event-log line, replayed from the job's stored SSE history —
-  // anchors on real seeded content rather than a guessed log format.
+  // Pin the exact percent (finalize's floor, per progress.ts' PHASE_RANGE
+  // [95,100] — this job carries no finalize sub-progress) rather than
+  // leaving it unasserted: a snapshot bound at the wrong phase (e.g. still
+  // mid-"pages") would otherwise satisfy every OTHER assertion here.
+  await expect(page.getByText("95%", { exact: true })).toBeVisible();
+
+  // The log timeline replays the job's full stored event history (7 lines,
+  // `DEMO_JOB`'s bundle entry) — asserting only the mid-replay "Built graph"
+  // line (as this spec used to) passes on a TRUNCATED replay that stopped
+  // right there. Assert the LAST line too, so a replay that stalls before
+  // reaching the end of the log still fails.
   await expect(page.getByText("Built graph: 715 nodes, 3918 edges")).toBeVisible();
+  await expect(page.getByText("Embedded 715 nodes (dim=3072)")).toBeVisible();
+  await expect(
+    page.locator('div[class*="max-h-[280px]"] > div'),
+  ).toHaveCount(7);
 
   await demo.capturePage("wikiIndexingProgress");
 });

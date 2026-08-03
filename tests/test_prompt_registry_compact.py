@@ -1,16 +1,13 @@
 """Golden byte-equality tests for the migrated compaction prompts.
 
-Phase 1 is a VERBATIM extraction: the registry must reproduce the exact bytes
-that ``compact.py`` previously hardcoded. Each ``EXPECTED_*`` literal below is a
-frozen copy of the original constant/f-string; if a future edit retunes a
-prompt, the byte-equality assertion fails loudly. The originals live in the
-registry now (``compact.yaml``); this test is the contract that the migration
-changed nothing.
+``compact.yaml`` owns the compaction prompt text. Each ``EXPECTED_*``
+literal below is a frozen copy of what the registry must render; if an edit
+retunes a prompt, the byte-equality assertion fails loudly.
 """
 
 from __future__ import annotations
 
-from mewbo_core.prompt_registry import get_prompt_registry
+from mewbo_core.llm.prompt_registry import get_prompt_registry
 
 # --- Frozen originals (copied verbatim from compact.py before migration) -----
 

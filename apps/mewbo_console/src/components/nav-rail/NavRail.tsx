@@ -256,8 +256,8 @@ function NotificationBell({
  * why it does not count against the four-row law below. It states who the
  * console currently acts as, and when auth is off it says exactly that instead
  * of inventing a user: a deployment with no sign-in has no signed-in person,
- * and dressing the legacy principal up as one would be a lie the operator
- * cannot correct.
+ * and dressing the auth-disabled principal up as one would be a lie the
+ * operator cannot correct.
  *
  * Three type steps and no more: `text-sm` for the name, `text-xs` for the
  * supporting line, `text-2xs` for the role chips. Hierarchy here comes from
@@ -418,9 +418,9 @@ function RailAvatar({
 
 /**
  * The pinned footer — ONE zone holding the account menu, the notification bell
- * and (expanded) the Settings gear. Merging the old notifications row into this
- * cluster reclaims a full row of vertical space: the feed is now an icon next
- * to Settings rather than its own full-width row.
+ * and (expanded) the Settings gear. The notification feed is an icon next to
+ * Settings rather than its own full-width row, reclaiming a full row of
+ * vertical space.
  */
 function RailFooter({
   collapsed,

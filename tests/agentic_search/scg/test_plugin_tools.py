@@ -22,9 +22,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from mewbo_core.agent_registry import parse_agent_def
+from mewbo_core.agents.agent_registry import parse_agent_def
 from mewbo_core.capabilities import filter_by_capabilities
-from mewbo_core.session_tools import SessionTool
+from mewbo_core.tooling.session_tools import SessionTool
 from mewbo_graph.plugins.scg import _core
 from mewbo_graph.plugins.scg.build_structure import ScgBuildStructureTool
 from mewbo_graph.plugins.scg.finalize_map import ScgFinalizeMapTool
@@ -399,7 +399,7 @@ def test_route_recipes_carry_probe_tool_scope(patched_core: JsonScgStore) -> Non
     assert recipe["source_ids"] == ["github"]
     assert recipe["source_capabilities"] == ["get_issue", "search"]
     # The EXECUTABLE allowlist — real mcp_<server>_<tool> ids, never graph
-    # source_keys (passing source_keys granted nothing: run-c52e9597).
+    # source_keys, which grant nothing.
     assert recipe["allowed_tool_ids"] == ["mcp_github_get_issue", "mcp_github_search"]
 
 
@@ -581,11 +581,11 @@ def test_memory_write_succeeds_without_wiki_api_runtime(
 ) -> None:
     """A ``scg_memory`` write works when the wiki API runtime is NOT initialised.
 
-    Regression (fix): the bridge used to read the wiki store off
-    ``wiki.routes._runtime``, which is ``None`` for any deployment that never
-    started the wiki API — silently breaking every connector-memory write. The
-    bridge now builds the store via the wiki STORE FACTORY directly, so the real
-    ``ScgCore.memory_bridge`` path succeeds with ``_runtime`` left ``None``.
+    ``wiki.routes._runtime`` is ``None`` for any deployment that never started
+    the wiki API, so reading the wiki store off it silently breaks every
+    connector-memory write. The bridge builds the store via the wiki STORE
+    FACTORY directly, so the real ``ScgCore.memory_bridge`` path succeeds with
+    ``_runtime`` left ``None``.
     """
     from mewbo_api.wiki import routes as wiki_routes
     from mewbo_graph.scg.memory_bridge import CONNECTOR_SLUG

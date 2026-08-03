@@ -7,9 +7,10 @@ from typing import Any
 
 from mewbo_core.classes import Plan
 from mewbo_core.hooks import HookManager
-from mewbo_core.session_runtime import SessionRuntime
-from mewbo_core.session_store import SessionStore
-from mewbo_core.tool_registry import ToolRegistry
+from mewbo_core.loop.session_runtime import SessionRuntime
+from mewbo_core.session.session_store import SessionStore
+from mewbo_core.tooling.session_tools import SessionTool
+from mewbo_core.tooling.tool_registry import ToolRegistry
 from rich.console import Console
 
 # Synthetic continuation handed to the act-mode run that implements an approved
@@ -50,6 +51,24 @@ class CommandContext:
     # every existing construction site unchanged.
     approval_callback: Callable[..., Any] | None = None
     hook_factory: Callable[[], HookManager | None] | None = None
+    # Same inheritance for the run's extra session tools (``ask_user_question``),
+    # so a command-driven run can still ask the user a question instead of
+    # guessing. See :meth:`extra_session_tools` for why this is a factory.
+    extra_session_tools_factory: Callable[[], list[SessionTool] | None] | None = None
+
+    def extra_session_tools(self) -> list[SessionTool] | None:
+        """Build this run's extra session tools (fresh, current session id).
+
+        A FACTORY rather than a captured list because a tool binds the session
+        id at construction while the id moves under the command surface itself
+        (``/new``, ``/resume``, ``/fork``) — a list captured when the context
+        was built would dispatch the answer against a stale session. Mirrors
+        ``TurnEngine._extra_session_tools``; ``None`` (the plain-REPL / no-TTY
+        paths, which register no dispatcher) binds nothing.
+        """
+        if self.extra_session_tools_factory is None:
+            return None
+        return self.extra_session_tools_factory()
 
     def refuse_if_terminated(self, action: str) -> bool:
         """Print a refusal and return ``True`` if the session is terminated.

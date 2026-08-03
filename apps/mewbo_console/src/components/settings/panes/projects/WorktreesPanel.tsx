@@ -4,8 +4,6 @@
  * Data comes from `useProjectGit` (TanStack Query), the same hook the composer's
  * ConfigMenu already uses: one `['project-git', <id>]` cache entry, so a
  * worktree created here shows up in the composer's picker without a refetch.
- * The panel previously raw-fetched branches/worktrees with `useState` +
- * `useEffect` and confirmed deletes with `window.confirm()` — both are gone.
  * What remains local is genuine UI state (the create-form mode + fields).
  */
 import { useEffect, useMemo, useState } from 'react';

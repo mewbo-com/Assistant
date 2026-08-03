@@ -29,12 +29,6 @@ if TYPE_CHECKING:
 
 logging = get_logger(name="api.wiki.recovery")
 
-# Statuses worth re-driving on restart. ``interrupted`` IS included: if the API
-# died after marking a job ``interrupted`` but before its ``refresh`` minted the
-# replacement job, the next restart must still retry it — the slug-keyed cap
-# prevents any loop.
-_RECOVERABLE = ("queued", "scanning", "finalizing", "interrupted")
-
 
 class JobRecovery:
     """Static façade — re-drive interrupted indexing jobs through refresh."""
@@ -42,14 +36,29 @@ class JobRecovery:
     MAX_RETRIES = 3
 
     @classmethod
-    def recover_interrupted(cls, store: WikiStoreBase, runtime: Any) -> list[str]:
+    def recover_interrupted(
+        cls,
+        store: WikiStoreBase,
+        runtime: Any,
+        *,
+        hook_manager: Any = None,
+    ) -> list[str]:
         """Re-drive interrupted jobs via refresh; return the slugs re-triggered.
 
         Idempotent per startup: each distinct slug is refreshed at most once,
         and only while under the slug-keyed retry cap.
+
+        ``hook_manager`` is the API's shared instance, threaded down from
+        ``init_wiki``. Passing it matters as much here as on the interactive
+        routes: without it every boot-time re-drive starts a session with a
+        fresh empty manager, so a re-driven job that dies again never gets
+        handed back to recovery by ``WikiIndexingSessionEndHook``.
         """
         try:
-            stranded = [j for j in store.list_jobs() if j.status in _RECOVERABLE]
+            # "Should recovery re-drive this?" is the job's own question — see
+            # ``IndexingJob.is_recoverable`` for why ``interrupted`` is in the
+            # set and ``failed`` is not.
+            stranded = [j for j in store.list_jobs() if j.is_recoverable]
         except Exception as exc:
             logging.warning("wiki recovery: list_jobs failed ({}); skipping", exc)
             return []
@@ -88,7 +97,11 @@ class JobRecovery:
                 # per-slug cap intact for the automatic path (the manual endpoint
                 # resets it). Each distinct slug is resumed at most once per startup.
                 WikiResume.resume(
-                    store, runtime, job.job_id, hook_manager=None, user_initiated=False
+                    store,
+                    runtime,
+                    job.job_id,
+                    hook_manager=hook_manager,
+                    user_initiated=False,
                 )
                 refreshed.append(job.slug)
             except ResumeCountError as exc:

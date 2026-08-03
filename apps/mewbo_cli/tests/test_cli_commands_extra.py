@@ -8,9 +8,9 @@ import pytest
 from rich.console import Console
 
 from mewbo_core.config import set_config_override, set_mcp_config_path
-from mewbo_core.session_runtime import SessionRuntime
-from mewbo_core.session_store import SessionStore
-from mewbo_core.tool_registry import ToolRegistry, ToolSpec
+from mewbo_core.loop.session_runtime import SessionRuntime
+from mewbo_core.session.session_store import SessionStore
+from mewbo_core.tooling.tool_registry import ToolRegistry, ToolSpec
 
 import mewbo_cli.cli_commands as cli_commands
 from mewbo_cli.cli_commands import get_registry, _render_mcp, _handle_model_wizard
@@ -586,8 +586,10 @@ def test_cmd_skills_no_skills(monkeypatch, tmp_path):
         def get(self, name):
             return None
 
-    monkeypatch.setattr("mewbo_core.skills.SkillRegistry", _EmptyRegistry)
-    monkeypatch.setattr("mewbo_core.plugins.load_all_plugin_components", lambda: MagicMock())
+    monkeypatch.setattr("mewbo_core.tooling.skills.SkillRegistry", _EmptyRegistry)
+    monkeypatch.setattr(
+        "mewbo_core.tooling.plugins.load_all_plugin_components", lambda: MagicMock()
+    )
     assert registry.execute("/skills", ctx, []) is True
     assert "No skills" in ctx.console.export_text()
 
@@ -614,8 +616,10 @@ def test_cmd_skills_unknown_skill(monkeypatch, tmp_path):
         def get(self, name):
             return None
 
-    monkeypatch.setattr("mewbo_core.skills.SkillRegistry", _SkillRegWithItems)
-    monkeypatch.setattr("mewbo_core.plugins.load_all_plugin_components", lambda: MagicMock())
+    monkeypatch.setattr("mewbo_core.tooling.skills.SkillRegistry", _SkillRegWithItems)
+    monkeypatch.setattr(
+        "mewbo_core.tooling.plugins.load_all_plugin_components", lambda: MagicMock()
+    )
     assert registry.execute("/skills", ctx, ["nonexistent"]) is True
     assert "Unknown skill" in ctx.console.export_text()
 
@@ -647,8 +651,10 @@ def test_cmd_skills_detail_view(monkeypatch, tmp_path):
         def get(self, name):
             return skill if name == "test-skill" else None
 
-    monkeypatch.setattr("mewbo_core.skills.SkillRegistry", _SkillReg)
-    monkeypatch.setattr("mewbo_core.plugins.load_all_plugin_components", lambda: MagicMock())
+    monkeypatch.setattr("mewbo_core.tooling.skills.SkillRegistry", _SkillReg)
+    monkeypatch.setattr(
+        "mewbo_core.tooling.plugins.load_all_plugin_components", lambda: MagicMock()
+    )
     assert registry.execute("/skills", ctx, ["test-skill"]) is True
     output = ctx.console.export_text()
     assert "test-skill" in output
@@ -689,8 +695,10 @@ def test_cmd_skills_list_view(monkeypatch, tmp_path):
         def get(self, name):
             return None
 
-    monkeypatch.setattr("mewbo_core.skills.SkillRegistry", _SkillReg)
-    monkeypatch.setattr("mewbo_core.plugins.load_all_plugin_components", lambda: MagicMock())
+    monkeypatch.setattr("mewbo_core.tooling.skills.SkillRegistry", _SkillReg)
+    monkeypatch.setattr(
+        "mewbo_core.tooling.plugins.load_all_plugin_components", lambda: MagicMock()
+    )
     assert registry.execute("/skills", ctx, []) is True
     output = ctx.console.export_text()
     assert "alpha" in output
@@ -710,7 +718,7 @@ def test_cmd_plugins_no_plugins(monkeypatch, tmp_path):
     ctx = _make_context(tmp_path)
     registry = get_registry()
 
-    monkeypatch.setattr("mewbo_core.plugins.discover_installed_plugins", lambda **kw: [])
+    monkeypatch.setattr("mewbo_core.tooling.plugins.discover_installed_plugins", lambda **kw: [])
     monkeypatch.setattr("mewbo_core.config.get_config", MagicMock(return_value=MagicMock()))
     assert registry.execute("/plugins", ctx, []) is True
     assert "No plugins" in ctx.console.export_text()
@@ -732,7 +740,7 @@ def test_cmd_plugins_list(monkeypatch, tmp_path):
     pc.mcp_config = {}
     pc.hooks_config = None
 
-    monkeypatch.setattr("mewbo_core.plugins.discover_installed_plugins", lambda **kw: [pc])
+    monkeypatch.setattr("mewbo_core.tooling.plugins.discover_installed_plugins", lambda **kw: [pc])
     cfg_mock = MagicMock()
     cfg_mock.plugins = MagicMock()
     cfg_mock.plugins.resolve_registry_paths.return_value = []
@@ -746,7 +754,7 @@ def test_cmd_plugins_marketplace_empty(monkeypatch, tmp_path):
     ctx = _make_context(tmp_path)
     registry = get_registry()
 
-    monkeypatch.setattr("mewbo_core.plugins.discover_marketplace_plugins", lambda **kw: [])
+    monkeypatch.setattr("mewbo_core.tooling.plugins.discover_marketplace_plugins", lambda **kw: [])
     cfg_mock = MagicMock()
     cfg_mock.plugins = MagicMock()
     monkeypatch.setattr("mewbo_core.config.get_config", lambda: cfg_mock)
@@ -762,7 +770,9 @@ def test_cmd_plugins_marketplace_listing(monkeypatch, tmp_path):
     available = [
         {"name": "plugin-a", "description": "Plugin A", "category": "tools", "marketplace": "hub"},
     ]
-    monkeypatch.setattr("mewbo_core.plugins.discover_marketplace_plugins", lambda **kw: available)
+    monkeypatch.setattr(
+        "mewbo_core.tooling.plugins.discover_marketplace_plugins", lambda **kw: available
+    )
     cfg_mock = MagicMock()
     cfg_mock.plugins = MagicMock()
     monkeypatch.setattr("mewbo_core.config.get_config", lambda: cfg_mock)
@@ -785,7 +795,7 @@ def test_cmd_plugins_install_not_found(monkeypatch, tmp_path):
     """/plugins install missing plugin shows error."""
     ctx = _make_context(tmp_path)
     registry = get_registry()
-    monkeypatch.setattr("mewbo_core.plugins.discover_marketplace_plugins", lambda **kw: [])
+    monkeypatch.setattr("mewbo_core.tooling.plugins.discover_marketplace_plugins", lambda **kw: [])
     cfg_mock = MagicMock()
     cfg_mock.plugins = MagicMock()
     monkeypatch.setattr("mewbo_core.config.get_config", lambda: cfg_mock)
@@ -803,8 +813,12 @@ def test_cmd_plugins_install_success(monkeypatch, tmp_path):
     installed_manifest.name = "plugin-a"
     installed_manifest.version = "1.0"
 
-    monkeypatch.setattr("mewbo_core.plugins.discover_marketplace_plugins", lambda **kw: available)
-    monkeypatch.setattr("mewbo_core.plugins.install_plugin", lambda *a, **kw: installed_manifest)
+    monkeypatch.setattr(
+        "mewbo_core.tooling.plugins.discover_marketplace_plugins", lambda **kw: available
+    )
+    monkeypatch.setattr(
+        "mewbo_core.tooling.plugins.install_plugin", lambda *a, **kw: installed_manifest
+    )
     cfg_mock = MagicMock()
     cfg_mock.plugins = MagicMock()
     monkeypatch.setattr("mewbo_core.config.get_config", lambda: cfg_mock)
@@ -818,12 +832,14 @@ def test_cmd_plugins_install_error(monkeypatch, tmp_path):
     registry = get_registry()
 
     available = [{"name": "plugin-a", "marketplace": "hub"}]
-    monkeypatch.setattr("mewbo_core.plugins.discover_marketplace_plugins", lambda **kw: available)
+    monkeypatch.setattr(
+        "mewbo_core.tooling.plugins.discover_marketplace_plugins", lambda **kw: available
+    )
 
     def _fail(*a, **kw):
         raise RuntimeError("fail")
 
-    monkeypatch.setattr("mewbo_core.plugins.install_plugin", _fail)
+    monkeypatch.setattr("mewbo_core.tooling.plugins.install_plugin", _fail)
     cfg_mock = MagicMock()
     cfg_mock.plugins = MagicMock()
     monkeypatch.setattr("mewbo_core.config.get_config", lambda: cfg_mock)
@@ -846,7 +862,7 @@ def test_cmd_plugins_uninstall_success(monkeypatch, tmp_path):
     """/plugins uninstall removes plugin and confirms."""
     ctx = _make_context(tmp_path)
     registry = get_registry()
-    monkeypatch.setattr("mewbo_core.plugins.uninstall_plugin", lambda *a, **kw: True)
+    monkeypatch.setattr("mewbo_core.tooling.plugins.uninstall_plugin", lambda *a, **kw: True)
     cfg_mock = MagicMock()
     cfg_mock.plugins = MagicMock()
     monkeypatch.setattr("mewbo_core.config.get_config", lambda: cfg_mock)
@@ -858,7 +874,7 @@ def test_cmd_plugins_uninstall_not_found(monkeypatch, tmp_path):
     """/plugins uninstall shows error when plugin not found."""
     ctx = _make_context(tmp_path)
     registry = get_registry()
-    monkeypatch.setattr("mewbo_core.plugins.uninstall_plugin", lambda *a, **kw: False)
+    monkeypatch.setattr("mewbo_core.tooling.plugins.uninstall_plugin", lambda *a, **kw: False)
     cfg_mock = MagicMock()
     cfg_mock.plugins = MagicMock()
     monkeypatch.setattr("mewbo_core.config.get_config", lambda: cfg_mock)
@@ -1386,8 +1402,10 @@ def test_cmd_skills_detail_all_badges(monkeypatch, tmp_path):
         def get(self, name):
             return skill if name == "adv-skill" else None
 
-    monkeypatch.setattr("mewbo_core.skills.SkillRegistry", _SkillReg)
-    monkeypatch.setattr("mewbo_core.plugins.load_all_plugin_components", lambda: MagicMock())
+    monkeypatch.setattr("mewbo_core.tooling.skills.SkillRegistry", _SkillReg)
+    monkeypatch.setattr(
+        "mewbo_core.tooling.plugins.load_all_plugin_components", lambda: MagicMock()
+    )
     assert registry.execute("/skills", ctx, ["adv-skill"]) is True
     output = ctx.console.export_text()
     assert "Context: fork" in output
@@ -1420,7 +1438,7 @@ def test_cmd_plugins_list_skips_null_manifest(monkeypatch, tmp_path):
     pc_ok.hooks_config = None
 
     monkeypatch.setattr(
-        "mewbo_core.plugins.discover_installed_plugins", lambda **kw: [pc_null, pc_ok]
+        "mewbo_core.tooling.plugins.discover_installed_plugins", lambda **kw: [pc_null, pc_ok]
     )
     cfg_mock = MagicMock()
     cfg_mock.plugins = MagicMock()

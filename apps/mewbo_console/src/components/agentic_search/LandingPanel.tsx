@@ -149,8 +149,8 @@ export function LandingPanel({
           <div className="mt-6 flex flex-wrap items-center justify-center gap-2 max-w-[640px] px-2">
             {examples.map((e, i) => {
               // A past-query chip REPLAYS its stored run (GET snapshot) when it
-              // carries a run_id — it must NOT fire a fresh POST /runs. Only a
-              // legacy entry with no run_id falls back to pre-filling a new run.
+              // carries a run_id — it must NOT fire a fresh POST /runs. Only an
+              // entry with no run_id falls back to pre-filling a new run.
               // The icon encodes which: History = open the stored run, Search =
               // run this text fresh.
               const replay = Boolean(e.run_id)

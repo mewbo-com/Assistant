@@ -18,8 +18,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import mewbo_core.config as _config_mod
 from mewbo_core.classes import ActionStep
-from mewbo_core.tool_use_loop import ToolUseLoop
-from mewbo_core.verification import CommandVerification, VerifierResult
+from mewbo_core.contracts.verification import CommandVerification, VerifierResult
+from mewbo_core.loop.tool_use_loop import ToolUseLoop
 
 # Sibling-helper reuse (tests/ is on sys.path under pytest).
 from test_tool_use_loop import (
@@ -103,9 +103,9 @@ def _run_gate(
         ctx = dataclasses.replace(ctx, capability_mode=capability_mode)
 
     with (
-        patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+        patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
         patch(
-            "mewbo_core.tool_use_loop.get_config_value",
+            "mewbo_core.loop.tool_use_loop.get_config_value",
             side_effect=_cfg(
                 **{
                     "agent.verification_enabled": enabled,
@@ -203,7 +203,7 @@ class TestVerifierGate:
         assert len(runner.calls) == 1
 
     def test_no_spec_never_calls_runner(self):
-        """No verification spec → runner untouched, verified None, historical path."""
+        """No verification spec → runner untouched, verified None."""
         runner = RecordingRunner([_passing()])  # would pop if wrongly called
         _tq, state, runner, _loop = _run_gate(
             verification=None,
@@ -264,9 +264,9 @@ class TestVerifierGate:
         ctx = _make_agent_context()
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
             patch(
-                "mewbo_core.tool_use_loop.get_config_value",
+                "mewbo_core.loop.tool_use_loop.get_config_value",
                 side_effect=_cfg(
                     **{"agent.verification_enabled": True, "agent.verification_max_retries": 2}
                 ),
@@ -313,9 +313,9 @@ class TestVerifierGate:
         runner = RecordingRunner([_passing()])
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
             patch(
-                "mewbo_core.tool_use_loop.get_config_value",
+                "mewbo_core.loop.tool_use_loop.get_config_value",
                 side_effect=_cfg(
                     **{"agent.verification_enabled": True, "agent.verification_max_retries": 2}
                 ),
@@ -355,7 +355,7 @@ class TestSpawnNoSilentDrop:
 
     def test_blocking_spawn_response_surfaces_inactive_note(self):
         # Deferred import: reuse test_spawn_agent's depth>0 (blocking) scaffolding.
-        from mewbo_core.spawn_agent import SpawnAgentTool
+        from mewbo_core.agents.spawn_agent import SpawnAgentTool
         from test_spawn_agent import (
             _allow_all_policy as _sa_policy,
             _make_context as _sa_context,
@@ -377,7 +377,7 @@ class TestSpawnNoSilentDrop:
             bound = MagicMock()
             bound.ainvoke = fake_model.ainvoke
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
                 step = ActionStep(

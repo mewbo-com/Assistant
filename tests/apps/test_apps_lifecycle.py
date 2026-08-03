@@ -309,10 +309,10 @@ class TestSubmit:
 
 
 class TestSubmitPlatformArming:
-    """Phase 1: the PLATFORM arms a pipeline's DECLARED schedule at submit.
+    """The PLATFORM arms a pipeline's DECLARED schedule at submit.
 
-    Retires builder self-arming — the builder declares a ``schedule`` and never
-    touches the trigger store; the lifecycle mints the maintainer-owned trigger.
+    The builder declares a ``schedule`` and never touches the trigger store;
+    the lifecycle mints the maintainer-owned trigger.
     """
 
     def test_declared_cron_schedule_arms_a_maintainer_trigger(self, tmp_path):
@@ -341,7 +341,7 @@ class TestSubmitPlatformArming:
     def test_scheduled_trigger_gets_long_lived_expiry_not_the_7day_default(self, tmp_path):
         # The heartbeat trap: TriggerPolicy stamps a 7-day default_expiry when
         # expires_at is None. A declared-schedule trigger must outlive that, or the
-        # app refreshes once and silently dies (app-a2a5f299e0ad, live-verified).
+        # app refreshes once and silently dies.
         lifecycle, _, trigger_store, _ = _make(tmp_path, policy=TriggerPolicy())
         pipeline = PipelineSpec(
             name="ingest", wake_prompt="go", schedule=CronSchedule(cron="0 9 * * *")
@@ -458,16 +458,24 @@ class TestSubmitReconciliation:
         # The stored row is the live one.
         assert app_store.get(app_id).status == "live"
 
-    def test_submit_refuses_overwriting_a_live_app(self, tmp_path):
+    def test_submit_refuses_overwriting_a_live_app_from_an_unbound_session(self, tmp_path):
         lifecycle, app_store, _, _ = _make(tmp_path)
         live = lifecycle.submit(_draft("app-x", builder_sid="b"), builder_session_id="b")
         assert live.status == "live"
-        # A second submit for the same (now-live) app_id is refused — the
-        # double-submit / live-overwrite guard (data-loss vector).
+        # The live-overwrite guard's data-loss case: some OTHER chat builder
+        # reusing a live app_id. Membership is now "a session the server bound to
+        # this app" (its id fields or its stamped tag) rather than
+        # "maintainer_session_id, exactly" — so the app's OWN builder session
+        # resubmitting is a version bump like the maintainer's, and the session
+        # that proves the guard is one with no binding at all.
         with pytest.raises(ValueError, match="refusing to overwrite"):
-            lifecycle.submit(_draft("app-x", builder_sid="b"), builder_session_id="b")
+            lifecycle.submit(
+                _draft("app-x", builder_sid="other-builder"),
+                builder_session_id="other-builder",
+            )
         # The live app is untouched.
         assert app_store.get("app-x").status == "live"
+        assert app_store.get("app-x").version == 1
 
     def test_submit_refuses_a_pipeline_that_would_never_wake(self, tmp_path):
         # The wakeability floor moved from model parse (where it 500'd every

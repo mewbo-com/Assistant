@@ -72,7 +72,7 @@ def test_plugins_resolve_install_dir_custom():
 # Tests for plugins.py functions
 # ---------------------------------------------------------------------------
 
-from mewbo_core.plugins import (  # noqa: E402
+from mewbo_core.tooling.plugins import (  # noqa: E402
     _resolve_git_url,
     discover_installed_plugins,
     discover_marketplace_plugins,
@@ -436,7 +436,7 @@ def test_discover_marketplace_plugins_installed_false(tmp_path):
 # Tests for SkillRegistry plugin extensions
 # ---------------------------------------------------------------------------
 
-from mewbo_core.skills import SkillRegistry, SkillSpec  # noqa: E402
+from mewbo_core.tooling.skills import SkillRegistry, SkillSpec  # noqa: E402
 
 
 def test_skill_registry_load_extra_dir(tmp_path):
@@ -532,7 +532,7 @@ def test_resolve_git_url_host_with_port():
 
 
 def test_resolve_git_url_bare_owner_repo_defaults_to_github():
-    """Bare 'owner/repo' keeps the historical GitHub default."""
+    """Bare 'owner/repo' resolves to the GitHub default."""
     assert (
         _resolve_git_url("anthropics/claude-plugins-official")
         == "https://github.com/anthropics/claude-plugins-official.git"
@@ -613,7 +613,7 @@ def test_sync_marketplaces_reuses_existing_dir_without_network(tmp_path, monkeyp
     def _fail(*args, **kwargs):
         raise AssertionError("git must not run when the catalog is already cloned")
 
-    monkeypatch.setattr("mewbo_core.plugins.subprocess.run", _fail)
+    monkeypatch.setattr("mewbo_core.tooling.plugins.subprocess.run", _fail)
 
     dirs = sync_marketplaces([entry], install_base)
     assert dirs == [mp_dir]
@@ -629,7 +629,7 @@ def test_sync_marketplaces_clones_from_any_host(tmp_path, monkeypatch):
         recorded.append(cmd)
         return None
 
-    monkeypatch.setattr("mewbo_core.plugins.subprocess.run", _fake_run)
+    monkeypatch.setattr("mewbo_core.tooling.plugins.subprocess.run", _fake_run)
 
     dirs = sync_marketplaces([entry], install_base)
     assert len(recorded) == 1
@@ -641,7 +641,7 @@ def test_sync_marketplaces_honors_default_host(tmp_path, monkeypatch):
     """Bare shorthand is cloned from the configured default host."""
     recorded: list[list[str]] = []
     monkeypatch.setattr(
-        "mewbo_core.plugins.subprocess.run",
+        "mewbo_core.tooling.plugins.subprocess.run",
         lambda cmd, **kw: recorded.append(cmd),
     )
     sync_marketplaces(["team/plugins"], tmp_path, default_host="gitea.local")
@@ -682,7 +682,7 @@ def test_install_plugin_resolves_host_owner_repo_source(tmp_path, monkeypatch):
         recorded.append(cmd)
         return None
 
-    monkeypatch.setattr("mewbo_core.plugins.subprocess.run", _fake_clone)
+    monkeypatch.setattr("mewbo_core.tooling.plugins.subprocess.run", _fake_clone)
 
     manifest = install_plugin(
         "p", "mp", marketplace_dirs=[mp_dir], install_base=install_base

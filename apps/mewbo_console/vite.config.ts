@@ -192,6 +192,15 @@ export default defineConfig(({ mode }) => {
           target: apiTarget,
           changeOrigin: true,
           secure: false
+        },
+        // The git credential registry is product-wide, so it sits at /v1/git
+        // rather than under the wiki prefix above. An unproxied path is served
+        // the SPA shell instead of 404ing, so omitting it costs a confusing
+        // "JSON parse" failure rather than an obvious routing error.
+        "/v1/git": {
+          target: apiTarget,
+          changeOrigin: true,
+          secure: false
         }
       }
     },

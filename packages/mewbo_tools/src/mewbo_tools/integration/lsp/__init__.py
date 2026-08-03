@@ -107,7 +107,6 @@ def get_passive_diagnostics(file_path: str, cwd: str) -> str | None:
 
         time.sleep(1.5)
         diags = manager.get_cached_diagnostics(file_path)
-        # Only surface errors and warnings
         from lsprotocol.types import DiagnosticSeverity
 
         errors = [
@@ -130,7 +129,6 @@ async def shutdown_lsp_managers() -> None:
     for mgr in list(_managers.values()):
         await mgr.shutdown_all()
     _managers.clear()
-    # Stop the background loop
     global _lsp_loop, _lsp_thread
     with _loop_lock:
         if _lsp_loop is not None and not _lsp_loop.is_closed():

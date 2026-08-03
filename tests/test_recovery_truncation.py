@@ -8,9 +8,9 @@ about the transcript the STORE holds afterwards, never about internals.
 """
 
 from mewbo_core.config import set_config_override
-from mewbo_core.context import ContextBuilder
-from mewbo_core.session_runtime import SessionRuntime
-from mewbo_core.session_store import SessionStore
+from mewbo_core.loop.session_runtime import SessionRuntime
+from mewbo_core.session.context import ContextBuilder
+from mewbo_core.session.session_store import SessionStore
 
 
 def _runtime(tmp_path) -> tuple[SessionStore, SessionRuntime, str]:

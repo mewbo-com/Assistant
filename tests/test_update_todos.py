@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 
 from mewbo_core.classes import ActionStep
-from mewbo_core.update_todos import (
+from mewbo_core.tooling.update_todos import (
     TODO_COMPLETED,
     TODO_IN_PROGRESS,
     TODO_PENDING,

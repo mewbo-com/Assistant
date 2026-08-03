@@ -26,7 +26,7 @@ from mewbo_api.apps.plugin import PLUGIN_ROOT
 from mewbo_api.apps.routes import AppsRoutesController
 from mewbo_api.apps.store import JsonAppDataStore, JsonAppStore, JsonPipelineRunStore
 from mewbo_api.apps.tokens import AppReadTokenSigner
-from mewbo_core.session_tools import SessionToolRegistry
+from mewbo_core.tooling.session_tools import SessionToolRegistry
 from mewbo_core.triggers.policy import TriggerPolicy
 from mewbo_core.triggers.store import JsonTriggerStore
 

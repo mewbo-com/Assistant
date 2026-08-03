@@ -1,6 +1,7 @@
 """``wiki_clone_repo`` SessionTool — deterministic git clone + queued event emission."""
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import subprocess
@@ -9,6 +10,8 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlparse, urlunparse
 
 from mewbo_core.common import MockSpeaker, get_logger, pydantic_to_openai_tool
+from mewbo_core.config import get_config_value
+from mewbo_core.workspaces.workspace import shell_preexec_scope
 from pydantic import BaseModel, ConfigDict, Field
 
 from mewbo_graph.plugins.wiki._base import WikiSessionTool, _err_result
@@ -27,6 +30,20 @@ if TYPE_CHECKING:
     from mewbo_core.classes import ActionStep
 
 logging = get_logger(name="mewbo_graph.plugins.wiki.clone")
+
+# DEFAULT ceiling for one acquisition; the operator sizes the real value
+# (``wiki.phase_timeouts.clone_s``). Sized from the CREDENTIAL CHAIN's worst
+# case, not from how long a clone takes: the chain walks up to five candidates
+# and each git attempt is capped at 300s below, so a repository whose every
+# stored credential has been revoked spends 1500s before reaching the anonymous
+# attempt that succeeds. A budget under that would abort a clone that was about
+# to work, which is the failure a credential chain exists to prevent.
+_CLONE_BUDGET_S: float = 1800.0
+
+# Headroom between this tool's deadline and the loop's ceiling, so the TOOL
+# expires first. Not operator-tunable — it encodes which layer expires, not a
+# quantity about this deployment (mirrors ``ask_user.QUESTION_TIMEOUT_MARGIN_S``).
+_CEILING_MARGIN_S: float = 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -82,8 +99,77 @@ class WikiCloneRepoTool(WikiSessionTool):
     args_cls = WikiCloneArgs
     schema: dict[str, object] = pydantic_to_openai_tool(WikiCloneArgs, name="wiki_clone_repo")
 
+    #: Recorded by :meth:`handle`, drained by the loop's ``tool_result`` emit.
+    _headline: str | None = None
+
+    def result_headline(self) -> str | None:
+        """The one-line trace title for the acquisition that just finished.
+
+        The declared-headline convention (``mewbo_core.tooling.session_tools``): read
+        once and cleared, so it can never title a later call.
+        """
+        headline, self._headline = self._headline, None
+        return headline
+
+    def _budget_s(self) -> float:
+        """This deployment's ceiling for one acquisition, in seconds."""
+        return float(
+            get_config_value("wiki", "phase_timeouts", "clone_s", default=_CLONE_BUDGET_S)
+        )
+
+    def execution_timeout(self, tool_input: object) -> float | None:
+        """The loop's outer ceiling for this call: this tool's budget + margin.
+
+        A SessionTool has no ``ToolSpec``, so leaving this undeclared means the
+        registry's flat 120s — under a fifth of one git attempt's own 300s cap.
+        The margin keeps the TOOL the thing that expires, so an over-budget
+        acquisition returns a readable result rather than a failed call.
+        """
+        return self._budget_s() + _CEILING_MARGIN_S
+
     async def handle(self, action_step: ActionStep) -> MockSpeaker:
-        """Execute a ``wiki_clone_repo`` tool call."""
+        """Execute a ``wiki_clone_repo`` tool call, off the event loop.
+
+        The body is a git subprocess, a full-tree file count and a series of
+        blocking store writes, with no ``await`` anywhere in it — so awaiting it
+        inline handed the loop to a network operation whose own worst case is
+        five credential attempts at 300s each. Off-loop, cancellation and the
+        heartbeat keep running while the clone does.
+        """
+        budget_s = self._budget_s()
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._handle_blocking, action_step), timeout=budget_s
+            )
+        except asyncio.TimeoutError:
+            return self._over_budget_result(budget_s)
+
+    def _over_budget_result(self, budget_s: float) -> MockSpeaker:
+        """The bounded outcome for an acquisition that outran its budget.
+
+        The git subprocess is not stopped by abandoning the wait — it holds its
+        own 300s-per-attempt cap and its own temp checkout — so the message says
+        the acquisition may still be running and warns against a re-run, which
+        would race a second clone into the same directory. The ctx is resolved
+        here rather than passed in because the whole body, ctx resolution
+        included, runs on the worker; on this path that costs one store read on
+        a call that has already spent its entire budget.
+        """
+        budget = f"{budget_s:g}s"
+        ctx = self._job_ctx()
+        if ctx is not None:
+            emit_log(ctx, f"Clone exceeded its budget of {budget}", level="warn")
+        self._headline = f"Clone exceeded its budget of {budget}"
+        return _err_result(
+            "timeout",
+            f"clone exceeded its budget of {budget}. The git operation may "
+            "still be running against the same checkout directory — do not "
+            "call wiki_clone_repo again for this job; a resume reuses the "
+            "checkout if it completes.",
+        )
+
+    def _handle_blocking(self, action_step: ActionStep) -> MockSpeaker:
+        """The synchronous body of the tool call — runs on a worker thread."""
         # 1. Resolve runtime and job ctx.
         ctx = self._job_ctx()
         if ctx is None:
@@ -147,10 +233,10 @@ class WikiCloneRepoTool(WikiSessionTool):
         if not branch or branch == "HEAD":
             branch = args.ref or (job.branch if job is not None else None) or ""
 
-        # 7. GUARD the writeback. The pin used to erase its own record: whatever
-        # HEAD the clone landed on was written straight back over ``commit_sha``,
-        # so a pin that failed to take left no trace it had ever been requested —
-        # the job then read as though it had always meant the new commit. A pinned
+        # 7. GUARD the writeback. Writing whatever HEAD the clone landed on
+        # straight back over ``commit_sha`` would erase the pin's own record: a
+        # pin that failed to take would leave no trace it had ever been requested,
+        # and the job would read as though it had always meant the new commit. A pinned
         # job therefore never REWRITES the sha, it only VERIFIES it, and a
         # mismatch is a hard failure rather than a new record.
         if pinned_sha is not None and head and head != pinned_sha:
@@ -186,6 +272,18 @@ class WikiCloneRepoTool(WikiSessionTool):
         emit_log(
             ctx,
             f"{'Reused' if reused else 'Cloned'} {total} files in {clone_dir.name}",
+        )
+
+        # Whether this turn hit the network is the ONE thing a reader of the
+        # trace needs from this tool, and the payload buries it: ``reused`` is
+        # the sixth key of a dict literal, in a row otherwise identical to the
+        # first turn's — which is how a resumed index came to be read as having
+        # cloned the repo twice when the guard had worked perfectly. Structured
+        # facts only (verb, short sha, count); the full payload is one key away.
+        short_sha = (head or pinned_sha or "")[:7]
+        self._headline = (
+            f"{'Reused existing clone' if reused else 'Cloned'}"
+            f"{f' at {short_sha}' if short_sha else ''} ({total} files)"
         )
 
         return MockSpeaker(content=str({
@@ -317,6 +415,7 @@ def run_git_with_chain(
     timeout: int,
     on_log: Callable[..., None] | None = None,
     reset_dir: Path | None = None,
+    active_root: Path | str | None = None,
 ) -> GitChainOutcome:
     """Run one git command against *url*, trying each credential-chain candidate.
 
@@ -339,6 +438,13 @@ def run_git_with_chain(
     (git refuses a non-empty clone target; a prior candidate may have left a
     partial checkout). *on_log* (optional) receives the which-credential-won /
     which-scope-rejected telemetry so both callers emit it with no duplication.
+
+    *active_root* is the directory THIS call legitimately works in — the wiki
+    clone root (or a caller's own already-checked-out project root) — passed
+    through to the Landlock shell scope so it stays reachable even when it
+    coincides with (or is nested under) a denied configured project; ``None``
+    (freshness's ``ls-remote``, which touches no local checkout) denies every
+    configured project and re-admits nothing extra.
     """
 
     def _log(text: str, *, level: str = "info") -> None:
@@ -368,7 +474,12 @@ def run_git_with_chain(
         env = hardened_git_env(run_env)
         try:
             try:
-                proc = subprocess.run(cmd, capture_output=True, timeout=timeout, env=env)
+                with shell_preexec_scope(
+                    str(active_root) if active_root is not None else None
+                ) as hook:
+                    proc = subprocess.run(
+                        cmd, capture_output=True, timeout=timeout, env=env, preexec_fn=hook
+                    )
             except subprocess.TimeoutExpired:
                 # A timeout is not an auth failure — abort the whole chain.
                 return GitChainOutcome(
@@ -437,6 +548,7 @@ def clone_with_fallback(
         timeout=300,
         on_log=on_log,
         reset_dir=target,
+        active_root=target,
     )
     return CloneOutcome(ok=outcome.ok, stderr=outcome.stderr_redacted)
 
@@ -489,6 +601,7 @@ def clone_at_sha(
         arg_token=arg_token,
         timeout=300,
         on_log=on_log,
+        active_root=target,
     )
     if not outcome.ok:
         return CloneOutcome(ok=False, stderr=outcome.stderr_redacted)
@@ -498,10 +611,79 @@ def clone_at_sha(
     return CloneOutcome(ok=True, stderr="")
 
 
+def clone_working_checkout(
+    url: str,
+    clone_dir: Any,
+    *,
+    store: Any,
+    slug: str,
+    timeout: int,
+    on_log: Callable[..., None] | None = None,
+) -> CloneOutcome:
+    """Clone *url* into *clone_dir* as a PERSISTENT checkout an agent works in.
+
+    The third adapter over :func:`run_git_with_chain`, and it differs from
+    :func:`clone_with_fallback` in the two ways a durable checkout differs from
+    an ephemeral index clone:
+
+    - **Full history, every branch** (``depth=None``). ``--depth`` implies
+      ``--single-branch``, so a shallow clone cannot diff against the default
+      branch or cut a branch from it — the first two things a task does.
+    - **The origin URL is scrubbed afterwards.** The executor authenticates by
+      injecting the credential into the URL, and ``git clone <authed-url>``
+      persists exactly that string as ``remote.origin.url``. An ephemeral clone
+      is deleted with the token still in it; this one is handed to an agent that
+      will read ``.git/config`` and run ``git remote -v``, so the token would ride
+      into a transcript. Resetting origin to the clean *url* is therefore part of
+      the operation, not a caller's responsibility — a scrub a caller can forget
+      is a scrub that will be forgotten. Pushes re-resolve through the chain,
+      exactly as every other authenticated git call here does.
+
+    *timeout* is per credential-chain attempt and is the CALLER's, because this
+    runs under an HTTP request rather than a background index job: the caller
+    owns the budget its client is waiting on.
+
+    No ref is pinned. A registered repository's ``default_branch`` is recorded
+    as-is and never verified, so pinning it would turn a stale value into a hard
+    clone failure; the remote's own HEAD is the truth and costs nothing.
+    """
+    target = Path(str(clone_dir))
+    outcome = run_git_with_chain(
+        store,
+        slug,
+        url,
+        lambda authed: build_clone_command(
+            authed, target, ref=None, private_host=_is_private_host(url), depth=None
+        ),
+        timeout=timeout,
+        on_log=on_log,
+        reset_dir=target,
+        active_root=target,
+    )
+    if not outcome.ok:
+        return CloneOutcome(ok=False, stderr=outcome.stderr_redacted)
+    if outcome.winner is not None and outcome.winner.token:
+        # Only a token candidate ever rewrote the URL; an ssh-key or anonymous
+        # clone already recorded the clean one.
+        if _run_local_git(target, ["remote", "set-url", "origin", url]) is None:
+            return CloneOutcome(
+                ok=False,
+                stderr="cloned, but could not reset the origin URL, so the "
+                "checkout still carries a credential in .git/config and is "
+                "being refused",
+            )
+    return CloneOutcome(ok=True, stderr="")
+
+
 def build_clone_command(
-    clone_url: str, clone_dir: Any, *, ref: str | None, private_host: bool
+    clone_url: str,
+    clone_dir: Any,
+    *,
+    ref: str | None,
+    private_host: bool,
+    depth: int | None = 1,
 ) -> list[str]:
-    """Build the ``git clone --depth=1 [...]`` argv (shared by both clone paths).
+    """Build the ``git clone [...]`` argv (shared by every clone path).
 
     Self-hosted servers on private TLDs (e.g. git.example.home) typically use
     self-signed certs, so ``private_host`` inserts ``-c http.sslVerify=false`` —
@@ -509,8 +691,18 @@ def build_clone_command(
     *ref* pins a single BRANCH OR TAG via ``--branch <ref> --single-branch``; null
     clones the repo's default branch. A raw commit sha is NOT a valid *ref* here
     (the remote resolves the value as a branch name) — use :func:`clone_at_sha`.
+
+    *depth* defaults to 1 — the shallow index clone every existing caller wants,
+    since a wiki index reads a snapshot and never walks history. ``None`` drops
+    ``--depth`` for a FULL clone, which is not merely "more data": ``--depth``
+    implies ``--single-branch``, so a shallow checkout has exactly one branch and
+    one commit. A checkout an agent will work in needs neither restriction — it
+    diffs against the default branch, cuts a branch from it and pushes — so
+    :func:`clone_working_checkout` passes ``None``.
     """
-    cmd: list[str] = ["git", "clone", "--depth=1"]
+    cmd: list[str] = ["git", "clone"]
+    if depth is not None:
+        cmd.append(f"--depth={depth}")
     # Disable ANY git credential helper for this subprocess: the container
     # gitconfig sets ``credential.helper=store`` against a READ-ONLY, bind-mounted
     # ``~/.git-credentials``, so on an auth rejection git tries to erase the entry
@@ -553,8 +745,8 @@ def build_ls_remote_command(
     Carries the SAME ``-c credential.helper=`` helper-disable + private-host
     ``http.sslVerify=false`` carve-out as :func:`build_clone_command`, so branch
     listing, freshness, and the credential-validate route can never drift from
-    the clone's hardened posture (the un-hardened branch lister was where the
-    EBUSY-masks-auth incident still reproduced). *symref* adds ``--symref`` (the
+    the clone's hardened posture — an un-hardened ls-remote is exactly where the
+    EBUSY-masks-auth trap resurfaces. *symref* adds ``--symref`` (the
     branch picker reads ``HEAD``'s symref to name the default branch); *refs* are
     the ref specs to query (``HEAD``, ``refs/heads/<x>``, ``refs/heads/*``).
     """
@@ -571,13 +763,33 @@ def build_ls_remote_command(
 def hardened_git_env(ssh_env: dict[str, str] | None = None) -> dict[str, str]:
     """Return the subprocess env every credential-resolving git call must run in.
 
-    ``GIT_TERMINAL_PROMPT=0`` merged over either the SSH-key env (from
-    :func:`_ssh_env_for`) or the inherited process env — so git never blocks on
-    an interactive credential prompt and never falls back to the mounted
-    credential helper. The ONE place this env is assembled.
+    Three overrides merged over either the SSH-key env (from
+    :func:`_ssh_env_for`) or the inherited process env. The ONE place this env
+    is assembled.
+
+    - ``GIT_TERMINAL_PROMPT=0`` — git never blocks on an interactive credential
+      prompt; an absent credential fails fast so the chain advances.
+    - ``GIT_CONFIG_GLOBAL=/dev/null`` and ``GIT_CONFIG_SYSTEM=/dev/null`` — git
+      reads NEITHER ``$HOME/.gitconfig`` NOR ``/etc/gitconfig``, only the repo's
+      own ``.git/config``. This is what makes the ``-c credential.helper=`` on
+      each argv actually complete: without it a ``credential.helper`` (or an
+      ``insteadOf`` URL rewrite, or an ``http.*`` override) in the operator's
+      global config still reached the subprocess, so the helper-disable covered
+      the argv and not the environment. It is also a hard requirement under the
+      shell Landlock scope, which denies ``$HOME``: git does not degrade when it
+      cannot read a config file it believes exists, it exits 128 with "unknown
+      error occurred while reading the configuration files".
+
+    Credentials therefore never arrive from ambient git config — every one is
+    resolved by :func:`~mewbo_graph.wiki.credentials.resolve_chain` and injected
+    into the URL. Nothing here supplies a commit identity: no call site under
+    this env commits, and a caller that adds one must pass ``GIT_AUTHOR_*`` /
+    ``GIT_COMMITTER_*`` (or ``-c user.email=``) itself.
     """
     env = dict(ssh_env) if ssh_env is not None else dict(os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
     return env
 
 
@@ -654,12 +866,14 @@ def _run_local_git(clone_dir: Any, args: list[str]) -> str | None:
     nothing" from "it did not work".
     """
     try:
-        proc = subprocess.run(
-            ["git", "-C", str(clone_dir), "-c", "credential.helper=", *args],
-            capture_output=True,
-            timeout=30,
-            env=hardened_git_env(),
-        )
+        with shell_preexec_scope(str(clone_dir)) as hook:
+            proc = subprocess.run(
+                ["git", "-C", str(clone_dir), "-c", "credential.helper=", *args],
+                capture_output=True,
+                timeout=30,
+                env=hardened_git_env(),
+                preexec_fn=hook,
+            )
     except (subprocess.TimeoutExpired, OSError):
         return None
     if proc.returncode != 0:
@@ -700,6 +914,7 @@ __all__ = [
     "build_ls_remote_command",
     "clone_at_sha",
     "clone_with_fallback",
+    "clone_working_checkout",
     "hardened_git_env",
     "run_git_with_chain",
     "_inject_token",

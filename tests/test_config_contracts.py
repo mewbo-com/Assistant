@@ -7,7 +7,9 @@ env-var overrides, nested sub-config defaults, and validation error paths.
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 from urllib.error import HTTPError, URLError
 
 import pytest
@@ -15,9 +17,10 @@ from mewbo_core import config as config_module
 from mewbo_core.config import (
     AgentConfig,
     AppConfig,
-    ChatConfig,
     CLIConfig,
     CompactionConfig,
+    ConfigWriteAccess,
+    ConfigWriteError,
     ContextConfig,
     HomeAssistantConfig,
     HookEntry,
@@ -26,11 +29,11 @@ from mewbo_core.config import (
     PermissionsConfig,
     PluginsConfig,
     ProjectConfig,
-    ReflectionConfig,
     RuntimeConfig,
     StorageConfig,
     TokenBudgetConfig,
     WebIdeConfig,
+    WikiPhaseTimeoutsConfig,
     effective_fallback_models,
     get_config,
     get_config_value,
@@ -423,33 +426,6 @@ class TestCLIConfigValidators:
         assert CLIConfig.model_validate({"disable_textual": "yes"}).disable_textual is True
         assert CLIConfig.model_validate({"disable_textual": "no"}).disable_textual is False
 
-    @pytest.mark.parametrize(
-        "val,expected",
-        [
-            ("inline", "inline"),
-            ("textual", "textual"),
-            ("aider", "aider"),
-            ("bogus", "inline"),
-            (None, "inline"),
-        ],
-    )
-    def test_approval_style_normalization(self, val, expected):
-        assert CLIConfig.model_validate({"approval_style": val}).approval_style == expected
-
-
-# ---------------------------------------------------------------------------
-# ChatConfig validators
-# ---------------------------------------------------------------------------
-class TestChatConfigValidators:
-    def test_port_clamped_to_at_least_one(self):
-        assert ChatConfig.model_validate({"port": 0}).port == 1
-
-    def test_port_invalid_type_defaults(self):
-        assert ChatConfig.model_validate({"port": "bad"}).port == 8501
-
-    def test_port_valid(self):
-        assert ChatConfig.model_validate({"port": 9000}).port == 9000
-
 
 # ---------------------------------------------------------------------------
 # HookEntry model_validator
@@ -476,7 +452,13 @@ class TestHookEntryValidation:
 # StorageConfig.driver validator and env override
 # ---------------------------------------------------------------------------
 class TestStorageConfigDriver:
-    def test_invalid_driver_raises(self):
+    def test_invalid_driver_raises(self, monkeypatch):
+        # The env override wins over the file value, so a deployment's own
+        # MEWBO_STORAGE_DRIVER would supply a VALID driver and this would
+        # assert nothing. The repo-root .env carries one, and python-dotenv
+        # loads it into any process started from there.
+        monkeypatch.delenv("MEWBO_STORAGE_DRIVER", raising=False)
+
         with pytest.raises(ValidationError, match="Unknown storage driver"):
             StorageConfig.model_validate({"driver": "redis"})
 
@@ -511,9 +493,13 @@ class TestMongoDBConfigEnvOverride:
         mc = MongoDBConfig.model_validate({"database": "placeholder"})
         assert mc.database == "mydb"
 
-    def test_uri_default_used_when_no_env(self):
+    def test_uri_default_used_when_no_env(self, monkeypatch):
         """Without env var, default URI is used."""
         from mewbo_core.config import MongoDBConfig
+
+        # "no env" has to be arranged, not assumed — see the note in
+        # TestStorageConfigDriver.test_invalid_driver_raises.
+        monkeypatch.delenv("MEWBO_MONGODB_URI", raising=False)
 
         mc = MongoDBConfig.model_validate({"uri": "mongodb://custom:9999"})
         assert mc.uri == "mongodb://custom:9999"
@@ -553,12 +539,6 @@ class TestAgentConfigValidators:
 
     def test_max_iters_invalid_defaults(self):
         assert AgentConfig.model_validate({"max_iters": "oops"}).max_iters == 30
-
-    def test_sub_agent_max_steps_clamped(self):
-        assert AgentConfig.model_validate({"sub_agent_max_steps": 0}).sub_agent_max_steps == 1
-
-    def test_sub_agent_max_steps_invalid_defaults(self):
-        assert AgentConfig.model_validate({"sub_agent_max_steps": "bad"}).sub_agent_max_steps == 10
 
     def test_session_step_budget_defaults_unlimited(self):
         assert AgentConfig.model_validate({}).session_step_budget == 0
@@ -771,6 +751,21 @@ class TestAppConfigNormalizeProjects:
         app = AppConfig.model_validate({"projects": {"p": pc}})
         assert app.projects["p"].path == str(tmp_path.resolve())
 
+    def test_a_project_named_auto_is_refused(self, tmp_path):
+        """The reserved auto-select sentinel must not be shadowable by a config project.
+
+        ``ProjectCatalog.resolve`` refuses the ``auto`` sentinel deliberately — a
+        config project of that name would otherwise be silently unreachable
+        (shadowed) rather than resolved, and the caller could never tell which
+        meaning it got. The validator mirrors ``AUTO_PROJECT`` by value rather
+        than importing it (see the validator's own comment for why), so this
+        test is the tripwire that keeps the two from drifting apart.
+        """
+        from mewbo_core.workspaces.project_catalog import AUTO_PROJECT
+
+        with pytest.raises(ValidationError, match=AUTO_PROJECT):
+            AppConfig.model_validate({"projects": {AUTO_PROJECT: {"path": str(tmp_path)}}})
+
 
 # ---------------------------------------------------------------------------
 # AppConfig.write() / load round-trip  (lines 1766–1770)
@@ -796,6 +791,364 @@ class TestAppConfigWriteLoad:
         loaded = AppConfig.load(target)
         assert loaded.agent.max_depth == 3
         assert loaded.agent.max_concurrent == 5
+
+
+# ---------------------------------------------------------------------------
+# AppConfig.write() atomicity + ConfigWriteError contract
+# ---------------------------------------------------------------------------
+_IS_ROOT = os.geteuid() == 0
+_ROOT_SKIP = "root bypasses directory mode bits, so the write would succeed"
+
+
+def _store_dir(tmp_path):
+    """Return an empty directory to persist into.
+
+    ``tmp_path`` itself already holds the ``app.json`` the autouse
+    ``app_config_file`` fixture writes, so the "nothing was left behind"
+    assertions below need a directory this suite owns outright.
+    """
+    target = tmp_path / "store"
+    target.mkdir()
+    return target
+
+
+class TestAppConfigAtomicWrite:
+    def test_successful_write_roundtrips_and_leaves_no_staging_file(self, tmp_path):
+        store = _store_dir(tmp_path)
+        target = store / "app.json"
+        AppConfig.model_validate({"llm": {"default_model": "written-model"}}).write(target)
+
+        assert AppConfig.load(target).llm.default_model == "written-model"
+        assert target.read_text(encoding="utf-8").endswith("\n")
+        assert [p.name for p in store.iterdir()] == ["app.json"]
+
+    def test_read_only_filesystem_maps_to_read_only_code(self, tmp_path, monkeypatch):
+        """The deployed failure: the config directory is a read-only mount (EROFS)."""
+        store = _store_dir(tmp_path)
+        target = store / "app.json"
+
+        def _erofs(*args, **kwargs):
+            raise OSError(errno.EROFS, "Read-only file system")
+
+        monkeypatch.setattr(config_module.tempfile, "mkstemp", _erofs)
+
+        with pytest.raises(ConfigWriteError) as excinfo:
+            AppConfig().write(target)
+
+        assert excinfo.value.code == "read_only"
+        assert excinfo.value.path == target
+        assert isinstance(excinfo.value.__cause__, OSError)
+        # The prose is rendered to whoever holds the settings page; the server
+        # path belongs on the exception and in the logs, not in the copy.
+        assert str(store) not in excinfo.value.reason
+        assert list(store.iterdir()) == []
+
+    @pytest.mark.skipif(_IS_ROOT, reason=_ROOT_SKIP)
+    def test_nothing_writable_raises_typed_error_and_keeps_the_config(self, tmp_path):
+        """The durability property again, this time with no stubbing at all."""
+        cfg_dir = _store_dir(tmp_path)
+        target = cfg_dir / "app.json"
+        AppConfig.model_validate({"llm": {"default_model": "original"}}).write(target)
+        before = target.read_bytes()
+        # BOTH must be locked: a writable file inside a read-only directory is
+        # the single-file-mount shape, which write() deliberately saves.
+        os.chmod(target, 0o400)
+        os.chmod(cfg_dir, 0o500)
+        try:
+            with pytest.raises(ConfigWriteError) as excinfo:
+                AppConfig.model_validate({"llm": {"default_model": "replacement"}}).write(target)
+            survived = target.read_bytes()
+            leftovers = [p.name for p in cfg_dir.iterdir()]
+        finally:
+            os.chmod(cfg_dir, 0o700)
+            os.chmod(target, 0o600)
+
+        assert excinfo.value.code == "permission_denied"
+        assert excinfo.value.path == target
+        assert str(target) not in excinfo.value.reason
+        assert survived == before
+        assert leftovers == ["app.json"]
+
+    @pytest.mark.skipif(_IS_ROOT, reason=_ROOT_SKIP)
+    def test_read_only_directory_holding_a_writable_file_saves_in_place(self, tmp_path):
+        """The single-file bind mount, reproduced with mode bits and no stubbing.
+
+        The staged file cannot be created in the directory at all, so the only
+        way to save is to write the target itself.
+        """
+        cfg_dir = _store_dir(tmp_path)
+        target = cfg_dir / "app.json"
+        AppConfig.model_validate({"llm": {"default_model": "original"}}).write(target)
+        os.chmod(cfg_dir, 0o500)
+        try:
+            AppConfig.model_validate({"llm": {"default_model": "replacement"}}).write(target)
+            saved = AppConfig.load(target).llm.default_model
+            leftovers = [p.name for p in cfg_dir.iterdir()]
+        finally:
+            os.chmod(cfg_dir, 0o700)
+
+        assert saved == "replacement"
+        assert leftovers == ["app.json"]
+
+    def test_a_non_structural_replace_failure_still_raises(self, tmp_path, monkeypatch):
+        """A full disk must never degrade to the truncating in-place path."""
+        store = _store_dir(tmp_path)
+        target = store / "app.json"
+        AppConfig.model_validate({"llm": {"default_model": "original"}}).write(target)
+        before = target.read_bytes()
+
+        def _enospc(*args, **kwargs):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr(config_module.os, "replace", _enospc)
+
+        with pytest.raises(ConfigWriteError) as excinfo:
+            AppConfig.model_validate({"llm": {"default_model": "replacement"}}).write(target)
+
+        assert excinfo.value.code == "no_space"
+        assert target.read_bytes() == before
+        assert [p.name for p in store.iterdir()] == ["app.json"]
+
+    def test_failed_write_leaves_existing_config_byte_identical(self, tmp_path, monkeypatch):
+        """The durability property: a failed save must not damage the live config."""
+        store = _store_dir(tmp_path)
+        target = store / "app.json"
+        AppConfig.model_validate({"llm": {"default_model": "original"}}).write(target)
+        before = target.read_bytes()
+
+        def _enospc(_fd):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr(config_module.os, "fsync", _enospc)
+
+        with pytest.raises(ConfigWriteError) as excinfo:
+            AppConfig.model_validate({"llm": {"default_model": "replacement"}}).write(target)
+
+        assert excinfo.value.code == "no_space"
+        assert target.read_bytes() == before
+        assert AppConfig.load(target).llm.default_model == "original"
+        # The staged temp file is cleaned up rather than left beside the config.
+        assert [p.name for p in store.iterdir()] == ["app.json"]
+
+    def test_unmapped_errno_falls_back_to_io_error(self, tmp_path, monkeypatch):
+        target = _store_dir(tmp_path) / "app.json"
+
+        def _eio(*args, **kwargs):
+            raise OSError(errno.EIO, "Input/output error")
+
+        monkeypatch.setattr(config_module.tempfile, "mkstemp", _eio)
+
+        with pytest.raises(ConfigWriteError) as excinfo:
+            AppConfig().write(target)
+
+        assert excinfo.value.code == "io_error"
+
+    def test_mount_point_target_falls_back_to_an_in_place_write(self, tmp_path, monkeypatch):
+        """A single-file bind mount of app.json: the rename cannot land, the save must.
+
+        Docker deployments routinely mount the config file itself rather than
+        its directory. Renaming over a path that is its own mount point fails
+        with ``EBUSY``, so without the fallback this shape would trade one
+        failed save for another.
+        """
+        store = _store_dir(tmp_path)
+        target = store / "app.json"
+        AppConfig.model_validate({"llm": {"default_model": "original"}}).write(target)
+
+        def _ebusy(_src, _dst):
+            raise OSError(errno.EBUSY, "Device or resource busy")
+
+        monkeypatch.setattr(config_module.os, "replace", _ebusy)
+
+        AppConfig.model_validate({"llm": {"default_model": "replacement"}}).write(target)
+
+        assert AppConfig.load(target).llm.default_model == "replacement"
+        # The staged file is still cleaned up on the fallback path.
+        assert [p.name for p in store.iterdir()] == ["app.json"]
+
+    def test_a_denied_rename_over_a_writable_file_also_falls_back(self, tmp_path, monkeypatch):
+        """EBUSY is not the only structural shape — a denied rename is one too.
+
+        A rename needs write permission on the DIRECTORY, so EACCES here means
+        the directory refuses it while the file itself is still writable: the
+        same dead end as EBUSY, and the same in-place save is the only way out.
+        Raising instead would contradict ``probe_write_access``, which reports
+        this deployment writable.
+        """
+        store = _store_dir(tmp_path)
+        target = store / "app.json"
+        AppConfig.model_validate({"llm": {"default_model": "original"}}).write(target)
+
+        def _eacces(_src, _dst):
+            raise OSError(errno.EACCES, "Permission denied")
+
+        monkeypatch.setattr(config_module.os, "replace", _eacces)
+
+        AppConfig.model_validate({"llm": {"default_model": "replacement"}}).write(target)
+
+        assert AppConfig.load(target).llm.default_model == "replacement"
+        assert AppConfig.probe_write_access(target).writable is True
+
+    def test_a_denied_rename_raises_when_the_file_is_not_writable(self, tmp_path, monkeypatch):
+        """The second gate: no fallback without a writable target to fall back onto."""
+        store = _store_dir(tmp_path)
+        target = store / "app.json"
+
+        def _eacces(_src, _dst):
+            raise OSError(errno.EACCES, "Permission denied")
+
+        monkeypatch.setattr(config_module.os, "replace", _eacces)
+
+        # The target does not exist, so os.access(W_OK) is False.
+        with pytest.raises(ConfigWriteError) as excinfo:
+            AppConfig().write(target)
+
+        assert excinfo.value.code == "permission_denied"
+        assert not target.exists()
+        assert list(store.iterdir()) == []
+
+    def test_write_document_keeps_the_operators_shape_and_undeclared_keys(self, tmp_path):
+        """Saving an edit writes the operator's document back, not a model re-render.
+
+        ``AppConfig`` is ``extra="ignore"`` and renders every declared field, so
+        re-serializing it would drop `$schema` (which drives editor completion)
+        and explode every unset field into an explicit default.
+        """
+        target = _store_dir(tmp_path) / "app.json"
+        document = {
+            "$schema": "./app.schema.json",
+            "llm": {"default_model": "m"},
+            "future_feature": {"enabled": True},
+        }
+
+        AppConfig.write_document(target, document)
+
+        written = json.loads(target.read_text(encoding="utf-8"))
+        assert written == document
+        assert AppConfig.load(target).llm.default_model == "m"
+
+    def test_write_document_does_not_pin_environment_derived_defaults(self, tmp_path):
+        """The regression that broke every non-container consumer of a shared config.
+
+        ``runtime.*`` directories resolve from the saving process's environment,
+        so re-rendering the model turned "leave this to the runtime" into an
+        absolute path belonging to whichever process happened to save.
+        """
+        target = _store_dir(tmp_path) / "app.json"
+        document = {"runtime": {"cache_dir": ""}, "llm": {"default_model": "m"}}
+
+        AppConfig.write_document(target, document)
+
+        written = json.loads(target.read_text(encoding="utf-8"))
+        assert written["runtime"]["cache_dir"] == ""
+        assert "storage" not in written
+        assert set(written) == {"runtime", "llm"}
+
+    def test_write_renders_the_whole_model_for_scaffolding(self, tmp_path):
+        """``write`` keeps its render-everything behaviour for a fresh config."""
+        target = _store_dir(tmp_path) / "app.json"
+
+        AppConfig.model_validate({"llm": {"default_model": "m"}}).write(target)
+
+        written = json.loads(target.read_text(encoding="utf-8"))
+        assert written["llm"]["default_model"] == "m"
+        # Unlike write_document, this materializes declared sections.
+        assert "agent" in written
+
+    def test_write_preserves_existing_file_mode(self, tmp_path):
+        target = _store_dir(tmp_path) / "app.json"
+        AppConfig().write(target)
+        os.chmod(target, 0o640)
+
+        AppConfig.model_validate({"llm": {"default_model": "second"}}).write(target)
+
+        assert target.stat().st_mode & 0o777 == 0o640
+
+
+# ---------------------------------------------------------------------------
+# AppConfig.probe_write_access()
+# ---------------------------------------------------------------------------
+class TestProbeWriteAccess:
+    def test_writable_directory_reports_writable_and_no_reason(self, tmp_path):
+        store = _store_dir(tmp_path)
+        access = AppConfig.probe_write_access(store / "app.json")
+
+        assert access.writable is True
+        assert access.code is None
+        assert access.reason is None
+        assert list(store.iterdir()) == []
+
+    def test_probe_leaves_an_existing_config_untouched(self, tmp_path):
+        store = _store_dir(tmp_path)
+        target = store / "app.json"
+        AppConfig.model_validate({"llm": {"default_model": "untouched"}}).write(target)
+        before = target.read_bytes()
+
+        assert AppConfig.probe_write_access(target).writable is True
+        assert target.read_bytes() == before
+        assert [p.name for p in store.iterdir()] == ["app.json"]
+
+    def test_missing_parent_is_probed_at_its_nearest_existing_ancestor(self, tmp_path):
+        store = _store_dir(tmp_path)
+        access = AppConfig.probe_write_access(store / "a" / "b" / "app.json")
+
+        assert access.writable is True
+        # Probing must not create the directories a later write would.
+        assert list(store.iterdir()) == []
+
+    @pytest.mark.skipif(_IS_ROOT, reason=_ROOT_SKIP)
+    def test_unwritable_directory_reports_a_code_without_damaging_the_config(self, tmp_path):
+        cfg_dir = _store_dir(tmp_path)
+        target = cfg_dir / "app.json"
+        AppConfig.model_validate({"llm": {"default_model": "survivor"}}).write(target)
+        before = target.read_bytes()
+        os.chmod(target, 0o400)
+        os.chmod(cfg_dir, 0o500)
+        try:
+            access = AppConfig.probe_write_access(target)
+        finally:
+            os.chmod(cfg_dir, 0o700)
+            os.chmod(target, 0o600)
+
+        assert access.writable is False
+        assert access.code == "permission_denied"
+        assert access.reason and str(target) not in access.reason
+        assert target.read_bytes() == before
+
+    @pytest.mark.skipif(_IS_ROOT, reason=_ROOT_SKIP)
+    def test_read_only_directory_holding_a_writable_file_reports_writable(self, tmp_path):
+        """The probe must answer for the fallback rung too, not the directory alone.
+
+        This is the single-file-bind shape: ``write`` saves in place here, so a
+        ``writable=False`` verdict would disable saving that actually works.
+        """
+        cfg_dir = _store_dir(tmp_path)
+        target = cfg_dir / "app.json"
+        AppConfig().write(target)
+        os.chmod(cfg_dir, 0o500)
+        try:
+            access = AppConfig.probe_write_access(target)
+        finally:
+            os.chmod(cfg_dir, 0o700)
+
+        assert access.writable is True
+        assert access.code is None
+
+    def test_probe_never_raises_on_an_unexpected_failure(self, tmp_path, monkeypatch):
+        def _boom(*args, **kwargs):
+            raise RuntimeError("something nobody predicted")
+
+        monkeypatch.setattr(config_module.tempfile, "mkstemp", _boom)
+
+        access = AppConfig.probe_write_access(_store_dir(tmp_path) / "app.json")
+
+        assert access.writable is False
+        assert access.code == "io_error"
+        assert access.reason
+
+    def test_access_model_forbids_extra_fields(self):
+        with pytest.raises(ValidationError):
+            ConfigWriteAccess(writable=True, unexpected="x")
 
 
 # ---------------------------------------------------------------------------
@@ -951,18 +1304,12 @@ class TestConfigHelpers:
 
 
 # ---------------------------------------------------------------------------
-# CompactionConfig / ReflectionConfig validators
+# CompactionConfig validators
 # ---------------------------------------------------------------------------
 class TestCompactionConfigValidators:
     def test_caveman_mode_coercion(self):
         assert CompactionConfig.model_validate({"caveman_mode": "yes"}).caveman_mode is True
         assert CompactionConfig.model_validate({"caveman_mode": "no"}).caveman_mode is False
-
-
-class TestReflectionConfigValidators:
-    def test_enabled_coercion(self):
-        assert ReflectionConfig.model_validate({"enabled": "no"}).enabled is False
-        assert ReflectionConfig.model_validate({"enabled": "yes"}).enabled is True
 
 
 # ---------------------------------------------------------------------------
@@ -1023,7 +1370,7 @@ class TestDeepMerge:
 
 
 # ---------------------------------------------------------------------------
-# CompactionConfig / ReflectionConfig defaults  (sub-config defaults)
+# Sub-config defaults
 # ---------------------------------------------------------------------------
 class TestNestedSubConfigDefaults:
     def test_agent_retry_config_has_defaults(self):
@@ -1035,9 +1382,89 @@ class TestNestedSubConfigDefaults:
         ac = AgentConfig.model_validate({})
         assert ac.lsp.enabled is True
 
-    def test_agent_tool_search_auto_by_default(self):
-        # Deferred-schema loading ships on as adaptive 'auto' — defers
-        # only above the threshold, so lean sessions keep verbatim binding.
+    def test_agent_tool_search_defers_unconditionally_by_default(self):
+        # A user's MCP tools must never occupy the context window just by
+        # being configured. Deferral is therefore unconditional, not gated on
+        # a tool count: 'auto' bound up to auto_threshold schemas verbatim on
+        # every turn, and a deployment crossed that cliff invisibly whenever
+        # an MCP server was added or removed.
         ac = AgentConfig.model_validate({})
-        assert ac.tool_search.mode == "auto"
+        assert ac.tool_search.mode == "on"
+        # Retained for operators who opt back into the adaptive mode; ignored
+        # while mode is 'on'.
         assert ac.tool_search.auto_threshold == 25
+
+
+class TestOperatorSettableTimeouts:
+    """Both knobs must survive the file -> typed model -> read-path round trip.
+
+    Their consumers read them through ``get_config_value``, which walks one
+    ``getattr`` per dotted key, and ``AppConfig`` is ``extra="ignore"``. So while
+    each lacked a TYPED field, a deployment could set it in ``app.json``, have the
+    value silently dropped at validation, and watch the consumer keep using its
+    hardcoded default with no error anywhere. Asserting the field exists is not
+    enough — these drive the real read path, which is the property that broke.
+    """
+
+    @staticmethod
+    def _reload(path):
+        # ``reset_config`` clears ``_APP_CONFIG_PATH_OVERRIDE`` along with the
+        # cache, so the override must be re-pinned or the next read falls back
+        # to the developer's real ``~/.mewbo/app.json`` and silently asserts
+        # against THEIR deployment. Caught exactly that way.
+        reset_config()
+        set_app_config_path(path)
+
+    def test_request_timeout_reaches_the_read_path(self, app_config_file):
+        AppConfig.model_validate({"llm": {"request_timeout": 12.5}}).write(app_config_file)
+        self._reload(app_config_file)
+        assert get_config_value("llm", "request_timeout") == 12.5
+
+    def test_llm_call_liveness_reaches_the_read_path(self, app_config_file):
+        AppConfig.model_validate({"agent": {"llm_call_liveness_s": 42.0}}).write(app_config_file)
+        self._reload(app_config_file)
+        assert get_config_value("agent", "llm_call_liveness_s") == 42.0
+
+    def test_wiki_graph_build_timeout_reaches_the_read_path(self, app_config_file):
+        """The knob ``wiki_build_graph`` actually reads: ``wiki.phase_timeouts.graph_build_s``.
+
+        Same property as the two siblings above, nested one level deeper: a
+        docstring or a code comment naming a dotted path is not evidence the
+        path resolves. This drives the full file -> typed model -> read-path
+        round trip through the SAME ``get_config_value`` the tool calls.
+        """
+        AppConfig.model_validate(
+            {"wiki": {"phase_timeouts": {"graph_build_s": 42.0}}}
+        ).write(app_config_file)
+        self._reload(app_config_file)
+        assert get_config_value("wiki", "phase_timeouts", "graph_build_s") == 42.0
+
+    def test_wiki_phase_timeout_rejects_a_non_positive_value(self):
+        """``gt=0`` is what makes the field a real constraint, not just a type.
+
+        The consumer never re-checks this — ``build_graph.py``'s ``_budget_s``
+        trusts whatever ``get_config_value`` hands back — so validation has to
+        happen here, at definition, or a zero/negative operator value would
+        silently wait forever / fail every call.
+        """
+        with pytest.raises(ValidationError):
+            WikiPhaseTimeoutsConfig.model_validate({"graph_build_s": 0})
+
+    def test_defaults_are_the_shared_constants(self):
+        # Single source of truth: the behaviour modules own these, config
+        # references them. A drifting duplicate is how a documented default
+        # stops matching the one actually used.
+        from mewbo_core.llm.llm_resilience import (
+            DEFAULT_LLM_CALL_LIVENESS_S,
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+
+        assert LLMConfig.model_validate({}).request_timeout == DEFAULT_REQUEST_TIMEOUT
+        assert AgentConfig.model_validate({}).llm_call_liveness_s == DEFAULT_LLM_CALL_LIVENESS_S
+
+    def test_liveness_exceeds_the_attempt_cap(self):
+        # The liveness leg exists for the wedge ``asyncio.wait_for`` cannot cancel.
+        # If it ever sat below the attempt cap, an ordinary timing-out call would
+        # report as stalled and bury the signal it exists to raise.
+        ac = AgentConfig.model_validate({})
+        assert ac.llm_call_liveness_s > ac.llm_call_timeout

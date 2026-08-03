@@ -147,3 +147,47 @@ describe("parseCitations (discriminated card set)", () => {
     );
   });
 });
+
+describe("CitationRef.fromSrc — a provenance ref nested in a src: href", () => {
+  // The Q&A prompt tells the model both that citations ride `src:` hrefs and
+  // that `wiki:`/`graph:` ids are valid citation text. It reconciles the two
+  // by emitting `src:wiki:<id>` — observed live, sometimes with a stray `src/`
+  // prefix from the prompt's own path-shaped example. Treating that literal as
+  // a file path fetches it from the source endpoint (404, twice, because the
+  // query client retries once) and renders an unresolvable forge link.
+
+  it("unwraps a bare wiki: id instead of treating it as a file path", () => {
+    const c = CitationRef.fromSrc("wiki:container-workspaces");
+    expect(c.scheme).toBe("wiki");
+    expect(c.path).toBe("container-workspaces");
+    expect(c.isFileSource).toBe(false);
+  });
+
+  it("unwraps a wiki: id behind a stray src/ path prefix", () => {
+    const c = CitationRef.fromSrc("src/wiki:container-workspaces");
+    expect(c.scheme).toBe("wiki");
+    expect(c.path).toBe("container-workspaces");
+    expect(c.isFileSource).toBe(false);
+  });
+
+  it("unwraps a nested graph: node id", () => {
+    const c = CitationRef.fromSrc("src/graph:pkg/mod.py::Thing");
+    expect(c.scheme).toBe("graph");
+    expect(c.isFileSource).toBe(false);
+  });
+
+  it("leaves an ordinary file path — and its range — untouched", () => {
+    const c = CitationRef.fromSrc("src/grove/core/launch.py", "L230-258");
+    expect(c.scheme).toBeNull();
+    expect(c.path).toBe("src/grove/core/launch.py");
+    expect(c.isFileSource).toBe(true);
+    expect(c.startLine).toBe(230);
+    expect(c.endLine).toBe(258);
+  });
+
+  it("does not misread a filename that merely contains the scheme letters", () => {
+    const c = CitationRef.fromSrc("docs/wiki_notes.md");
+    expect(c.scheme).toBeNull();
+    expect(c.isFileSource).toBe(true);
+  });
+});

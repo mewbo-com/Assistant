@@ -34,22 +34,23 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from mewbo_core.agent_context import AgentContext
+from mewbo_core.agents.agent_context import AgentContext
+from mewbo_core.agents.hypervisor import AgentHandle, AgentHypervisor
 from mewbo_core.classes import ActionStep
-from mewbo_core.context import ContextSnapshot
+from mewbo_core.common import MockSpeaker
 from mewbo_core.hooks import HookManager
-from mewbo_core.hypervisor import AgentHandle, AgentHypervisor
-from mewbo_core.llm_resilience import DoomLoopGuard, repair_tool_pairing
-from mewbo_core.permissions import PermissionDecision, PermissionPolicy
-from mewbo_core.token_budget import TokenBudget
-from mewbo_core.tool_registry import ToolRegistry, ToolSpec
-from mewbo_core.tool_use_loop import (
+from mewbo_core.llm.llm_resilience import DoomLoopGuard, repair_tool_pairing
+from mewbo_core.loop.tool_use_loop import (
     ToolUseLoop,
     _append_lsp_feedback,
     _CachedFileRead,
     _coerce_mcp_tool_input,
     _infer_operation,
 )
+from mewbo_core.permissions import PermissionDecision, PermissionPolicy
+from mewbo_core.session.context import ContextSnapshot
+from mewbo_core.session.token_budget import TokenBudget
+from mewbo_core.tooling.tool_registry import ToolRegistry, ToolSpec
 
 # ---------------------------------------------------------------------------
 # Shared helpers (DRY — mirrors test_tool_use_loop.py conventions)
@@ -171,6 +172,7 @@ def _make_loop(
     approval_callback=None,
     cwd: str | None = None,
     session_id: str | None = None,
+    extra_session_tools: list | None = None,
 ) -> ToolUseLoop:
     """Build a ToolUseLoop with sensible defaults."""
     if agent_context is None:
@@ -183,6 +185,7 @@ def _make_loop(
         approval_callback=approval_callback,
         cwd=cwd,
         session_id=session_id,
+        extra_session_tools=extra_session_tools,
     )
 
 
@@ -800,10 +803,10 @@ class TestDoomLoopHalt:
         events: list[dict] = []
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
             patch.object(registry, "get", return_value=mock_tool),
             patch(
-                "mewbo_core.tool_use_loop.DoomLoopGuard.from_config",
+                "mewbo_core.loop.tool_use_loop.DoomLoopGuard.from_config",
                 return_value=DoomLoopGuard(threshold=doom_threshold),
             ),
         ):
@@ -942,7 +945,7 @@ class TestMessageQueueDraining:
         ctx.message_queue.put_nowait("user steering message")
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
             patch.object(registry, "get", return_value=mock_tool),
         ):
             mock_build.return_value = MagicMock()
@@ -1000,7 +1003,7 @@ class TestInterruptStep:
         ctx.interrupt_step.set()  # signal interrupt before run
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
             patch.object(registry, "get", return_value=mock_tool),
         ):
             mock_build.return_value = MagicMock()
@@ -1052,7 +1055,7 @@ class TestPermissionAskCallback:
         events: list[dict] = []
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
             patch.object(registry, "get", return_value=mock_tool),
         ):
             mock_build.return_value = MagicMock()
@@ -1089,7 +1092,7 @@ class TestPermissionAskCallback:
         events: list[dict] = []
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
         ):
             mock_build.return_value = MagicMock()
             mock_build.return_value.bind_tools.return_value = bound
@@ -1135,7 +1138,7 @@ class TestFailureFeedbackInjection:
         deny_policy = MagicMock(spec=PermissionPolicy)
         deny_policy.decide.return_value = PermissionDecision.DENY
 
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
             mock_build.return_value = MagicMock()
             mock_build.return_value.bind_tools.return_value = bound
 
@@ -1290,7 +1293,7 @@ class TestPlanModePermission:
         loop._current_mode = "plan"
 
         with patch(
-            "mewbo_core.tool_use_loop.get_config_value",
+            "mewbo_core.loop.tool_use_loop.get_config_value",
             side_effect=lambda *args, **kw: (
                 ["ls", "cat"] if "plan_mode_shell_allowlist" in args else kw.get("default")
             ),
@@ -1338,7 +1341,7 @@ class TestAsyncToolExecution:
         )
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
             patch.object(registry, "get", return_value=async_tool),
         ):
             mock_build.return_value = MagicMock()
@@ -1383,7 +1386,7 @@ class TestConcurrentToolExecution:
         fake_model, bound = _build_bound([two_calls, _text_response("done")])
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
             patch.object(registry, "get", return_value=mock_tool),
         ):
             mock_build.return_value = MagicMock()
@@ -1438,7 +1441,7 @@ class TestMcpCoercionErrorInLoop:
             ]
         )
 
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
             mock_build.return_value = MagicMock()
             mock_build.return_value.bind_tools.return_value = bound
 
@@ -1477,6 +1480,91 @@ class TestGetToolTimeout:
 
 
 # ---------------------------------------------------------------------------
+# A session tool's own execution_timeout(...) governs _safe_execute's ceiling
+# ---------------------------------------------------------------------------
+
+
+class _DeclaringSessionTool:
+    """A session tool that declares its own execution ceiling via the
+    ``getattr`` convention ``ToolUseLoop._declared_execution_timeout`` reads
+    (the same convention ``poll_class``/``result_headline`` use). Standalone
+    implementer, not a subclass of anything — ``SessionTool`` is a structural
+    Protocol whose defaults a real plugin author does not inherit either.
+    """
+
+    tool_id = "ask_like_tool"
+    modes = frozenset({"act"})
+    schema = {
+        "type": "function",
+        "function": {
+            "name": "ask_like_tool",
+            "description": "probe",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+
+    def __init__(self, *, ceiling: float | None, raises: bool = False) -> None:
+        self._ceiling = ceiling
+        self._raises = raises
+
+    async def handle(self, action_step):  # noqa: ANN001 — mirrors SessionTool
+        return MockSpeaker(content="done")
+
+    def execution_timeout(self, tool_input):
+        if self._raises:
+            raise RuntimeError("ceiling hook exploded")
+        return self._ceiling
+
+    def should_terminate_run(self) -> bool:
+        return False
+
+    def terminal_reason(self) -> str:
+        return "completed"
+
+
+class TestSessionToolDeclaredExecutionTimeout:
+    """Pins the fix for ``ask_user_question`` inheriting the flat 120s
+    fallback: a session tool's ``execution_timeout(...)`` hook must reach
+    the ACTUAL ``asyncio.wait_for`` ceiling ``_safe_execute`` applies, not
+    just the isolated resolver method — driven through the real dispatch
+    path (``extra_session_tools`` -> ``_execute_tool_call`` -> ``handle``).
+    """
+
+    @staticmethod
+    def _drive(tool: _DeclaringSessionTool) -> tuple[object, dict]:
+        captured: dict[str, float | None] = {}
+        real_wait_for = asyncio.wait_for
+
+        async def _spy_wait_for(coro, timeout=None):
+            captured["timeout"] = timeout
+            return await real_wait_for(coro, timeout=timeout)
+
+        async def run():
+            loop = _make_loop(extra_session_tools=[tool])
+            tc = {"name": tool.tool_id, "args": {}, "id": "tc1"}
+            with patch("mewbo_core.loop.tool_use_loop.asyncio.wait_for", new=_spy_wait_for):
+                return await loop._safe_execute(tc, [])
+
+        result = asyncio.run(run())
+        return result, captured
+
+    def test_declared_none_removes_the_ceiling(self):
+        result, captured = self._drive(_DeclaringSessionTool(ceiling=None))
+        assert captured["timeout"] is None
+        assert result.success is True
+
+    def test_declared_number_overrides_the_flat_default(self):
+        result, captured = self._drive(_DeclaringSessionTool(ceiling=45.0))
+        assert captured["timeout"] == 45.0
+        assert result.success is True
+
+    def test_raising_hook_falls_back_to_the_flat_default(self):
+        result, captured = self._drive(_DeclaringSessionTool(ceiling=None, raises=True))
+        assert captured["timeout"] == 120.0
+        assert result.success is True
+
+
+# ---------------------------------------------------------------------------
 # Cancellation mid-loop
 # ---------------------------------------------------------------------------
 
@@ -1501,7 +1589,7 @@ class TestCancellationMidLoop:
 
         fake_model, bound = _build_bound([_text_response("never reached")])
 
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
             mock_build.return_value = MagicMock()
             mock_build.return_value.bind_tools.return_value = bound
 
@@ -1540,7 +1628,7 @@ async def _run_watchdog_once(loop: ToolUseLoop) -> None:
             raise asyncio.CancelledError
         await real_sleep(0)
 
-    with patch("mewbo_core.tool_use_loop.asyncio.sleep", new=_fast_sleep):
+    with patch("mewbo_core.loop.tool_use_loop.asyncio.sleep", new=_fast_sleep):
         await loop._watchdog()
 
 
@@ -1676,8 +1764,8 @@ class TestWatchdogRootSelfStall:
 
 
 class TestWatchdogConfigurableKnobs:
-    """Stall threshold + check interval are config-tunable —
-    the watchdog no longer carries the hardcoded 120s/30s values."""
+    """Stall threshold + check interval are config-tunable, not hardcoded
+    at 120s/30s."""
 
     def test_honors_configured_stall_threshold(self):
         """A tighter configured ``stall_threshold_s`` flags a child the
@@ -1700,7 +1788,7 @@ class TestWatchdogConfigurableKnobs:
             )
             await ctx.registry.register(child)
             with patch(
-                "mewbo_core.tool_use_loop.get_config_value",
+                "mewbo_core.loop.tool_use_loop.get_config_value",
                 side_effect=lambda *args, **kw: (
                     5.0 if "stall_threshold_s" in args else kw.get("default")
                 ),
@@ -1731,9 +1819,9 @@ class TestWatchdogConfigurableKnobs:
         async def run():
             loop = _make_loop()
             with (
-                patch("mewbo_core.tool_use_loop.asyncio.sleep", new=_capture_sleep),
+                patch("mewbo_core.loop.tool_use_loop.asyncio.sleep", new=_capture_sleep),
                 patch(
-                    "mewbo_core.tool_use_loop.get_config_value",
+                    "mewbo_core.loop.tool_use_loop.get_config_value",
                     side_effect=lambda *args, **kw: (
                         7.0 if "stall_check_interval_s" in args else kw.get("default")
                     ),

@@ -22,7 +22,7 @@ from __future__ import annotations
 import pytest
 from mewbo_api.agentic_search import catalog as catalog_mod
 from mewbo_api.agentic_search.catalog import SourceCatalog
-from mewbo_core.tool_registry import ToolRegistry, ToolSpec
+from mewbo_core.tooling.tool_registry import ToolRegistry, ToolSpec
 from mewbo_graph.scg import store as scg_store
 from mewbo_graph.scg.types import ScgNode
 
@@ -76,11 +76,11 @@ def _live_env(monkeypatch):
             disabled_reason="Discovery failed: connection refused",
         )
     )
-    monkeypatch.setattr(catalog_mod, "load_registry", lambda cwd=None: registry)
+    monkeypatch.setattr(catalog_mod, "load_registry", lambda cwd=None, **_kw: registry)
     monkeypatch.setattr(
         catalog_mod,
         "get_merged_mcp_config",
-        lambda project=None: {"servers": {"gitea": {}, "broken": {}}},
+        lambda project=None, **_kw: {"servers": {"gitea": {}, "broken": {}}},
     )
     return registry
 
@@ -122,7 +122,7 @@ def test_live_server_id_wins_a_fixture_collision(_live_env, monkeypatch) -> None
     monkeypatch.setattr(
         catalog_mod,
         "get_merged_mcp_config",
-        lambda project=None: {"servers": {"github": {}}},
+        lambda project=None, **_kw: {"servers": {"github": {}}},
     )
     entries = [e for e in SourceCatalog.entries() if e.id == "github"]
     assert len(entries) == 1
@@ -145,15 +145,15 @@ def test_configured_failed_server_never_falls_back_to_demo_tools(
 ) -> None:
     """A configured-but-failed server colliding with a fixture id grants nothing.
 
-    Regression: ``entries`` listed such a server unavailable with no tools while
-    ``tools_for`` (sharing the id with a demo fixture, seeding on) granted the
-    fixture's demo tools — the two surfaces diverged. Both now resolve through
-    ``_source_tool_ids`` with the demo fallback off for configured ids.
+    ``entries`` must not list such a server unavailable with no tools while
+    ``tools_for`` (sharing the id with a demo fixture, seeding on) grants the
+    fixture's demo tools. Both resolve through ``_source_tool_ids`` with the
+    demo fallback off for configured ids.
     """
     monkeypatch.setattr(
         catalog_mod,
         "get_merged_mcp_config",
-        lambda project=None: {"servers": {"github": {}}},  # collides with fixture
+        lambda project=None, **_kw: {"servers": {"github": {}}},  # collides with fixture
     )
     entry = _entry("github")
     assert entry.available is False

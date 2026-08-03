@@ -16,7 +16,7 @@ matcher.
 
 from __future__ import annotations
 
-from mewbo_core.key_store import KeyScopes, KeyStore
+from mewbo_core.secrets.key_store import KeyScopes, KeyStore
 
 # ── the matcher: the three states ─────────────────────────────────────────────
 

@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mewbo_core.common import MockSpeaker, pydantic_to_openai_tool
-from mewbo_core.session_tools import DEFAULT_SESSION_TOOL_MODES
+from mewbo_core.tooling.session_tools import DEFAULT_SESSION_TOOL_MODES
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from mewbo_graph.plugins.scg._core import (

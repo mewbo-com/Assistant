@@ -1,24 +1,44 @@
 import { useQuery } from "@tanstack/react-query";
+import { useMemo } from "react";
 import { fetchUsage } from "../api/client";
-import { SessionUsage } from "../types";
-
-const POLL_INTERVAL_MS = 4000;
+import { EventRecord, SessionUsage } from "../types";
 
 /**
- * Fetch the session's faceted token usage from the backend (root agent vs
- * sub-agents + compaction stats). Polls while the session is running; falls
- * back to the query cache's staleTime otherwise.
+ * The event types that move a session's token totals. Usage is recomputed
+ * server-side from the transcript, so it can only change when one of these is
+ * appended — which is what lets the stream drive the refetch instead of a
+ * clock.
+ */
+const USAGE_BEARING_EVENTS: ReadonlySet<string> = new Set([
+  "llm_call_end",
+  "completion",
+]);
+
+/**
+ * Fetch the session's faceted token usage (root agent vs sub-agents plus
+ * compaction stats).
+ *
+ * Refetched when the session's own event stream delivers an event that can
+ * have changed the totals, rather than on an interval: the numbers then update
+ * the moment a call settles instead of up to a poll period later, and an idle
+ * session issues no requests at all. `events` is the accumulated transcript
+ * from `useSessionEvents`.
  */
 export function useSessionUsage(
   sessionId?: string,
-  running?: boolean,
+  events: EventRecord[] = [],
 ): {
   usage: SessionUsage | null;
   isLoading: boolean;
   error: unknown;
 } {
+  const revision = useMemo(
+    () => events.reduce((n, e) => (USAGE_BEARING_EVENTS.has(e.type) ? n + 1 : n), 0),
+    [events],
+  );
+
   const q = useQuery<SessionUsage>({
-    queryKey: ["session-usage", sessionId ?? ""],
+    queryKey: ["session-usage", sessionId ?? "", revision],
     enabled: Boolean(sessionId),
     queryFn: () => {
       if (!sessionId) {
@@ -28,7 +48,9 @@ export function useSessionUsage(
       }
       return fetchUsage(sessionId);
     },
-    refetchInterval: running ? POLL_INTERVAL_MS : false,
+    // The revision is part of the key, so a new one is a cache miss. Hold the
+    // previous numbers while it resolves rather than blanking the readout.
+    placeholderData: (prev) => prev,
     staleTime: 2000,
   });
 

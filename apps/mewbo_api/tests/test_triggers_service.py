@@ -12,8 +12,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from mewbo_api.triggers.service import TriggerFireContext, TriggerService
 from mewbo_core.config import TriggersConfig
-from mewbo_core.session_runtime import SessionRuntime
-from mewbo_core.session_store import SessionStore
+from mewbo_core.loop.session_runtime import SessionRuntime
+from mewbo_core.session.session_store import SessionStore
 from mewbo_core.triggers.policy import TriggerPolicy
 from mewbo_core.triggers.spec import (
     CiWorkflowTrigger,
@@ -44,7 +44,7 @@ class Deliver:
     """Records each ``deliver(TriggerFireContext)`` call; returns a fixed verdict.
 
     The fire pipeline hands a structured ``TriggerFireContext`` (replacing
-    the old 4-positional signature); ``calls`` records the fields as a
+    a 4-positional signature); ``calls`` records the fields as a
     tuple so the ordering/attribution assertions stay compact, while
     ``contexts`` keeps the objects for shape checks.
     """

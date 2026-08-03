@@ -645,6 +645,105 @@ class TestResolveQaCloneDir:
         assert result == tmp_path / "clones" / "j-ok"
 
 
+class TestResolveQaCloneDirJobBound:
+    """A session bound to an indexing job reads THAT job's own checkout.
+
+    A live job is not ``complete`` until its own finalize runs, so the
+    completed-job rule would hand it the previous index's clone — the source
+    as it stood before the changes the job is indexing. That reads without
+    error, which is why it needs a test rather than a comment.
+    """
+
+    @staticmethod
+    def _seed(tmp_path: Path, monkeypatch) -> JsonWikiStore:
+        """Store with a COMPLETED job and a LIVE job bound to ``sess-live``.
+
+        Both clone dirs exist on disk, so which one comes back is decided by
+        the resolution rule and never by a missing directory.
+        """
+        monkeypatch.setenv("MEWBO_WIKI_CLONE_ROOT", str(tmp_path / "clones"))
+        store = _store(tmp_path)
+        for jid, status in [("j-done", "complete"), ("j-live", "scanning")]:
+            store.create_job(
+                IndexingJob(
+                    job_id=jid,
+                    slug="org/r",
+                    status=status,
+                    scanned_count=0,
+                    total_count=0,
+                    current_file=None,
+                )
+            )
+            (tmp_path / "clones" / jid).mkdir(parents=True)
+        store.attach_job_session("j-live", "sess-live")
+        return store
+
+    def test_live_job_bound_session_reads_its_own_clone(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from mewbo_graph.plugins.wiki._ctx import resolve_qa_clone_dir
+
+        store = self._seed(tmp_path, monkeypatch)
+
+        result = resolve_qa_clone_dir("org/r", store, session_id="sess-live")
+        assert result == tmp_path / "clones" / "j-live"
+
+    def test_completed_job_stays_the_default_for_qa(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """No session, and a session with no job, both get the completed clone."""
+        from mewbo_graph.plugins.wiki._ctx import resolve_qa_clone_dir
+
+        store = self._seed(tmp_path, monkeypatch)
+        expected = tmp_path / "clones" / "j-done"
+
+        assert resolve_qa_clone_dir("org/r", store) == expected
+        assert resolve_qa_clone_dir("org/r", store, session_id="sess-qa") == expected
+
+    def test_job_for_another_slug_is_never_handed_over(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A session bound to some other repo's job falls back, not cross-reads."""
+        from mewbo_graph.plugins.wiki._ctx import resolve_qa_clone_dir
+
+        store = self._seed(tmp_path, monkeypatch)
+        store.create_job(
+            IndexingJob(
+                job_id="j-other",
+                slug="org/other",
+                status="scanning",
+                scanned_count=0,
+                total_count=0,
+                current_file=None,
+            )
+        )
+        (tmp_path / "clones" / "j-other").mkdir(parents=True)
+        store.attach_job_session("j-other", "sess-other")
+
+        result = resolve_qa_clone_dir("org/r", store, session_id="sess-other")
+        assert result == tmp_path / "clones" / "j-done"
+
+    def test_falls_back_when_the_job_clone_is_gone_from_disk(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from mewbo_graph.plugins.wiki._ctx import resolve_qa_clone_dir
+
+        store = self._seed(tmp_path, monkeypatch)
+        (tmp_path / "clones" / "j-live").rmdir()
+
+        result = resolve_qa_clone_dir("org/r", store, session_id="sess-live")
+        assert result == tmp_path / "clones" / "j-done"
+
+    def test_broken_store_falls_back_instead_of_raising(self) -> None:
+        from mewbo_graph.plugins.wiki._ctx import resolve_qa_clone_dir
+
+        broken_store = MagicMock()
+        broken_store.find_job_by_session.side_effect = RuntimeError("db error")
+        broken_store.list_jobs.return_value = []
+
+        assert resolve_qa_clone_dir("org/r", broken_store, session_id="s") is None
+
+
 class TestCloneDirFor:
     """_clone_dir_for reads MEWBO_WIKI_CLONE_ROOT with fallback."""
 

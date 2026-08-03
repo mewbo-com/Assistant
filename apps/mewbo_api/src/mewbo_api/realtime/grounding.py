@@ -10,26 +10,26 @@ invariant).
 from __future__ import annotations
 
 from mewbo_core.common import get_logger
-from mewbo_core.structured_synthesis import Citation
+from mewbo_core.loop.structured_synthesis import Citation
 
 logging = get_logger(name="api.realtime.grounding")
 
 
 class WikiGroundingProvider:
-    """Implements :class:`~mewbo_core.structured_synthesis.GroundingProvider`.
+    """Implements :class:`~mewbo_core.loop.structured_synthesis.GroundingProvider`.
 
     Wraps :class:`~mewbo_graph.wiki.retriever.HybridRetriever` over the
     process-wide wiki store singleton + the configured embedder.  Lazy import
     guards ensure the class is constructable even when ``mewbo-graph`` is not
     installed — ``search`` simply returns ``[]``.
 
-    Satisfies the :class:`~mewbo_core.structured_synthesis.GroundingProvider`
+    Satisfies the :class:`~mewbo_core.loop.structured_synthesis.GroundingProvider`
     Protocol structurally (duck-typed), so no explicit ``Protocol`` base is
     needed and ``mewbo_core`` never imports this class.
     """
 
     def search(self, slug: str, query: str, *, k: int = 8) -> list[Citation]:
-        """Return up to *k* :class:`~mewbo_core.structured_synthesis.Citation` records.
+        """Return up to *k* :class:`~mewbo_core.loop.structured_synthesis.Citation` records.
 
         Args:
             slug: Wiki workspace slug.

@@ -83,6 +83,7 @@ afterEach(cleanup);
 beforeEach(() => {
   vi.clearAllMocks();
   getPage.mockResolvedValue(null);
+  window.localStorage.removeItem("wiki:qa-mode");
 });
 
 describe("useQaConversation", () => {
@@ -152,6 +153,40 @@ describe("useQaConversation", () => {
     await waitFor(() => expect(result.current.renderedTurns).toHaveLength(2));
     expect(result.current.renderedTurns[0].question).toBe("first");
     expect(result.current.renderedTurns[1].question).toBe("second");
+  });
+
+  it("defaults the Q&A mode to 'fast' and sends it on the opening stream call", async () => {
+    streamAnswer.mockImplementation(() => streamTurn("ans1", "ANSWER"));
+    getAnswer.mockResolvedValue(makeAnswer("ans1"));
+    const { wrapper } = makeWrapper();
+
+    const { result } = renderHook(
+      () => useQaConversation({ question: "q1", pageId: "core", slug: "o/r" }),
+      { wrapper },
+    );
+
+    expect(result.current.storedMode).toBe("fast");
+    await waitFor(() => expect(streamAnswer).toHaveBeenCalledTimes(1));
+    expect(streamAnswer.mock.calls[0][0]).toMatchObject({ mode: "fast" });
+  });
+
+  it("setStoredMode persists to localStorage and threads into the next stream call", async () => {
+    streamAnswer.mockImplementation(() => streamTurn("ans1", "ANSWER"));
+    getAnswer.mockResolvedValue(makeAnswer("ans1"));
+    const { wrapper } = makeWrapper();
+
+    const { result } = renderHook(
+      () => useQaConversation({ question: "first", pageId: "core", slug: "o/r" }),
+      { wrapper },
+    );
+    await waitFor(() => expect(result.current.renderedTurns.at(-1)?.done).toBe(true));
+
+    act(() => result.current.setStoredMode("deep"));
+    expect(window.localStorage.getItem("wiki:qa-mode")).toBe("deep");
+
+    act(() => result.current.onAsk("second"));
+    await waitFor(() => expect(streamAnswer).toHaveBeenCalledTimes(2));
+    expect(streamAnswer.mock.calls[1][0]).toMatchObject({ mode: "deep" });
   });
 
   it("onAsk is a no-op while the active turn hasn't settled", async () => {

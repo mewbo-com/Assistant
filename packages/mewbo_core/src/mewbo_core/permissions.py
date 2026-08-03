@@ -15,7 +15,7 @@ import tomllib
 from mewbo_core.classes import ActionStep
 from mewbo_core.common import get_logger
 from mewbo_core.config import get_config_value
-from mewbo_core.types import JsonValue
+from mewbo_core.contracts.types import JsonValue
 
 logging = get_logger(name="core.permissions")
 

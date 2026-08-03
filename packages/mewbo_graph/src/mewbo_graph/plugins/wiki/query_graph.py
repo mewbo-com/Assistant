@@ -71,6 +71,7 @@ class WikiQueryGraphTool(WikiSessionTool):
 
         nodes = ctx.store.query_graph(
             slug,
+            scope=ctx.store.live_scope(slug),
             node_type=args.node_type,
             name_match=args.name_match,
             neighbors_of=args.neighbors_of,

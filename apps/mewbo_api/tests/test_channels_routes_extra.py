@@ -29,11 +29,47 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _restore_channel_project_context():
+    """Keep this module's bare ``init_channels`` calls from disarming the app.
+
+    ``init_channels`` takes its project collaborators as optional keywords, so a
+    test calling it with four positional args clears them process-wide — and the
+    channel project context is a module global, so every LATER test's
+    ``/switch-project`` then resolves nothing. Contain it here, where the bare
+    calls live, rather than letting it surface as a fails-only-in-suite failure
+    somewhere else.
+    """
+    from mewbo_api.channels import routes
+
+    saved = (routes._projects.catalog_source, routes._projects.resolve_session_cwd)
+    yield
+    routes._projects.catalog_source, routes._projects.resolve_session_cwd = saved
+
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
 
 SECRET = "test-bot-secret-at-least-40-characters-long!"
+
+
+def _catalog_source(**projects: tuple[str, str]):
+    """A ``ChannelProjectContext.catalog_source`` over configured projects only.
+
+    Each keyword is ``name=(path, description)``. Built from the real
+    ``ProjectCatalog`` rather than a stub so these tests exercise the same
+    listing and lookup rules ``/switch-project`` runs in production.
+    """
+    from mewbo_core.config import ProjectConfig
+    from mewbo_core.workspaces.project_catalog import ProjectCatalog
+
+    configured = {
+        name: ProjectConfig(path=path, description=description)
+        for name, (path, description) in projects.items()
+    }
+    return lambda: ProjectCatalog(configured=configured)
 
 
 def _nc_adapter(**kwargs: Any):
@@ -571,8 +607,10 @@ class TestProcessInbound:
 
         routes._process_inbound(adapter, msg)
 
-        tag_calls = rt.session_store.tag_session.call_args_list
-        assert any("thread" in str(c) for c in tag_calls)
+        # The routing key rides `resolve_session(session_tag=…)` — the one
+        # resolve-or-create seam — rather than a hand-rolled tag_session on the
+        # store, so assert on the key the seam is HANDED, not on a store call.
+        assert "thread" in rt.resolve_session.call_args.kwargs["session_tag"]
 
     def test_room_scoped_tag_when_no_thread(
         self, route_env: tuple, monkeypatch: pytest.MonkeyPatch
@@ -585,8 +623,7 @@ class TestProcessInbound:
 
         routes._process_inbound(adapter, msg)
 
-        tag_calls = rt.session_store.tag_session.call_args_list
-        assert any("room" in str(c) for c in tag_calls)
+        assert "room" in rt.resolve_session.call_args.kwargs["session_tag"]
 
     def test_existing_session_reused(
         self, route_env: tuple, monkeypatch: pytest.MonkeyPatch
@@ -667,12 +704,18 @@ class TestProcessInbound:
         rt, adapter, _ = route_env
         rt.session_store.resolve_tag.return_value = "old-sess"
         msg = _make_inbound(text="@Mewbo /new", msg_id="m-new")
-        rt.session_store.create_session.return_value = "new-sess"
+        rt.resolve_session.return_value = "new-sess"
         adapter.send_response = MagicMock(return_value="sent")
 
         routes._process_inbound(adapter, msg)
 
-        rt.session_store.create_session.assert_called()
+        # `/new` mints via `resolve_session()` with NO session_tag and then
+        # re-points the tag. Passing one would resolve the room's existing tag
+        # and hand back the very conversation the command exists to leave, so
+        # the absence of that kwarg is the whole contract — assert it directly
+        # rather than asserting that some store method was touched.
+        assert "session_tag" not in rt.resolve_session.call_args.kwargs
+        rt.tag_session.assert_called()
         adapter.send_response.assert_called_once()
         rt.start_async.assert_not_called()
 
@@ -716,10 +759,8 @@ class TestProcessInbound:
         msg = _make_inbound(text="@Mewbo /switch-project", msg_id="m-sw")
         adapter.send_response = MagicMock(return_value="sent")
 
-        # Patch get_config() to return empty projects
-        with patch("mewbo_api.channels.routes.get_config") as mock_cfg:
-            mock_cfg.return_value.projects = {}
-            routes._process_inbound(adapter, msg)
+        monkeypatch.setattr(routes._projects, "catalog_source", _catalog_source())
+        routes._process_inbound(adapter, msg)
 
         adapter.send_response.assert_called_once()
         text = adapter.send_response.call_args[1]["text"]
@@ -736,14 +777,12 @@ class TestProcessInbound:
         msg = _make_inbound(text="@Mewbo /switch-project myproject", msg_id="m-sw2")
         adapter.send_response = MagicMock(return_value="sent")
 
-        fake_project = MagicMock()
-        fake_project.path = "/tmp"  # must exist
-        fake_project.description = "My project"
-
-        with patch("mewbo_api.channels.routes.get_config") as mock_cfg:
-            mock_cfg.return_value.projects = {"myproject": fake_project}
-            with patch("os.path.isdir", return_value=True):
-                routes._process_inbound(adapter, msg)
+        monkeypatch.setattr(
+            routes._projects,
+            "catalog_source",
+            _catalog_source(myproject=("/tmp", "My project")),
+        )
+        routes._process_inbound(adapter, msg)
 
         adapter.send_response.assert_called_once()
         text = adapter.send_response.call_args[1]["text"]
@@ -759,9 +798,8 @@ class TestProcessInbound:
         msg = _make_inbound(text="@Mewbo /switch-project nonexistent", msg_id="m-sw3")
         adapter.send_response = MagicMock(return_value="sent")
 
-        with patch("mewbo_api.channels.routes.get_config") as mock_cfg:
-            mock_cfg.return_value.projects = {}
-            routes._process_inbound(adapter, msg)
+        monkeypatch.setattr(routes._projects, "catalog_source", _catalog_source())
+        routes._process_inbound(adapter, msg)
 
         adapter.send_response.assert_called_once()
         text = adapter.send_response.call_args[1]["text"]
@@ -1109,19 +1147,20 @@ def test_build_help_text_includes_all_commands() -> None:
 
 
 def test_format_project_list_empty() -> None:
-    from mewbo_api.channels.routes import _format_project_list
+    from mewbo_api.channels.routes import ChannelProjectContext
 
-    text = _format_project_list({}, "Header")
+    text = ChannelProjectContext(catalog_source=_catalog_source()).format_list("Header")
     assert "Header" in text
     assert "none" in text
 
 
 def test_format_project_list_with_projects() -> None:
-    from mewbo_api.channels.routes import _format_project_list
+    from mewbo_api.channels.routes import ChannelProjectContext
 
-    proj = MagicMock()
-    proj.description = "A cool project"
-    text = _format_project_list({"myproj": proj}, "Header")
+    projects = ChannelProjectContext(
+        catalog_source=_catalog_source(myproj=("/tmp", "A cool project"))
+    )
+    text = projects.format_list("Header")
     assert "myproj" in text
     assert "A cool project" in text
 
@@ -1222,26 +1261,34 @@ def test_init_channels_email_branch(
 
 
 # ---------------------------------------------------------------------------
-# _get_active_project_cwd
+# ChannelProjectContext.cwd_for — the shared resolution, with the legacy keys
+# still readable (write only the new pair, read both)
 # ---------------------------------------------------------------------------
 
 
-def test_get_active_project_cwd_returns_cwd(route_env: tuple) -> None:
-    import mewbo_api.channels.routes as routes
+def test_cwd_for_falls_back_to_the_legacy_key() -> None:
+    from mewbo_api.channels.routes import ChannelProjectContext
 
-    rt, _, _ = route_env
-    rt.session_store.load_transcript.return_value = [
+    transcript = [
         {"type": "context", "payload": {"active_project_cwd": "/workspace/myproject"}},
     ]
-    cwd = routes._get_active_project_cwd("any-sess")
-    assert cwd == "/workspace/myproject"
+    projects = ChannelProjectContext(resolve_session_cwd=lambda _sid: None)
+    assert projects.cwd_for("any-sess", lambda: transcript) == "/workspace/myproject"
 
 
-def test_get_active_project_cwd_returns_none_when_absent(route_env: tuple) -> None:
-    import mewbo_api.channels.routes as routes
+def test_cwd_for_prefers_the_shared_resolution() -> None:
+    from mewbo_api.channels.routes import ChannelProjectContext
 
-    rt, _, _ = route_env
-    rt.session_store.load_transcript.return_value = [
-        {"type": "context", "payload": {"active_project": "foo"}},
+    transcript = [
+        {"type": "context", "payload": {"active_project_cwd": "/workspace/legacy"}},
     ]
-    assert routes._get_active_project_cwd("any-sess") is None
+    projects = ChannelProjectContext(resolve_session_cwd=lambda _sid: "/workspace/shared")
+    assert projects.cwd_for("any-sess", lambda: transcript) == "/workspace/shared"
+
+
+def test_cwd_for_returns_none_when_neither_answers() -> None:
+    from mewbo_api.channels.routes import ChannelProjectContext
+
+    transcript = [{"type": "context", "payload": {"channel_id": "r1"}}]
+    projects = ChannelProjectContext(resolve_session_cwd=lambda _sid: None)
+    assert projects.cwd_for("any-sess", lambda: transcript) is None

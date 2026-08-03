@@ -2467,7 +2467,6 @@ name = "mewbo-api"
 version = "0.0.13"
 source = { editable = "apps/mewbo_api" }
 dependencies = [
-    { name = "docker" },
     { name = "flask" },
     { name = "flask-restx" },
     { name = "gunicorn" },
@@ -2479,13 +2478,16 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+docker = [
+    { name = "docker" },
+]
 wiki = [
     { name = "mewbo-graph", extra = ["retrieval", "treesitter"] },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "docker", specifier = ">=7.0,<8.0" },
+    { name = "docker", marker = "extra == 'docker'", specifier = ">=7.0,<8.0" },
     { name = "flask", specifier = ">=3.0.3,<4.0.0" },
     { name = "flask-restx", specifier = ">=1.3.0,<2.0.0" },
     { name = "gunicorn", specifier = ">=22.0.0" },
@@ -2496,7 +2498,7 @@ requires-dist = [
     { name = "mewbo-tools", editable = "packages/mewbo_tools" },
     { name = "mistune", specifier = ">=3.0,<4.0" },
 ]
-provides-extras = ["wiki"]
+provides-extras = ["wiki", "docker"]
 
 [[package]]
 name = "mewbo-cli"

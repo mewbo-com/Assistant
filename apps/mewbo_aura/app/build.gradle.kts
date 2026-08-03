@@ -18,7 +18,7 @@ android {
         applicationId = "com.mewbo.aura"
         minSdk = 33
         targetSdk = 36
-        versionCode = 9
+        versionCode = 10
         versionName = "0.0.13"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

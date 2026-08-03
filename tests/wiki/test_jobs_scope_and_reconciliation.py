@@ -243,8 +243,8 @@ def test_hook_promotes_session_status_end_to_end(tmp_path) -> None:
     from types import SimpleNamespace
 
     from mewbo_core.hooks import HookManager
-    from mewbo_core.session_runtime import SessionRuntime
-    from mewbo_core.session_store import SessionStore
+    from mewbo_core.loop.session_runtime import SessionRuntime
+    from mewbo_core.session.session_store import SessionStore
 
     wiki_store = JsonWikiStore(root_dir=tmp_path / "wiki")
     session_store = SessionStore(root_dir=str(tmp_path / "sessions"))

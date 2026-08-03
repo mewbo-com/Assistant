@@ -1,11 +1,11 @@
 {
   "sessions": [
     {
-      "id": "demo-trending-agent-harness-widget",
-      "title": "Trending LLM agent harness repositories",
+      "id": "demo-trending-acme-repos-widget",
+      "title": "Trending acme repositories",
       "model": "claude-sonnet-5",
       "offset_seconds": -600,
-      "summary": "Ranked the trending LLM agent-harness repositories by stars gained over the latest complete 30-day window and rendered them as an interactive card widget.",
+      "summary": "Ranked the acme organization's public repositories by stars gained over the latest complete 30-day window and rendered them as an interactive card widget.",
       "events": [
         {
           "kind": "context",
@@ -17,31 +17,31 @@
         {
           "kind": "user",
           "at_seconds": 4,
-          "text": "Can you show the latest trending repositories in the LLM Agent Harness space? I'd like to see them visualized as a widget. Rank repositories by stars gained in the last 30 days."
+          "text": "Can you show which repositories in the acme organization are trending right now? I'd like to see them visualized as a widget. Rank repositories by stars gained in the last 30 days."
         },
         {
           "kind": "agent_message",
           "at_seconds": 9,
-          "text": "I'll pull the latest stargazer-history snapshots for the prominent agent-harness repositories, rank them by stars gained over the last complete 30-day window, then render the result as an interactive card widget."
+          "text": "I'll pull the latest stargazer-history snapshots for the acme organization's public repositories, rank them by stars gained over the last complete 30-day window, then render the result as an interactive card widget."
         },
         {
           "kind": "widget_ready",
           "at_seconds": 33,
           "widget_id": "widget_1760000000",
           "app_py": "import streamlit as st\nimport json\n\nwith open(\"data.json\") as f:\n    data = json.load(f)\n\nrepositories = sorted(data[\"repositories\"], key=lambda item: item[\"rank\"])\nmax_gain = max((item[\"stars_gained_30d\"] for item in repositories), default=1) or 1\n\n\ndef compact(n):\n    return f\"{n / 1000:.1f}k\".replace(\".0k\", \"k\") if n >= 1000 else str(n)\n\n\ndef clip(text, limit=48):\n    text = text or \"No description provided.\"\n    if len(text) <= limit:\n        return text\n    return text[: limit - 1].rsplit(\" \", 1)[0].rstrip(\",;:\") + \"\u2026\"\n\n\ndef title(repo):\n    slug = repo[\"repository\"]\n    # A slug past ~20 chars wraps the bold title line in a 3-column card;\n    # show the bare repo name for those - rank + name still identify it.\n    return slug if len(slug) <= 20 else slug.split(\"/\", 1)[1]\n\n\nst.subheader(data[\"title\"])\nst.caption(\n    f\"Top {len(repositories)} by 30-day star growth \u00b7 \"\n    f\"{repositories[0]['gain_start']} \u2192 {repositories[0]['gain_end']}\"\n)\nfor start in range(0, len(repositories), 3):\n    columns = st.columns(3, gap=\"small\")\n    for column, repo in zip(columns, repositories[start : start + 3]):\n        with column.container(border=True):\n            st.markdown(f\"**#{repo['rank']} \u00b7 {title(repo)}**\")\n            st.caption(clip(repo[\"description\"]))\n            st.markdown(\n                f\"`{repo['language']}` &nbsp; \u2b50 {compact(repo['stars_total'])} \"\n                f\"&nbsp; :green[**+{repo['stars_gained_30d']:,}**]\"\n            )\n            st.progress(min(1.0, repo[\"stars_gained_30d\"] / max_gain))\n",
-          "data_json": "{\"title\": \"Trending LLM Agent Harness Repositories\", \"repositories\": [{\"rank\": 1, \"repository\": \"ogulcancelik/herdr\", \"url\": \"https://github.com/ogulcancelik/herdr\", \"description\": \"agent multiplexer that lives in your terminal.\", \"language\": \"Rust\", \"stars_total\": 17603, \"stars_gained_30d\": 119, \"gain_start\": \"2026-06-01\", \"gain_end\": \"2026-07-01\"}, {\"rank\": 2, \"repository\": \"stablyai/orca\", \"url\": \"https://github.com/stablyai/orca\", \"description\": \"Orca is the ADE for working with a fleet of parallel agents. Run any coding agent with your own subscription. Available on desktop and mobile.\", \"language\": \"TypeScript\", \"stars_total\": 21099, \"stars_gained_30d\": 97, \"gain_start\": \"2026-06-01\", \"gain_end\": \"2026-07-01\"}, {\"rank\": 3, \"repository\": \"anomalyco/opencode\", \"url\": \"https://github.com/anomalyco/opencode\", \"description\": \"The open source AI coding agent, built for the terminal.\", \"language\": \"TypeScript\", \"stars_total\": 186918, \"stars_gained_30d\": 77, \"gain_start\": \"2026-06-01\", \"gain_end\": \"2026-07-01\"}, {\"rank\": 4, \"repository\": \"openai/codex\", \"url\": \"https://github.com/openai/codex\", \"description\": \"Lightweight coding agent that runs in your terminal\", \"language\": \"Rust\", \"stars_total\": 99144, \"stars_gained_30d\": 40, \"gain_start\": \"2026-06-01\", \"gain_end\": \"2026-07-01\"}, {\"rank\": 5, \"repository\": \"anthropics/claude-code\", \"url\": \"https://github.com/anthropics/claude-code\", \"description\": \"Claude Code is an agentic coding tool that lives in your terminal, understands your codebase, and helps you code faster by executing routine tasks, explaining complex code, and handling git workflows - all through natural language commands.\", \"language\": \"Python\", \"stars_total\": 138112, \"stars_gained_30d\": 36, \"gain_start\": \"2026-06-01\", \"gain_end\": \"2026-07-01\"}, {\"rank\": 6, \"repository\": \"Kilo-Org/kilocode\", \"url\": \"https://github.com/Kilo-Org/kilocode\", \"description\": \"Kilo is the all-in-one agentic engineering platform. Build, ship, and iterate faster with the most popular open source coding agent.\", \"language\": \"TypeScript\", \"stars_total\": 26333, \"stars_gained_30d\": 19, \"gain_start\": \"2026-06-01\", \"gain_end\": \"2026-07-01\"}]}",
+          "data_json": "{\"title\": \"Trending Acme Repositories\", \"repositories\": [{\"rank\": 1, \"repository\": \"acme/dns-adblock\", \"url\": \"https://git.example.com/acme/dns-adblock\", \"description\": \"A caching resolver with per-client blocklists, query logs, and a small web console.\", \"language\": \"Rust\", \"stars_total\": 2410, \"stars_gained_30d\": 119, \"gain_start\": \"2026-06-01\", \"gain_end\": \"2026-07-01\"}, {\"rank\": 2, \"repository\": \"acme/mqtt-bridge\", \"url\": \"https://git.example.com/acme/mqtt-bridge\", \"description\": \"Bridges MQTT topics to HTTP endpoints with retained-message replay and per-topic auth.\", \"language\": \"Go\", \"stars_total\": 1930, \"stars_gained_30d\": 97, \"gain_start\": \"2026-06-01\", \"gain_end\": \"2026-07-01\"}, {\"rank\": 3, \"repository\": \"acme/vault-sync\", \"url\": \"https://git.example.com/acme/vault-sync\", \"description\": \"Keeps per-environment secret bundles in sync with the central store on a schedule.\", \"language\": \"Python\", \"stars_total\": 1204, \"stars_gained_30d\": 77, \"gain_start\": \"2026-06-01\", \"gain_end\": \"2026-07-01\"}, {\"rank\": 4, \"repository\": \"acme/photo-dedupe\", \"url\": \"https://git.example.com/acme/photo-dedupe\", \"description\": \"Finds near-duplicate photos by perceptual hash and keeps the sharpest copy of each.\", \"language\": \"Python\", \"stars_total\": 1088, \"stars_gained_30d\": 40, \"gain_start\": \"2026-06-01\", \"gain_end\": \"2026-07-01\"}, {\"rank\": 5, \"repository\": \"acme/prometheus-rules\", \"url\": \"https://git.example.com/acme/prometheus-rules\", \"description\": \"Alerting rules for a small self-hosted platform, each paired with a linked runbook.\", \"language\": \"YAML\", \"stars_total\": 1043, \"stars_gained_30d\": 36, \"gain_start\": \"2026-06-01\", \"gain_end\": \"2026-07-01\"}, {\"rank\": 6, \"repository\": \"acme/recipe-box\", \"url\": \"https://git.example.com/acme/recipe-box\", \"description\": \"Stores recipes as plain markdown and scales ingredient quantities per serving.\", \"language\": \"TypeScript\", \"stars_total\": 1012, \"stars_gained_30d\": 19, \"gain_start\": \"2026-06-01\", \"gain_end\": \"2026-07-01\"}]}",
           "requirements": [],
-          "summary": "Ranked card grid of the top 6 trending LLM agent-harness repositories by 30-day star growth."
+          "summary": "Ranked card grid of the top 6 trending acme repositories by 30-day star growth."
         },
         {
           "kind": "assistant",
           "at_seconds": 41,
-          "text": "Here are the trending LLM agent-harness repositories, ranked by stars gained over the latest complete 30-day window (June 1 to July 1, 2026). herdr, orca, and opencode led the month, each shown with its language, total stars, and a bar for its 30-day growth."
+          "text": "Here are the trending acme repositories, ranked by stars gained over the latest complete 30-day window (June 1 to July 1, 2026). dns-adblock, mqtt-bridge, and vault-sync led the month, each shown with its language, total stars, and a bar for its 30-day growth."
         },
         {
           "kind": "completion",
           "at_seconds": 44,
-          "task_result": "Rendered an interactive widget ranking the top 6 trending LLM agent-harness repositories by stars gained in the latest complete 30-day window."
+          "task_result": "Rendered an interactive widget ranking the top 6 trending acme repositories by stars gained in the latest complete 30-day window."
         }
       ]
     },
@@ -846,6 +846,121 @@
           "at_seconds": 7,
           "done_reason": "awaiting_approval",
           "task_result": "Plan revision 2 is awaiting approval."
+        }
+      ]
+    },
+    {
+      "id": "demo-ingest-queue-cutover",
+      "title": "Cut over the ingest queue",
+      "model": "claude-sonnet-5",
+      "offset_seconds": -259200,
+      "summary": "Staged the durable-queue cutover and escalated three decisions: how far back to replay, which producers move first, and how long the old queue stays available.",
+      "events": [
+        {
+          "kind": "context",
+          "at_seconds": 0,
+          "capabilities": [
+            "ask_user"
+          ]
+        },
+        {
+          "kind": "user",
+          "at_seconds": 4,
+          "text": "Our ingest queue starts dropping messages above 4k/s, so we are moving producers onto the durable queue. Work up the cutover: replay the backlog, move producers in waves, and keep the old queue as a fallback while consumers catch up."
+        },
+        {
+          "kind": "user_question",
+          "at_seconds": 11,
+          "call_id": "5b1e7c04f9a3426d8e0c1f37a9b62d54",
+          "call_token": "demo-call-token-backfill-depth",
+          "timeout_seconds": 900,
+          "questions": [
+            {
+              "header": "Backfill depth",
+              "question": "How far back should the replay job rebuild the backlog before any producer moves?",
+              "options": [
+                {
+                  "label": "Last 24 hours (Recommended)",
+                  "description": "Covers the whole window the old queue was shedding messages and still finishes inside one maintenance slot."
+                },
+                {
+                  "label": "Last 7 days",
+                  "description": "Safer if the drops started before the alert fired, but the replay runs for roughly six hours."
+                },
+                {
+                  "label": "Skip the backfill",
+                  "description": "Fastest cutover. Anything the old queue already dropped stays lost."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "kind": "user_question_answered",
+          "at_seconds": 911,
+          "call_id": "5b1e7c04f9a3426d8e0c1f37a9b62d54",
+          "outcome": "timed_out"
+        },
+        {
+          "kind": "user_question",
+          "at_seconds": 918,
+          "call_id": "c7402fa19d6b48e3ab5510d2c8e94f16",
+          "call_token": "demo-call-token-first-wave",
+          "notes_placeholder": "Anything about producer owners or freeze windows I should know?",
+          "questions": [
+            {
+              "header": "First wave",
+              "question": "Which producers should move to the durable queue in the first wave?",
+              "multi_select": true,
+              "options": [
+                {
+                  "label": "Checkout events",
+                  "description": "Highest volume, and the only producer currently losing messages."
+                },
+                {
+                  "label": "Inventory sync",
+                  "description": "Batched and idempotent, so replaying it twice is harmless."
+                },
+                {
+                  "label": "Email dispatcher",
+                  "description": "Low volume, but a duplicate send is visible to customers."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "kind": "user_question",
+          "at_seconds": 925,
+          "call_id": "9ae35d68b0c74f12a7e6438f01d5c2b9",
+          "call_token": "demo-call-token-fallback-window",
+          "timeout_seconds": 1800,
+          "questions": [
+            {
+              "header": "Fallback window",
+              "question": "How long should the old queue keep accepting writes after the cutover?",
+              "options": [
+                {
+                  "label": "48 hours (Recommended)",
+                  "description": "Two full traffic cycles, enough to catch a slow consumer bug before the fallback closes."
+                },
+                {
+                  "label": "One week",
+                  "description": "Maximum safety, but every consumer stays dual-read for the whole week."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "kind": "assistant",
+          "at_seconds": 934,
+          "text": "The backfill question timed out, so I pointed the replay job at the last 24 hours: that was my recommendation and it is the only option that covers the whole drop window.\n\nTwo decisions are still yours, and both cards above are still live. Pick the first wave of producers, and tell me how long the old queue should stay available as a fallback. Your answer reaches me as a new message and I will finish the runbook from there."
+        },
+        {
+          "kind": "completion",
+          "at_seconds": 936,
+          "task_result": "Staged the ingest-queue cutover with the replay job set to rebuild the last 24 hours. The producer wave and the fallback window are still open questions."
         }
       ]
     }

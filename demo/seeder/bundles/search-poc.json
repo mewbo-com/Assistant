@@ -3,7 +3,7 @@
     {
       "id": "ws-oss-repo-scout",
       "name": "OSS Repo Scout",
-      "desc": "Discover the best open-source packages, libraries, and repos across GitHub, HuggingFace, docs and the web.",
+      "desc": "Discover open-source packages, libraries, and repos across code hosts, model hubs, docs and the web.",
       "sources": [
         "github",
         "huggingface",
@@ -18,7 +18,7 @@
       "created_offset": -6220800,
       "past_queries": [
         {
-          "q": "What are the most popular Claude Code plugins repos out there?",
+          "q": "Which acme repos are starter templates rather than running services?",
           "ran_at_offset": -18000,
           "results": 8,
           "when": "5h ago",
@@ -26,7 +26,7 @@
           "status": "completed"
         },
         {
-          "q": "All AI coding agent projects like Claude Code and Codex",
+          "q": "How does acme split its self-hosted CI tooling between runners and control planes?",
           "ran_at_offset": -7200,
           "results": 12,
           "when": "2h ago",
@@ -48,7 +48,7 @@
           "when": "2d ago"
         },
         {
-          "q": "Compare Tabby vs Continue vs Cody licensing",
+          "q": "Which acme build tools ship under a permissive license?",
           "ran_at_offset": -360000,
           "results": 7,
           "when": "4d ago"
@@ -379,7 +379,7 @@
     {
       "run_id": "run-oss-agents",
       "workspace_id": "ws-oss-repo-scout",
-      "query": "All AI coding agent projects like Claude Code and Codex",
+      "query": "How does acme split its self-hosted CI tooling between runners and control planes?",
       "tier": "auto",
       "model": "gpt-oss-120b",
       "created_offset": -7200,
@@ -396,36 +396,36 @@
         "mcp_gitmcp_search_generic_code"
       ],
       "answer": {
-        "tldr": "The open-source AI coding-agent space in 2026 splits into two camps. **Terminal-native agents** that own a shell and your git repo lead on autonomy: `anthropics/claude-code` (133k stars, Python), OpenAI's `openai/codex`, and the Go-based `charmbracelet/crush` are the most active. **IDE-embedded assistants** `cline/cline` and `continuedev/continue` trade some autonomy for an inline editor loop, while `TabbyML/tabby` targets self-hosted, Copilot-style completion.\n\n| Rank | Repo | Stars | Language |\n|---|---|---|---|\n| 1 | anthropics/claude-code | 133k | Python |\n| 2 | All-Hands-AI/OpenHands | 63.9k | Python |\n| 3 | cline/cline | 51.2k | TypeScript |\n| 4 | Aider-AI/aider | 42.8k | Python |\n| 5 | openai/codex | 38.2k | Rust |",
+        "tldr": "Acme's self-hosted CI fleet splits into two halves. **Runner-side tools** execute work on hardware you already own, and that is where the throughput wins are: `acme/runner-pool` (24.6k stars, Go) leases ephemeral runners onto spare capacity, `acme/cache-warden` shares one build cache across branches, and `acme/toolchain-pin` keeps every job on the same compiler. **Control-plane services** decide and record rather than execute: `acme/build-journal` and `acme/release-train` own what shipped and when, while `acme/rollout-gate` holds a release until its named checks report green.\n\n| Rank | Repo | Stars | Language |\n|---|---|---|---|\n| 1 | acme/runner-pool | 24.6k | Go |\n| 2 | acme/build-journal | 18.2k | Rust |\n| 3 | acme/artifact-store | 15.9k | Go |\n| 4 | acme/pipeline-lint | 12.4k | TypeScript |\n| 5 | acme/release-train | 11.1k | Python |",
         "bullets": [
           {
-            "text": "`anthropics/claude-code` (133k) leads terminal-native agents; Python, updated within 2 days.",
+            "text": "`acme/runner-pool` (24.6k) leads the runner-side tier; Go, updated within 2 days.",
             "cites": [
               "r1"
             ]
           },
           {
-            "text": "`openai/codex` and `charmbracelet/crush` round out the actively-maintained terminal tier.",
+            "text": "`acme/build-journal` and `acme/artifact-store` are the control-plane record keepers.",
             "cites": [
               "r2",
               "r3"
             ]
           },
           {
-            "text": "`cline/cline` and `continuedev/continue` lead the IDE-embedded camp.",
+            "text": "`acme/cache-warden` and `acme/env-broker` are what cut queue time on shared hardware.",
             "cites": [
               "r6",
-              "r8"
+              "r7"
             ]
           },
           {
-            "text": "`TabbyML/tabby` is the notable self-hosted, Copilot-style alternative.",
+            "text": "`acme/pipeline-lint` is the only one that runs before a pipeline ever executes.",
             "cites": [
-              "r9"
+              "r4"
             ]
           },
           {
-            "text": "Two 2026 field guides corroborate the terminal-vs-IDE taxonomy.",
+            "text": "Two field guides corroborate the runner-vs-control-plane split.",
             "cites": [
               "r11",
               "r12"
@@ -442,14 +442,14 @@
           "kind": "code",
           "relevance": 0.98,
           "confidence": 0.95,
-          "title": "anthropics/claude-code",
-          "url": "github.com/anthropics/claude-code",
-          "snippet": "An agentic <mark>coding tool</mark> that lives in your terminal, understands your codebase, and helps you code faster by executing routine tasks.",
-          "author": "anthropics",
+          "title": "acme/runner-pool",
+          "url": "git.example.com/acme/runner-pool",
+          "snippet": "Leases ephemeral CI runners onto <mark>spare capacity</mark>, then reclaims the host the moment a job finishes.",
+          "author": "acme",
           "timestamp": "Updated 2d ago",
           "meta": {
-            "stars": 133000,
-            "language": "Python"
+            "stars": 24600,
+            "language": "Go"
           }
         },
         {
@@ -458,13 +458,13 @@
           "kind": "code",
           "relevance": 0.95,
           "confidence": 0.92,
-          "title": "openai/codex",
-          "url": "github.com/openai/codex",
-          "snippet": "Lightweight coding agent that runs in your terminal. The Codex CLI pairs a local sandbox with the Responses API.",
-          "author": "openai",
+          "title": "acme/build-journal",
+          "url": "git.example.com/acme/build-journal",
+          "snippet": "Append-only record of every build: its inputs, its toolchain versions, and the artifacts it produced.",
+          "author": "acme",
           "timestamp": "Updated 4d ago",
           "meta": {
-            "stars": 38200,
+            "stars": 18200,
             "language": "Rust"
           }
         },
@@ -474,13 +474,13 @@
           "kind": "code",
           "relevance": 0.91,
           "confidence": 0.9,
-          "title": "charmbracelet/crush",
-          "url": "github.com/charmbracelet/crush",
-          "snippet": "The glamourous AI coding agent for your favourite terminal. Multi-model, MCP-native, session-aware.",
-          "author": "charmbracelet",
+          "title": "acme/artifact-store",
+          "url": "git.example.com/acme/artifact-store",
+          "snippet": "Content-addressed artifact storage with signed manifests and a retention policy per release channel.",
+          "author": "acme",
           "timestamp": "Updated 1d ago",
           "meta": {
-            "stars": 25400,
+            "stars": 15900,
             "language": "Go"
           }
         },
@@ -490,14 +490,14 @@
           "kind": "code",
           "relevance": 0.88,
           "confidence": 0.86,
-          "title": "HKUDS/DeepCode",
-          "url": "github.com/HKUDS/DeepCode",
-          "snippet": "Open agentic coding: Paper2Code, Text2Web and Text2Backend from a single research-grade planner.",
-          "author": "HKUDS",
+          "title": "acme/pipeline-lint",
+          "url": "git.example.com/acme/pipeline-lint",
+          "snippet": "Static checker for pipeline definitions: unreachable stages, undeclared secrets, and dependency cycles.",
+          "author": "acme",
           "timestamp": "Updated 6d ago",
           "meta": {
-            "stars": 18900,
-            "language": "Python"
+            "stars": 12400,
+            "language": "TypeScript"
           }
         },
         {
@@ -506,14 +506,14 @@
           "kind": "code",
           "relevance": 0.86,
           "confidence": 0.84,
-          "title": "block/goose",
-          "url": "github.com/block/goose",
-          "snippet": "An open-source, extensible AI agent that goes beyond code suggestions to install, execute and test with any LLM.",
-          "author": "block",
+          "title": "acme/release-train",
+          "url": "git.example.com/acme/release-train",
+          "snippet": "Batches merged changes into scheduled release windows, with a dry run and a per-service opt-out.",
+          "author": "acme",
           "timestamp": "Updated 3d ago",
           "meta": {
-            "stars": 17600,
-            "language": "Rust"
+            "stars": 11100,
+            "language": "Python"
           }
         },
         {
@@ -522,14 +522,14 @@
           "kind": "code",
           "relevance": 0.85,
           "confidence": 0.83,
-          "title": "cline/cline",
-          "url": "github.com/cline/cline",
-          "snippet": "Autonomous coding agent right in your IDE, capable of creating/editing files and running commands with your permission.",
-          "author": "cline",
+          "title": "acme/cache-warden",
+          "url": "git.example.com/acme/cache-warden",
+          "snippet": "Shared build cache with per-branch eviction and a prefetch that warms a cold runner before its first job.",
+          "author": "acme",
           "timestamp": "Updated 12h ago",
           "meta": {
-            "stars": 51200,
-            "language": "TypeScript"
+            "stars": 9800,
+            "language": "Rust"
           }
         },
         {
@@ -538,14 +538,14 @@
           "kind": "code",
           "relevance": 0.83,
           "confidence": 0.82,
-          "title": "Aider-AI/aider",
-          "url": "github.com/Aider-AI/aider",
-          "snippet": "AI pair programming in your terminal. Aider works with your local git repo to edit code across multiple files.",
-          "author": "Aider-AI",
+          "title": "acme/env-broker",
+          "url": "git.example.com/acme/env-broker",
+          "snippet": "Leases a short-lived preview environment to a pipeline and tears it down when the run ends.",
+          "author": "acme",
           "timestamp": "Updated 1d ago",
           "meta": {
-            "stars": 42800,
-            "language": "Python"
+            "stars": 8300,
+            "language": "Go"
           }
         },
         {
@@ -554,14 +554,14 @@
           "kind": "code",
           "relevance": 0.81,
           "confidence": 0.8,
-          "title": "continuedev/continue",
-          "url": "github.com/continuedev/continue",
-          "snippet": "The leading open-source AI code assistant. Build custom autocomplete and chat experiences inside the IDE.",
-          "author": "continuedev",
+          "title": "acme/flake-tracker",
+          "url": "git.example.com/acme/flake-tracker",
+          "snippet": "Records per-test outcomes across runs and ranks tests by how often they disagree with themselves.",
+          "author": "acme",
           "timestamp": "Updated 5d ago",
           "meta": {
-            "stars": 31500,
-            "language": "TypeScript"
+            "stars": 7400,
+            "language": "Python"
           }
         },
         {
@@ -570,13 +570,13 @@
           "kind": "code",
           "relevance": 0.79,
           "confidence": 0.78,
-          "title": "TabbyML/tabby",
-          "url": "github.com/TabbyML/tabby",
-          "snippet": "Self-hosted AI coding assistant, an open alternative to GitHub Copilot. No DB or cloud dependency.",
-          "author": "TabbyML",
+          "title": "acme/toolchain-pin",
+          "url": "git.example.com/acme/toolchain-pin",
+          "snippet": "Resolves and pins compiler and SDK versions per repository, verified by checksum on every job.",
+          "author": "acme",
           "timestamp": "Updated 8d ago",
           "meta": {
-            "stars": 31800,
+            "stars": 6200,
             "language": "Rust"
           }
         },
@@ -586,14 +586,14 @@
           "kind": "code",
           "relevance": 0.77,
           "confidence": 0.76,
-          "title": "All-Hands-AI/OpenHands",
-          "url": "github.com/All-Hands-AI/OpenHands",
-          "snippet": "A platform for software-development agents powered by AI. Write less code, ship more.",
-          "author": "All-Hands-AI",
+          "title": "acme/rollout-gate",
+          "url": "git.example.com/acme/rollout-gate",
+          "snippet": "Holds a deploy until its named checks report green, and records who overrode it when someone does.",
+          "author": "acme",
           "timestamp": "Updated 2d ago",
           "meta": {
-            "stars": 63900,
-            "language": "Python"
+            "stars": 5100,
+            "language": "TypeScript"
           }
         },
         {
@@ -601,9 +601,9 @@
           "source": "internet-search",
           "kind": "web",
           "relevance": 0.72,
-          "title": "State of AI coding agents, mid-2026",
-          "url": "https://devnotes.example/ai-coding-agents-2026",
-          "snippet": "A field guide contrasting terminal-native agents (Claude Code, Codex, Aider) with IDE-embedded ones (Cline, Continue) on autonomy and cost.",
+          "title": "Self-hosted CI: runners versus control planes",
+          "url": "https://devnotes.example/self-hosted-ci-split",
+          "snippet": "A field guide separating the tools that execute work on hardware you own from the services that decide what ships.",
           "author": "devnotes.example",
           "timestamp": "Jun 28, 2026"
         },
@@ -612,10 +612,10 @@
           "source": "gitmcp",
           "kind": "web",
           "relevance": 0.68,
-          "title": "Awesome AI coding agents (curated list)",
-          "url": "https://github.com/e2b-dev/awesome-ai-agents",
-          "snippet": "A continually-updated catalog of open-source coding agents with stars, license and language columns.",
-          "author": "e2b-dev",
+          "title": "Acme build and release tooling (catalog)",
+          "url": "https://git.example.com/acme/ci-toolbox-index",
+          "snippet": "A maintained catalog of acme's build and release repositories with language, license and cadence columns.",
+          "author": "acme",
           "timestamp": "Updated weekly"
         }
       ],
@@ -638,7 +638,7 @@
             {
               "t_ms": 80,
               "glyph": ">",
-              "text": "decompose: rank OSS coding agents by stars + activity",
+              "text": "decompose: split acme CI tooling by where it runs",
               "done": false,
               "empty": false
             },
@@ -652,12 +652,12 @@
             {
               "t_ms": 1200,
               "glyph": "✓",
-              "text": "synthesize ranked market overview",
+              "text": "synthesize ranked fleet overview",
               "done": true,
               "empty": false
             }
           ],
-          "result": "PLAN: fan out over github search + web + docs, rank by stars and recency, cite the repo and a primary source."
+          "result": "PLAN: fan out over repo search + web + docs, rank by stars and recency, cite the repo and a primary source."
         },
         {
           "id": "a-scg",
@@ -677,7 +677,7 @@
             {
               "t_ms": 120,
               "glyph": ">",
-              "text": "scg_route(query=coding agents) -> github#search_repositories",
+              "text": "scg_route(query=self-hosted ci tooling) -> github#search_repositories",
               "done": false,
               "empty": false
             },
@@ -703,7 +703,7 @@
               "empty": false
             }
           ],
-          "result": "EVIDENCE (pathway: github#search_repositories -> github#list_commits): 10 repos, stars 17k-133k, all active in the last 14 days."
+          "result": "EVIDENCE (pathway: github#search_repositories -> github#list_commits): 10 repos, stars 5k-25k, all active in the last 14 days."
         },
         {
           "id": "a-probe2",
@@ -723,7 +723,7 @@
             {
               "t_ms": 200,
               "glyph": ">",
-              "text": "searxng_web_search(state of AI coding agents 2026)",
+              "text": "searxng_web_search(self-hosted ci runners vs control plane)",
               "done": false,
               "empty": false
             },
@@ -742,32 +742,32 @@
               "empty": false
             }
           ],
-          "result": "EVIDENCE (pathway: internet-search#searxng_web_search): 2 field-guide sources corroborating the terminal-vs-IDE split."
+          "result": "EVIDENCE (pathway: internet-search#searxng_web_search): 2 field-guide sources corroborating the runner-vs-control-plane split."
         }
       ],
       "related_questions": [
-        "How does Claude Code compare to GitHub Copilot on autonomy?",
-        "What licensing terms does TabbyML/tabby ship under?",
-        "Which of these agents are MCP-native?",
-        "Which terminal agents work fully offline?"
+        "Which of these tools run without a control plane at all?",
+        "What license does acme/runner-pool ship under?",
+        "Which of these can share one build cache?",
+        "Which of these work on an air-gapped network?"
       ],
       "related_people": [
         {
-          "name": "Anthropic",
-          "role": "publishes claude-code",
-          "initials": "AN",
+          "name": "Acme Platform",
+          "role": "maintains runner-pool",
+          "initials": "AP",
           "color": 1
         },
         {
-          "name": "OpenAI",
-          "role": "publishes codex",
-          "initials": "OA",
+          "name": "Acme Release Eng",
+          "role": "maintains release-train",
+          "initials": "AR",
           "color": 2
         },
         {
-          "name": "Charm",
-          "role": "publishes crush",
-          "initials": "CH",
+          "name": "Acme Build Tools",
+          "role": "maintains build-journal",
+          "initials": "AB",
           "color": 4
         }
       ],
@@ -783,7 +783,7 @@
     {
       "run_id": "run-cc-plugins",
       "workspace_id": "ws-oss-repo-scout",
-      "query": "What are the most popular Claude Code plugins repos out there?",
+      "query": "Which acme repos are starter templates rather than running services?",
       "tier": "fast",
       "model": "claude-sonnet-4-6",
       "created_offset": -18000,
@@ -798,23 +798,23 @@
         "mcp_internet-search_searxng_web_search"
       ],
       "answer": {
-        "tldr": "The most-starred **Claude Code plugin** repos are curated indexes and marketplaces rather than single plugins. `hesreallyhim/awesome-claude-code` (9.6k) is the canonical list; `wshobson/agents` and `davila7/claude-code-templates` are the busiest ready-to-fork sources.\n\n| Rank | Repo | Stars | Type | URL |\n|---|---|---|---|---|\n| 1 | hesreallyhim/awesome-claude-code | 9.6k | index | github.com/hesreallyhim/awesome-claude-code |\n| 2 | wshobson/agents | 7.2k | marketplace | github.com/wshobson/agents |\n| 3 | davila7/claude-code-templates | 5.4k | templates | github.com/davila7/claude-code-templates |\n| 4 | getAsterisk/claudia | 4.9k | gui+host | github.com/getAsterisk/claudia |\n| 5 | sanjeed5/awesome-claude-code-plugins | 2.6k | index | github.com/sanjeed5/awesome-claude-code-plugins |",
+        "tldr": "The acme repos that ship **something you copy** rather than something you run are indexes, stage libraries and scaffolds. `acme/pipeline-recipes` (9.6k) is the canonical index; `acme/stage-library` and `acme/repo-scaffold` are the busiest ready-to-fork sources.\n\n| Rank | Repo | Stars | Type | URL |\n|---|---|---|---|---|\n| 1 | acme/pipeline-recipes | 9.6k | index | git.example.com/acme/pipeline-recipes |\n| 2 | acme/stage-library | 7.2k | library | git.example.com/acme/stage-library |\n| 3 | acme/repo-scaffold | 5.4k | scaffold | git.example.com/acme/repo-scaffold |\n| 4 | acme/runner-images | 4.9k | images | git.example.com/acme/runner-images |\n| 5 | acme/pipeline-lint-hook | 3.1k | hook | git.example.com/acme/pipeline-lint-hook |",
         "bullets": [
           {
-            "text": "`hesreallyhim/awesome-claude-code` (9.6k) is the canonical curated index.",
+            "text": "`acme/pipeline-recipes` (9.6k) is the canonical curated index.",
             "cites": [
               "b1"
             ]
           },
           {
-            "text": "`wshobson/agents` and `davila7/claude-code-templates` are the busiest fork sources.",
+            "text": "`acme/stage-library` and `acme/repo-scaffold` are the busiest fork sources.",
             "cites": [
               "b2",
               "b3"
             ]
           },
           {
-            "text": "Anthropic's own plugin announcement frames the marketplace model.",
+            "text": "The stage-authoring guide is what says which defaults a template owes its consumer.",
             "cites": [
               "b7"
             ]
@@ -830,10 +830,10 @@
           "kind": "code",
           "relevance": 0.96,
           "confidence": 0.94,
-          "title": "hesreallyhim/awesome-claude-code",
-          "url": "github.com/hesreallyhim/awesome-claude-code",
-          "snippet": "A curated list of <mark>Claude Code</mark> plugins, slash-commands, hooks and workflows.",
-          "author": "hesreallyhim",
+          "title": "acme/pipeline-recipes",
+          "url": "git.example.com/acme/pipeline-recipes",
+          "snippet": "A curated index of <mark>pipeline definitions</mark> for common stacks, each naming the failure it guards against.",
+          "author": "acme",
           "timestamp": "Updated 1d ago",
           "meta": {
             "stars": 9600,
@@ -846,10 +846,10 @@
           "kind": "code",
           "relevance": 0.9,
           "confidence": 0.88,
-          "title": "wshobson/agents",
-          "url": "github.com/wshobson/agents",
-          "snippet": "A marketplace of production-ready Claude Code sub-agents and plugin bundles.",
-          "author": "wshobson",
+          "title": "acme/stage-library",
+          "url": "git.example.com/acme/stage-library",
+          "snippet": "Reusable pipeline stages: dependency install, matrix test, artifact publish, signed release.",
+          "author": "acme",
           "timestamp": "Updated 3d ago",
           "meta": {
             "stars": 7200,
@@ -862,10 +862,10 @@
           "kind": "code",
           "relevance": 0.86,
           "confidence": 0.85,
-          "title": "davila7/claude-code-templates",
-          "url": "github.com/davila7/claude-code-templates",
-          "snippet": "Ready-to-fork Claude Code plugin templates: hooks, MCP servers and agent definitions.",
-          "author": "davila7",
+          "title": "acme/repo-scaffold",
+          "url": "git.example.com/acme/repo-scaffold",
+          "snippet": "Generates a repository with its lint, test and release wiring already connected to each other.",
+          "author": "acme",
           "timestamp": "Updated 2d ago",
           "meta": {
             "stars": 5400,
@@ -878,14 +878,14 @@
           "kind": "code",
           "relevance": 0.82,
           "confidence": 0.8,
-          "title": "getAsterisk/claudia",
-          "url": "github.com/getAsterisk/claudia",
-          "snippet": "A desktop GUI + plugin host for managing Claude Code sessions and marketplaces.",
-          "author": "getAsterisk",
+          "title": "acme/runner-images",
+          "url": "git.example.com/acme/runner-images",
+          "snippet": "Base container images for self-hosted runners, one per toolchain, rebuilt on upstream security updates.",
+          "author": "acme",
           "timestamp": "Updated 5d ago",
           "meta": {
             "stars": 4900,
-            "language": "Rust"
+            "language": "Shell"
           }
         },
         {
@@ -894,10 +894,10 @@
           "kind": "code",
           "relevance": 0.79,
           "confidence": 0.78,
-          "title": "anthropics/claude-code-action",
-          "url": "github.com/anthropics/claude-code-action",
-          "snippet": "Official GitHub Action wrapping Claude Code for CI-driven agent pickups.",
-          "author": "anthropics",
+          "title": "acme/pipeline-lint-hook",
+          "url": "git.example.com/acme/pipeline-lint-hook",
+          "snippet": "Pre-merge hook that runs pipeline-lint over a changed pipeline file and comments its findings.",
+          "author": "acme",
           "timestamp": "Updated 1w ago",
           "meta": {
             "stars": 3100,
@@ -910,10 +910,10 @@
           "kind": "code",
           "relevance": 0.75,
           "confidence": 0.74,
-          "title": "sanjeed5/awesome-claude-code-plugins",
-          "url": "github.com/sanjeed5/awesome-claude-code-plugins",
-          "snippet": "Community index of Claude Code plugins grouped by marketplace and capability.",
-          "author": "sanjeed5",
+          "title": "acme/toolchain-manifests",
+          "url": "git.example.com/acme/toolchain-manifests",
+          "snippet": "Community index of pinned toolchain manifests grouped by language and target platform.",
+          "author": "acme",
           "timestamp": "Updated 4d ago",
           "meta": {
             "stars": 2600,
@@ -925,10 +925,10 @@
           "source": "internet-search",
           "kind": "web",
           "relevance": 0.7,
-          "title": "Claude Code plugins: the marketplace ecosystem",
-          "url": "https://www.anthropic.com/news/claude-code-plugins",
-          "snippet": "Overview of the plugin + marketplace model: skills, hooks, MCP servers and agent definitions.",
-          "author": "anthropic.com",
+          "title": "Template repositories outlive the pipelines copied from them",
+          "url": "https://platformweekly.example/template-repos",
+          "snippet": "Why a scaffold's defaults keep shaping a codebase long after the first commit.",
+          "author": "platformweekly.example",
           "timestamp": "Jun 12, 2026"
         },
         {
@@ -936,9 +936,9 @@
           "source": "gitmcp",
           "kind": "docs",
           "relevance": 0.66,
-          "title": "Claude Code plugin authoring guide",
-          "url": "https://docs.claude.com/claude-code/plugins",
-          "snippet": "How a plugin ships skills, hooks, agent definitions and MCP tools via a plugin.json manifest.",
+          "title": "Authoring an acme pipeline stage",
+          "url": "https://git.example.com/acme/stage-library/docs/authoring",
+          "snippet": "How a stage declares its inputs, its cache keys and the secrets it requires.",
           "timestamp": "Jun 2026"
         }
       ],
@@ -961,7 +961,7 @@
             {
               "t_ms": 60,
               "glyph": ">",
-              "text": "decompose: find most-starred Claude Code plugin repos",
+              "text": "decompose: find most-starred acme template repos",
               "done": false,
               "empty": false
             },
@@ -975,12 +975,12 @@
             {
               "t_ms": 900,
               "glyph": "✓",
-              "text": "rank by stars, group by plugin type",
+              "text": "rank by stars, group by template type",
               "done": true,
               "empty": false
             }
           ],
-          "result": "PLAN: github search scoped to claude-code plugins, rank by stars, tag repo type."
+          "result": "PLAN: repo search scoped to acme templates, rank by stars, tag repo type."
         },
         {
           "id": "b-gh",
@@ -1000,7 +1000,7 @@
             {
               "t_ms": 140,
               "glyph": ">",
-              "text": "search_repositories(q=claude code plugin, sort=stars)",
+              "text": "search_repositories(q=acme template, sort=stars)",
               "done": false,
               "empty": false
             },
@@ -1019,19 +1019,19 @@
               "empty": false
             }
           ],
-          "result": "EVIDENCE (pathway: github#search_repositories): 6 plugin index/marketplace repos, 2.6k-9.6k stars."
+          "result": "EVIDENCE (pathway: github#search_repositories): 6 index/library/scaffold repos, 2.6k-9.6k stars."
         }
       ],
       "related_questions": [
-        "How do I publish a plugin to a Claude Code marketplace?",
-        "What is in a plugin.json manifest?",
-        "Which plugins ship MCP servers vs just skills?"
+        "How do I publish a new stage to the stage library?",
+        "What does a stage manifest declare?",
+        "Which templates pin a toolchain and which leave it open?"
       ],
       "related_people": [
         {
-          "name": "Anthropic",
-          "role": "ships the plugin model",
-          "initials": "AN",
+          "name": "Acme Build Tools",
+          "role": "maintains the stage library",
+          "initials": "AB",
           "color": 1
         }
       ],

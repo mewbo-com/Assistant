@@ -212,8 +212,8 @@ class TestLazyConnectNoEagerDial:
 
 
 class TestNoPerCallRefreshChurn:
-    """Phase 4: a healthy connected server must never trigger a
-    full-config reload + reconnect on every tool call (the mid-query stall)."""
+    """A healthy connected server must never trigger a full-config reload +
+    reconnect on every tool call — that is what stalls a query mid-flight."""
 
     def setup_method(self):
         reset_mcp_pool()
@@ -260,14 +260,14 @@ class TestNoPerCallRefreshChurn:
 
 
 class TestStartupConfigHashGate:
-    """Phase 1: an unchanged MCP config + a cached manifest must NOT
+    """An unchanged MCP config + a cached manifest must NOT
     trigger a blocking live connect — startup uses the cache and the pool
     connects lazily on first use, so a slow/dead server never stalls the banner."""
 
     def test_unchanged_config_skips_discovery(self, tmp_path, monkeypatch):
         import json as _json
 
-        import mewbo_core.tool_registry as tr
+        import mewbo_core.tooling.tool_registry as tr
         from mewbo_tools.integration.mcp_pool import _config_hash
 
         cfg = {"servers": {"deepwiki": {"url": "https://x"}}}
@@ -305,7 +305,7 @@ class TestStartupConfigHashGate:
     def test_changed_config_triggers_discovery_and_stamps_hash(self, tmp_path, monkeypatch):
         import json as _json
 
-        import mewbo_core.tool_registry as tr
+        import mewbo_core.tooling.tool_registry as tr
         from mewbo_tools.integration.mcp_pool import _config_hash
 
         old_cfg = {"servers": {"deepwiki": {"url": "https://old"}}}

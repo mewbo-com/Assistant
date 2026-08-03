@@ -1,6 +1,7 @@
 package com.mewbo.aura.data.repo
 
 import com.mewbo.aura.data.device.DeviceToolDefinition
+import com.mewbo.aura.data.model.ComposerScope
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -41,6 +42,25 @@ class SessionContextTest {
 
         assertEquals("claude-sonnet-5", context["model"]?.jsonPrimitive?.content)
         assertEquals("managed:abc123", context["project"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `the auto-select sentinel is sent verbatim, like any other project key`() {
+        // "auto" is a RESERVED value, not a project - but it is not special-cased HERE: it rides
+        // the ordinary `project` field so the resolver on the far side owns the whole meaning of
+        // it. A client that dropped it (or translated it into some other shape) would silently
+        // start every auto session in a temp dir with no way for the model to be asked to pick.
+        val context = buildSessionContext(model = null, project = ComposerScope.AUTO_PROJECT_KEY, mcpTools = null)
+
+        assertEquals("auto", context["project"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `the sentinel this client sends is the one the resolver reserves`() {
+        // A second spelling of the sentinel on either side of the wire is indistinguishable from a
+        // project literally named "auto" - which is why core declares it once (project_catalog's
+        // AUTO_PROJECT) and this client declares it once.
+        assertEquals("auto", ComposerScope.AUTO_PROJECT_KEY)
     }
 
     @Test

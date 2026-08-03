@@ -122,9 +122,9 @@
        must stay in sync, for the same reason the font stacks do: a rule that
        hardcodes px silently drifts from the scale and nothing catches it.
 
-       --font-sans / --font-mono were previously REFERENCED (`var(--font-sans,
-       inherit)`) but never DEFINED, so every such rule silently fell through to
-       `inherit`. Defining them makes those rules mean what they say. */
+       --font-sans / --font-mono must be DEFINED here, not merely referenced
+       (`var(--font-sans, inherit)`) — leaving them undefined lets every
+       consuming rule silently fall through to `inherit`. */
     --font-sans: 'Inter Variable', system-ui, -apple-system, sans-serif;
     --font-mono: 'JetBrains Mono Variable', ui-monospace, monospace;
 
@@ -535,16 +535,16 @@
     font-family: var(--font-mono); /* see the body rule */
     /* JetBrains Mono puts its coding ligatures on the standard `calt`, which is
        already on by default — naming it here is explicit, not load-bearing.
-       (The previous stack needed a font-specific stylistic set for the same
-       effect, which is why this used to read `ss11`; that set means nothing to
-       this family.) tnum/zero keep numeric chips fixed-width + slashed. */
+       Don't set `ss11` for this: that's a different font's stylistic-set
+       convention for the same effect and means nothing to this family.
+       tnum/zero keep numeric chips fixed-width + slashed. */
     font-feature-settings: "calt" 1, "tnum" 1, "zero" 1;
   }
 }
 
 /* ── highlight.js theme via CSS variables — single source of truth, both
    light and dark modes adapt automatically through the --hl-* tokens above.
-   Replaces the third-party github-dark.css import we used to ship. ── */
+   No bundled third-party theme CSS. ── */
 .hljs {
   color: hsl(var(--code-fg));
   background: transparent;
@@ -674,9 +674,8 @@
 }
 
 /* ── Pending assistant beat ──
-   Replaces the old bordered "Working… / Open trace" pill on the user row
-   with a single inline beat: pulse dot + shimmer label + ghost trace
-   button. Mounts only while an assistant turn has accepted the user
+   A single inline beat on the user row: pulse dot + shimmer label + ghost
+   trace button. Mounts only while an assistant turn has accepted the user
    message but hasn't streamed any tokens yet — same lifecycle as
    .flower-mark, so the keyframes never run during idle reading. */
 .pending-line {

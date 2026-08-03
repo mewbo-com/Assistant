@@ -15,14 +15,14 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const IMG_DIR = resolve(HERE, "../../../../docs/assets/img");
 
 export type ShotName =
-  // console (Phase 2)
+  // console
   | "front"
   | "tasks"
   | "shellLog"
   | "fileReadLog"
   | "fileEdit"
   | "widgets"
-  // wiki (Phase 3 — this extension)
+  // wiki
   | "wikiLanding"
   | "wikiOverview"
   | "wikiIndexSource"
@@ -31,14 +31,16 @@ export type ShotName =
   | "wikiBadge"
   | "wikiQna"
   | "wikiIndexingProgress"
-  // agentic search (Phase 3 — this extension)
+  // agentic search
   | "searchLanding"
   | "searchResults"
   | "searchAgentTrace"
-  // settings + plan mode (Phase 4 — legacy hand-captures brought into the pipeline)
+  // settings + plan mode
   | "settingsModels"
   | "settingsSecurity"
-  | "planApproval";
+  | "planApproval"
+  // ask-user questions (the human-in-the-loop card, docs/features-builtin-tools.md)
+  | "askUserQuestion";
 
 /**
  * Overwrite the docs images IN PLACE: same basenames and extensions the docs
@@ -73,6 +75,7 @@ export const SHOTS: Record<ShotName, { file: string; type: "png" | "jpeg" }> = {
   settingsModels: { file: "mewbo-settings-01-models.jpg", type: "jpeg" },
   settingsSecurity: { file: "mewbo-settings-02-security.jpg", type: "jpeg" },
   planApproval: { file: "mewbo-console-03-plan-approval.jpg", type: "jpeg" },
+  askUserQuestion: { file: "mewbo-console-ask-user-log.jpg", type: "jpeg" },
 };
 
 export function shotPath(name: ShotName): string {
@@ -97,10 +100,29 @@ export const SEED = {
     infraReportTitle: "Weekly infra health report",
     dinnerTitle: "Plan a birthday dinner menu",
     // The session whose rendered stlite widget backs the widgets shot (07).
-    widgetTitle: "Trending LLM agent harness repositories",
+    widgetTitle: "Trending acme repositories",
+    // The rank-#1 repo in the widget's seeded data.json — the bare bar COUNT
+    // (below) only proves 6 cards exist, not that they name the right
+    // repositories, so the widget flow also anchors on this text.
+    widgetTopRepo: "acme/dns-adblock",
     // The two-revision plan session backing the plan-approval shot (03).
     planTitle: "Scope API keys to one workspace",
+    // The three-question-group session backing the ask-user shot.
+    askUserTitle: "Cut over the ingest queue",
   },
+  // The ask-user session's question headers, in transcript order: a group whose
+  // run timed out, a multi-select group with a notes box, and a bounded group
+  // still awaiting an answer. Each is the `header` chip of a seeded
+  // `user_question` group in `console-poc.json`.
+  questionHeaders: {
+    timedOut: "Backfill depth",
+    multiSelect: "First wave",
+    bounded: "Fallback window",
+  },
+  // The seeded `notes_placeholder` — its presence is what makes the console
+  // render the group-level notes box at all.
+  questionNotesPlaceholder:
+    "Anything about producer owners or freeze windows I should know?",
   // Shell tool step inside the auth-refactor session.
   shellCommand: "npm test",
   // File-read tool step inside the auth-refactor session.

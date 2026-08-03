@@ -4,15 +4,17 @@
  * language + page-count chips, and the indexed-snapshot caption row
  * (freshness badge included).
  */
-import { ChevronRight, FileText, Settings, Trash2 } from "lucide-react";
+import { ChevronRight, ExternalLink, FileText, Loader2, Settings, Trash2 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { useOpenTargetSession } from "@/hooks/useOpenTargetSession";
 
 import { FreshnessBadge } from "../FreshnessBadge";
 import { IndexedSnapshot } from "../indexedSnapshot";
 import { IndexedSnapshotCaption } from "../IndexedSnapshotCaption";
 import { RepoLink } from "../RepoLink";
 import type { Project } from "../api/types";
+import { openProjectSession } from "../api/client";
 import { PlatformIcon } from "../configure-wizard/PlatformIcon";
 import { parseSlug } from "../slug";
 
@@ -27,6 +29,14 @@ export function ProjectCard({
   onSettings: () => void;
   onDelete: () => void;
 }) {
+  // Own mutation instance per card — independent pending state, same
+  // convention `PipelineRow`'s per-row `useFirePipeline()` uses so one card's
+  // in-flight mint never blocks a sibling's.
+  const openSession = useOpenTargetSession(
+    () => openProjectSession(p.slug).then((r) => r.sessionId),
+    "Couldn't open the wiki session",
+  );
+
   return (
     <article
       tabIndex={0}
@@ -44,6 +54,23 @@ export function ProjectCard({
       )}
     >
       <div className="absolute top-2 right-2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-all">
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            openSession.mutate();
+          }}
+          disabled={openSession.isPending}
+          aria-label="Open a session about this wiki"
+          title="Open a session about this wiki"
+          className="inline-flex items-center justify-center w-6 h-6 rounded-md text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))] transition-colors disabled:opacity-50"
+        >
+          {openSession.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <ExternalLink className="h-3.5 w-3.5" />
+          )}
+        </button>
         <button
           type="button"
           onClick={(e) => {

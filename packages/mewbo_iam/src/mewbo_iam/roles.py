@@ -85,6 +85,11 @@ _MEMBER_PERMISSIONS: frozenset[str] = frozenset(
         PermissionCatalog.KEYS_MINT_OWN,
         PermissionCatalog.GIT_CREDENTIALS_READ,
         PermissionCatalog.GIT_CREDENTIALS_WRITE,
+        # The repository registry rides with the credential pair rather than with
+        # ``projects.read``: a repository DTO reports which credential SCOPE covers
+        # it, which is the same secrets-metadata a viewer is denied below.
+        PermissionCatalog.REPOSITORIES_READ,
+        PermissionCatalog.REPOSITORIES_WRITE,
         PermissionCatalog.IDE_ACCESS,
         PermissionCatalog.PLUGINS_READ,
         PermissionCatalog.CONFIG_READ,

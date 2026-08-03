@@ -3,7 +3,7 @@
  *
  * Four things about this seam are load-bearing:
  *
- * 1. **`/me` answers 200 even when auth is DISABLED**, carrying the legacy
+ * 1. **`/me` answers 200 even when auth is DISABLED**, carrying a
  *    full-power principal (`auth_enabled: false`, `subject: "svc:legacy"`,
  *    `roles: ["admin"]`). That is what lets every consumer render
  *    unconditionally instead of branching on a feature flag.

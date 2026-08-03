@@ -25,7 +25,8 @@
  * span is hoisted back out of it, even though it can't fail on the actual
  * layout escape the way the live browser check did.
  */
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { SettingsSection } from "./SettingsSection";
@@ -65,7 +66,7 @@ describe("SettingsSection — sr-only live region containment", () => {
         advanced={false}
         secrets={{}}
         onChange={vi.fn()}
-        onSave={vi.fn().mockResolvedValue(undefined)}
+        onSave={vi.fn().mockResolvedValue(true)}
       />
     );
 
@@ -79,5 +80,42 @@ describe("SettingsSection — sr-only live region containment", () => {
     // escaping to the initial containing block (the document).
     const containingBlockAncestor = liveRegion?.parentElement;
     expect(containingBlockAncestor?.className).toContain("relative");
+  });
+});
+
+describe("SettingsSection — a failed save must not announce success", () => {
+  // Regression for the bug where `onSave` was typed `Promise<void>`: it
+  // resolved without throwing on a failed PATCH (`useConfig.savePatch`
+  // swallows the rejection and returns `null`), so `handleSave` stamped
+  // `savedAt` unconditionally. That announced "Saved" to screen readers and
+  // flipped `SecretField` into its post-save state (clearing whatever the
+  // user had just typed) even though nothing was persisted. `onSave` now
+  // resolves `false` on failure and `handleSave` must branch on it.
+  test("a rejected onSave leaves the 'Saved' text and live-region announcement absent", async () => {
+    const user = userEvent.setup();
+    render(
+      <SettingsSection
+        model={model}
+        sectionId="llm"
+        // Differs from `original` so the section is dirty and Save is enabled.
+        value={{ model: "gpt-5.5" }}
+        original={{ model: "gpt-5" }}
+        advanced={false}
+        secrets={{}}
+        onChange={vi.fn()}
+        onSave={vi.fn().mockResolvedValue(false)}
+      />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    // `handleSave`'s `finally` always runs, so wait for the saving spinner to
+    // clear rather than asserting immediately after the click.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument()
+    );
+
+    expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+    expect(document.querySelector('[aria-live="polite"].sr-only')?.textContent).toBe("");
   });
 });

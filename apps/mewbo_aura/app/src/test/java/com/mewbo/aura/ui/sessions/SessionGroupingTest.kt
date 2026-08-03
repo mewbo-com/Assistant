@@ -20,6 +20,8 @@ class SessionGroupingTest {
         id: String,
         updatedAt: String = "",
         createdAt: String = "2026-01-01T00:00:00+00:00",
+        pinned: Boolean = false,
+        pinnedAt: String? = null,
     ) = SessionSummary(
         sessionId = id,
         title = "Session $id",
@@ -30,6 +32,8 @@ class SessionGroupingTest {
         recoverable = true,
         createdAt = createdAt,
         updatedAt = updatedAt,
+        pinned = pinned,
+        pinnedAt = pinnedAt,
     )
 
     // Fixed "now": 2026-07-15T12:00:00Z. In UTC, today = 2026-07-15, so the previous-7-days
@@ -164,5 +168,56 @@ class SessionGroupingTest {
         assertEquals(listOf(SessionSectionHeader.TODAY), inPlusTwo.map { it.header })
 
         assertTrue(inUtc.single().header != inPlusTwo.single().header)
+    }
+
+    @Test
+    fun `a pinned session gets its own PINNED bucket ahead of every date bucket, regardless of age`() {
+        // Old enough to sort OLDER on recency alone — pinning must override that entirely.
+        val ancientPinned = session("a", updatedAt = "2020-01-01T00:00:00+00:00", pinned = true, pinnedAt = "2026-07-01T00:00:00+00:00")
+        val today = session("b", updatedAt = "2026-07-15T00:00:00+00:00")
+
+        val result = SessionGrouping.group(listOf(today, ancientPinned), now, utc)
+
+        assertEquals(listOf(SessionSectionHeader.PINNED, SessionSectionHeader.TODAY), result.map { it.header })
+        assertEquals(listOf(ancientPinned), result.first().sessions)
+    }
+
+    @Test
+    fun `a pinned session is excluded from date bucketing, never appearing twice`() {
+        val pinned = session("a", updatedAt = "2026-07-15T00:00:00+00:00", pinned = true, pinnedAt = "2026-07-10T00:00:00+00:00")
+
+        val result = SessionGrouping.group(listOf(pinned), now, utc)
+
+        assertEquals(listOf(SessionSectionHeader.PINNED), result.map { it.header })
+        assertEquals(1, result.flatMap { it.sessions }.size)
+    }
+
+    @Test
+    fun `pinned sessions order most-recently-pinned first`() {
+        val olderPin = session("a", pinned = true, pinnedAt = "2026-07-01T00:00:00+00:00")
+        val newerPin = session("b", pinned = true, pinnedAt = "2026-07-10T00:00:00+00:00")
+
+        val result = SessionGrouping.group(listOf(olderPin, newerPin), now, utc)
+
+        assertEquals(listOf(newerPin, olderPin), result.single().sessions)
+    }
+
+    @Test
+    fun `an unparseable pinnedAt sinks to the end of the pinned bucket rather than crashing`() {
+        val goodPin = session("a", pinned = true, pinnedAt = "2026-07-10T00:00:00+00:00")
+        val badPin = session("b", pinned = true, pinnedAt = "not-a-timestamp")
+
+        val result = SessionGrouping.group(listOf(badPin, goodPin), now, utc)
+
+        assertEquals(listOf(goodPin, badPin), result.single().sessions)
+    }
+
+    @Test
+    fun `no pinned sessions omits the PINNED bucket entirely`() {
+        val s = session("a", updatedAt = "2026-07-15T00:00:00+00:00")
+
+        val result = SessionGrouping.group(listOf(s), now, utc)
+
+        assertTrue(result.none { it.header == SessionSectionHeader.PINNED })
     }
 }

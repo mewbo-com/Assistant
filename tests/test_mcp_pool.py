@@ -126,10 +126,10 @@ class TestMCPConnectionPool:
     def test_refresh_prunes_servers_absent_in_new_config(self):
         """Switching project scope must drop servers from the previous config.
 
-        Regression guard for the bleed where /api/tools?project=B was
-        returning project-A's MCP tools because connect_all only adds
-        entries, never prunes. With refresh_if_config_changed, servers
-        missing from the new config must be disconnected and removed.
+        ``connect_all`` only adds entries, never prunes, so on its own
+        /api/tools?project=B returns project-A's MCP tools. With
+        refresh_if_config_changed, servers missing from the new config must be
+        disconnected and removed.
         """
 
         async def _run():

@@ -22,14 +22,13 @@ interface NotificationPanelProps {
 /**
  * Bell popover: a 320px surface listing every live notification.
  *
- * Typography here is deliberately flat. The panel previously ran FOUR sizes
- * (12 / 11 / 10 / 10px) inside one small popover, all at weight 500 — at that
- * scale a 1px step is invisible, so four sizes read as one blurry size and the
- * hierarchy did no work. It now uses exactly two adjacent steps (`text-xs` for
- * content, `text-2xs` for the metadata line) and lets WEIGHT and COLOUR carry
- * the hierarchy instead: title is medium/foreground, message is normal/muted,
- * status keeps medium plus its state colour, timestamp is normal/muted.
- * Adding a third size back is the regression to watch for.
+ * Typography here is deliberately flat: exactly two adjacent steps (`text-xs`
+ * for content, `text-2xs` for the metadata line), with WEIGHT and COLOUR
+ * carrying the hierarchy instead — title is medium/foreground, message is
+ * normal/muted, status keeps medium plus its state colour, timestamp is
+ * normal/muted. At this popover's scale a 1px size step is invisible, so a
+ * third size reads as noise rather than hierarchy; adding one back is the
+ * regression to watch for.
  */
 export function NotificationPanel({
   notifications,

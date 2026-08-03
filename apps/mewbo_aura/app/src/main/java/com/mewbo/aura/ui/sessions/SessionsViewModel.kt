@@ -37,7 +37,7 @@ class SessionsViewModel @Inject constructor(
     val uiState: StateFlow<SessionsUiState> = _uiState.asStateFlow()
 
     /**
-     * Recents scope filter (user directive 2026-07-03) — defaults to [RecentsFilter.MOBILE_ONLY] so
+     * Recents scope filter (user directive) — defaults to [RecentsFilter.MOBILE_ONLY] so
      * the rail shows only mobile-created sessions, the analogue of the web console's
      * `DEFAULT_VISIBLE_ORIGINS`. Held here rather than in [SessionsUiState] so it survives a refresh
      * (which replaces the state) and resets to the mobile-only default whenever the host recreates
@@ -103,6 +103,19 @@ class SessionsViewModel @Inject constructor(
     fun archiveSession(sessionId: String, onResult: (Boolean) -> Unit) {
         viewModelScope.launch {
             val success = sessionRepository.archiveSession(sessionId)
+            onResult(success)
+            if (success) refresh()
+        }
+    }
+
+    /**
+     * Pin/unpin, same immediate-then-reconcile shape as [archiveSession]:
+     * [SessionRepository.setPinned] updates the cached row in place (instant re-section into/out of
+     * [SessionSectionHeader.PINNED]), and this [refresh] afterward is server-truth reconciliation.
+     */
+    fun setPinned(sessionId: String, pinned: Boolean, onResult: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            val success = sessionRepository.setPinned(sessionId, pinned)
             onResult(success)
             if (success) refresh()
         }

@@ -1,22 +1,21 @@
 """Durable purpose-binding for a session — the spec every re-engage path reads.
 
-What a session is FOR (which surface created it, against which project/cwd, on
-what model ladder, under which tool ceiling and capabilities) used to live only
-as untyped ``context``-event keys that each re-engage site re-read by hand. One
-path — ``POST /sessions/<id>/query`` — never read them at all: it re-derived the
-model from config and then PERSISTED that default, so a console follow-up into a
-purpose-bound session arrived on a different model, with a different tool set, no
-playbook, and a cwd pointing at an empty per-session temp dir.
+What a session is FOR — which surface created it, against which project/cwd, on
+what model ladder, under which tool ceiling and capabilities — is first-class
+session state, not a set of untyped ``context``-event keys each re-engage site
+re-reads by hand. A site that re-derives one of them from config instead (and
+then PERSISTS that default) lands a console follow-up on a different model, with
+a different tool set, no playbook, and a cwd pointing at an empty per-session
+temp dir.
 
-:class:`SessionSpec` formalizes the convention the wiki-QA drive already
-established — persist the scope as first-class session state rather than as bare
-``start_async`` kwargs — instead of inventing a second one beside it. The spec is
-written INTO an ordinary ``context`` event that carries BOTH the loose legacy
-keys every existing reader still consumes (``model``/``mcp_tools``/
+:class:`SessionSpec` is that state, persisted rather than passed as bare
+``start_async`` kwargs. The spec is
+written INTO an ordinary ``context`` event that carries BOTH the loose
+keys every existing reader consumes (``model``/``mcp_tools``/
 ``strict_tool_scope``/``skill_instructions``/…) AND a typed ``session_spec``
 mirror. Writing the full payload is load-bearing, not tidiness: a context reader
 takes the most-recent event's payload VERBATIM, so an event carrying only the
-typed blob would blank every legacy field for ``/message``, ``/recover`` and the
+typed blob would blank every loose field for ``/message``, ``/recover`` and the
 trigger wake.
 
 The model owns the one decision that matters — :meth:`SessionSpec.merge_request_overrides`,
@@ -31,12 +30,13 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any, ClassVar
 
-from mewbo_core.session_provenance import SessionOrigin
+from mewbo_core.session.session_provenance import SessionOrigin
+from mewbo_core.session.session_store import SessionStoreBase
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # The context-payload key the typed mirror rides under. A session whose newest
-# context event carries this key is spec-bound; anything else is a legacy session
-# whose binding is reconstructed from the loose keys (``SessionSpec.from_context``).
+# context event carries this key is spec-bound; without it the binding is
+# reconstructed from the loose keys (``SessionSpec.from_context``).
 SPEC_CONTEXT_KEY = "session_spec"
 
 
@@ -119,6 +119,24 @@ class SessionSpec(BaseModel):
     # Capabilities that only mean anything with a human attached to the run: bound
     # on an interactive turn, stripped from every unattended fire.
     INTERACTIVE_ONLY_CAPABILITIES: ClassVar[frozenset[str]] = frozenset({"ask_user"})
+    # Capabilities that belong to what a session IS FOR rather than to whoever is
+    # driving this request, so they must survive a re-engage from any surface. A
+    # viewer re-engaging a wiki session still reasons about ``wiki``, and the
+    # client advertising `stlite,apps,ask_user,generative_ui` on every request
+    # would otherwise bury it — the advertisement is what a CLIENT can render, not
+    # what the session was created to do.
+    #
+    # Deliberately a CLOSED allowlist naming only the substrate suites, not
+    # "everything that is not a rendering capability". Widening a session's reach
+    # is the failure that matters here, so an unrecognised capability must fall on
+    # the side that grants nothing extra; a new substrate capability is expected to
+    # add itself here, exactly as it already must add itself to a plugin manifest.
+    # ``apps`` is NOT in this set even though it gates a plugin suite: the console
+    # advertises it on every request regardless of what the session is for (the
+    # same promiscuity that once made ``SessionOrigin`` file every ordinary chat
+    # under ``apps``), so treating it as session-owned would union it onto sessions
+    # that merely happened to be created from a browser.
+    SESSION_OWNED_CAPABILITIES: ClassVar[frozenset[str]] = frozenset({"wiki", "scg"})
 
     # field name → the loose ``context``-event key it has always been persisted
     # under. ONE vocabulary: the overrides parser, the persisted payload and the
@@ -226,12 +244,12 @@ class SessionSpec(BaseModel):
         origin: SessionOrigin | None = None,
         surface: str | None = None,
     ) -> SessionSpec:
-        """Reconstruct a binding from a legacy ``context`` payload's loose keys.
+        """Reconstruct a binding from a ``context`` payload's loose keys.
 
-        The fallback for every session created before the typed mirror existed, and
-        for the surfaces that still persist their scope as loose keys. Reads the SAME
-        keys the individual ``_extract_*`` readers do, so a legacy session's
-        reconstructed binding matches what those readers already resolved.
+        The fallback for a session carrying no typed mirror, and for the surfaces
+        that persist their scope as loose keys. Reads the SAME keys the individual
+        ``_extract_*`` readers do, so the reconstructed binding matches what those
+        readers already resolved.
         """
         payload = context_payload or {}
         blob = payload.get(SPEC_CONTEXT_KEY)
@@ -262,17 +280,31 @@ class SessionSpec(BaseModel):
         )
 
     @classmethod
-    def from_blob(cls, blob: dict[str, object]) -> SessionSpec:
+    def from_blob(
+        cls, blob: dict[str, object], *, origin: SessionOrigin | None = None
+    ) -> SessionSpec:
         """Parse a persisted typed mirror, tolerating a shape written by an older build.
 
         A stored spec is READ on the request path of an already-created session, so a
-        key this build no longer knows must never brick the session it describes —
+        key this build does not know must never brick the session it describes —
         unknown keys are dropped and the rest is honoured. Same reasoning as the
         system-instructions doc validating its template on WRITE rather than at
         definition: a stored artifact whose only reader is the surface that would let
         someone FIX it has to stay loadable.
+
+        *origin* OVERRIDES the blob's own stored value when given, rather than this
+        method re-deriving it (a pure model classmethod takes no store/tag access —
+        the clock/webhook-payload rule applies here too). ``SessionOrigin`` is
+        documented elsewhere as derived at read time and never stored, but a blob's
+        ``origin`` field is exactly a value stamped once at write time by whichever
+        classifier ran then: leaving it untouched freezes a session under a
+        classification a later classifier fix would otherwise correct for every
+        other session. Omit *origin* only for a caller with no tag/context source to
+        re-derive from (a bare unit test constructing a blob directly).
         """
         known = {key: value for key, value in blob.items() if key in cls.model_fields}
+        if origin is not None:
+            known["origin"] = origin
         return cls.model_validate(known)
 
     # ── binding semantics ───────────────────────────────────────────────────
@@ -347,18 +379,36 @@ class SessionSpec(BaseModel):
         return merged, tuple(refused)
 
     def run_capabilities(self, requested: Sequence[str] | None) -> tuple[str, ...] | None:
-        """Capabilities for ONE interactive turn: what the caller advertised, else the purpose.
+        """Capabilities for ONE turn: the purpose UNIONED with this caller's advertisement.
 
         An interactive client may legitimately advertise more than the purpose needs (a
         console declaring ``ask_user`` because a human is watching). That widening is
         turn-scoped by construction — it never reaches the spec, because ``capabilities``
         is not overridable — so it cannot leak into a later unattended fire, which reads
         :meth:`unattended_capabilities` instead.
+
+        **It is a union, not a replacement, and that is a capability-gate fix rather
+        than a preference.** ``client_capabilities`` carries two different kinds of
+        thing (see :attr:`SESSION_OWNED_CAPABILITIES`). Returning the advertisement
+        alone let a client that stamps a fixed rendering set on every request bury the
+        purpose: re-engaging a wiki session bound the console's four rendering
+        capabilities and NOT ``wiki``, so ``SessionToolRegistry.build_for`` selected no
+        ``wiki_*`` factory and the agent fell back to browsing the repository through
+        generic tools. Only the SESSION-OWNED half is carried across; a rendering
+        capability still comes solely from whoever is driving this request, so a
+        surface that cannot render one never inherits it from the spec.
         """
         advertised = self.normalize_ids(requested)
-        if advertised:
-            return advertised
-        return self.capabilities
+        if not advertised:
+            # Nothing advertised at all (an unattended fire, or a client that sends no
+            # header): the purpose is the only thing there is to bind.
+            return self.capabilities
+        owned = tuple(
+            cap for cap in (self.capabilities or ()) if cap in self.SESSION_OWNED_CAPABILITIES
+        )
+        # ``dict.fromkeys`` de-dupes while preserving order, so a client that already
+        # advertised the session-owned capability gets a byte-identical set back.
+        return tuple(dict.fromkeys((*owned, *advertised)))
 
     def unattended_capabilities(self) -> tuple[str, ...] | None:
         """Capabilities for a fire with nobody watching — re-derived from the purpose.
@@ -381,7 +431,7 @@ class SessionSpec(BaseModel):
     def to_context_payload(self, *, capabilities: Sequence[str] | None = None) -> dict[str, object]:
         """The ``context``-event payload that persists this binding.
 
-        Carries the loose legacy keys AND the typed mirror, because a context reader
+        Carries the loose keys AND the typed mirror, because a context reader
         takes the newest event's payload VERBATIM — a blob-only event would blank
         ``model``/``mcp_tools``/``strict_tool_scope`` for ``/message``, ``/recover`` and
         the trigger wake. *capabilities* overrides only the loose ``client_capabilities``
@@ -523,45 +573,203 @@ class SessionSpecStore:
         *,
         load_transcript: Callable[[str], list[dict[str, Any]]],
         append_context_event: Callable[[str, dict[str, object]], None],
+        load_tags: Callable[[str], Sequence[str]] | None = None,
+        latest_event_of_type: (
+            Callable[[str, str, str | None], dict[str, Any] | None] | None
+        ) = None,
     ) -> None:
-        """Bind the two transcript operations this store needs."""
+        """Bind the transcript operations this store needs.
+
+        *load_tags* is OPTIONAL and defaults to "this session has no tags", so a
+        caller driving the store off a bare event list (a test) needs no tag
+        source at all. A production caller SHOULD supply it — without it a
+        session whose binding has to be reconstructed is classified from its
+        context alone, which is exactly the blind spot :meth:`origin_for` exists
+        to close.
+
+        *latest_event_of_type* is the store's type-bounded read
+        (``SessionStoreBase.latest_event_of_type``), and it is what makes
+        :meth:`load` cost one document instead of a whole transcript. It is
+        OPTIONAL for the same reason *load_tags* is: this class is documented as
+        drivable off a bare event list with no session store at all, and a
+        caller in that mode has no such primitive to hand over. Absent, the
+        binding is read by scanning the transcript the caller DID supply —
+        the identical answer at the base driver's honest ``O(one session)``,
+        which is exactly the split ``SessionStoreBase`` publishes between its
+        own template and the Mongo override. Refusing instead would make the
+        documented in-memory mode unusable; degrading to a slower read of the
+        same rule cannot give a wrong answer, and the run path's wiring is
+        pinned by a test that counts transcript reads rather than left to
+        whoever next builds one of these.
+        """
         self._load_transcript = load_transcript
         self._append_context_event = append_context_event
+        self._load_tags = load_tags
+        self._latest_event_of_type = latest_event_of_type
+
+    def origin_for(
+        self, session_id: str, context_payload: dict[str, object] | None
+    ) -> SessionOrigin:
+        """Classify a session's purpose from its TAGS as well as its context.
+
+        Tags win over context (the classifier's own rule), so this reads them
+        rather than classifying from the payload alone — a wiki/search/apps
+        surface tags at creation and may write no capability at all, and the
+        capabilities a client DOES advertise describe what it can render, not
+        what the session is for. Classifying context-only therefore files a real
+        Apps or wiki session under ``user``, which un-binds it: ``purpose_bound``
+        goes false and the whole ``OVERRIDABLE_WHEN_UNBOUND`` tier re-opens.
+        """
+        tags: list[str] = []
+        if self._load_tags is not None:
+            try:
+                tags = [str(tag) for tag in self._load_tags(session_id)]
+            except Exception:  # noqa: BLE001 - a tag read must never brick a session load
+                tags = []
+        return SessionOrigin.classify(tags, context_payload or {})
 
     def load(self, session_id: str) -> SessionSpec:
-        """The session's binding: the newest typed mirror, else the legacy reconstruction.
+        """The session's binding: the newest typed mirror, else reconstruction from loose keys.
 
-        Scans back for a context event carrying the mirror and falls back to the newest
-        context payload's loose keys. That fallback deliberately reads ONE payload rather
-        than merging every context event: merging would resurrect a field the user
-        cleared (a removed project sticking forever), the same reason the generic context
-        reader never merges either.
+        ``O(1)`` on the Mongo driver, ``O(one session)`` on the base store or when no
+        type-bounded reader was injected. This is the hottest read in the class — every
+        ``/query``, ``/message``, ``/recover`` and unattended trigger fire loads the
+        binding first — so it asks for the ONE context event it needs rather than a
+        transcript. Measured on the deployed store's largest session: 10,296 documents /
+        14.5 MB against 1 document / 0.2 KB, with ``explain`` reporting
+        ``docsExamined 1`` off the existing ``ix_events_type_session_ts``.
+
+        Two reads, and the second only fires when the first misses: the newest context
+        event CARRYING the mirror, then the newest context event at all. The narrowing is
+        by TYPE, never by a count — the newest context event sits arbitrarily far back
+        after a long run, and a window that misses it would report "no binding", which
+        un-binds a purpose-bound session and re-opens the whole
+        ``OVERRIDABLE_WHEN_UNBOUND`` tier. That is a wrong ANSWER, not a slow one.
+
+        The fallback deliberately reads ONE payload rather than merging every context
+        event: merging would resurrect a field the user cleared (a removed project
+        sticking forever), the same reason the generic context reader never merges
+        either.
+
+        The typed mirror's ``origin`` is RE-CLASSIFIED here too, through the same
+        :meth:`origin_for` the reconstruction legs use, rather than trusted verbatim
+        off the blob. ``SessionOrigin`` is derived, never stored — a blob's ``origin``
+        field is only ever a value some earlier classifier stamped at write time, and
+        trusting it verbatim would freeze a session under a stale classification the
+        NEXT classifier fix corrects for every session reconstructing from context but
+        not for this one. Every other field on the mirror stays authoritative; only
+        this one field is re-derived on every read, like the rest of the binding.
+
+        A value under ``SPEC_CONTEXT_KEY`` that is present but NOT a dict reconstructs
+        from the payload carrying it. Nothing writes such a value —
+        :meth:`SessionSpec.to_context_payload` always stores a dict — but the narrowing
+        the store applies is "the key is SET", deliberately coarser than "the key holds
+        a blob"; a store cannot know what a caller's key means, so deciding what a
+        non-blob value means belongs here.
         """
-        newest_context: dict[str, object] | None = None
-        for event in reversed(self._transcript(session_id)):
-            if event.get("type") != "context":
-                continue
-            payload = event.get("payload")
-            if not isinstance(payload, dict):
-                continue
-            if isinstance(payload.get(SPEC_CONTEXT_KEY), dict):
-                try:
-                    return SessionSpec.from_blob(payload[SPEC_CONTEXT_KEY])
-                except Exception:  # noqa: BLE001 - a stored spec must never brick its session
-                    return SessionSpec.from_context(payload)
-            if newest_context is None:
-                newest_context = payload
-        return SessionSpec.from_context(newest_context)
+        payload = self._payload_of(
+            self._latest_context(session_id, payload_key=SPEC_CONTEXT_KEY)
+        )
+        if payload is None:
+            return self._reconstruct(
+                session_id, self._payload_of(self._latest_context(session_id))
+            )
+        blob = payload.get(SPEC_CONTEXT_KEY)
+        if isinstance(blob, dict):
+            try:
+                return SessionSpec.from_blob(
+                    blob, origin=self.origin_for(session_id, payload)
+                )
+            except Exception:  # noqa: BLE001 - a stored spec must never brick its session
+                return self._reconstruct(session_id, payload)
+        return self._reconstruct(session_id, payload)
+
+    def has_typed_mirror(self, session_id: str) -> bool:
+        """Whether a durable binding was RECORDED, vs one reconstructed from context.
+
+        ``O(1)`` on the Mongo driver, ``O(one session)`` otherwise — the same
+        bounded read :meth:`load` opens with, so the projection's ``source`` field
+        and the binding it describes can never disagree about whether a mirror
+        exists. It lives here rather than beside the route because it reads state
+        this store owns, and because a route asking the question its own way is
+        how the two came to answer from different scans.
+
+        "Any context event carries a mirror" and "the NEWEST context event
+        carrying a mirror exists" are the same question — a bounded read answers
+        it without materialising the transcript to prove a single existence.
+        """
+        return self._latest_context(session_id, payload_key=SPEC_CONTEXT_KEY) is not None
 
     def save(
         self, session_id: str, spec: SessionSpec, *, capabilities: Sequence[str] | None = None
     ) -> None:
-        """Persist *spec* as a full context event (typed mirror + legacy loose keys)."""
+        """Persist *spec* as a full context event (typed mirror + loose keys)."""
         self._append_context_event(session_id, spec.to_context_payload(capabilities=capabilities))
 
-    def _transcript(self, session_id: str) -> list[dict[str, Any]]:
-        """Load the transcript, degrading to empty rather than failing a request path."""
+    def _reconstruct(self, session_id: str, payload: dict[str, object] | None) -> SessionSpec:
+        """Rebuild a spec-less session's binding, classified from tags + loose context keys.
+
+        Strips the typed-mirror key even when present: the corrupt-blob leg of
+        :meth:`load` calls this with the SAME payload whose ``SPEC_CONTEXT_KEY``
+        blob just failed to parse, and ``SessionSpec.from_context`` re-checks that
+        key and re-enters ``from_blob`` on it otherwise — the same parse, the same
+        exception, this time uncaught. Excluding the key here is what makes the
+        fallback actually take the loose-key path rather than re-failing the parse
+        it exists to recover from.
+        """
+        loose = {
+            key: value for key, value in (payload or {}).items() if key != SPEC_CONTEXT_KEY
+        }
+        return SessionSpec.from_context(loose, origin=self.origin_for(session_id, payload))
+
+    def _latest_context(
+        self, session_id: str, *, payload_key: str | None = None
+    ) -> dict[str, Any] | None:
+        """The newest ``context`` event, optionally one whose payload sets *payload_key*.
+
+        ``O(1)`` through an injected store reader, ``O(one session)`` through the
+        transcript fallback. ONE seam so :meth:`load` is written once against one
+        question — a second copy of the binding's selection rule, one per source,
+        is how the fast path and the degraded path come to disagree about which
+        event IS the binding.
+
+        The fallback restates nothing: it walks newest-first and defers the
+        "is this key set" judgement to ``SessionStoreBase.payload_key_is_set``,
+        the published spelling both store drivers already implement, so all
+        three readers narrow identically.
+
+        Degrades to ``None`` rather than raising — an unreadable transcript means
+        "no binding yet", which is the same contract the transcript read it
+        replaces already had on this path.
+        """
+        if self._latest_event_of_type is not None:
+            try:
+                return self._latest_event_of_type(session_id, "context", payload_key)
+            except Exception:  # noqa: BLE001 - an unreadable store means "no binding yet"
+                return None
         try:
-            return self._load_transcript(session_id)
+            events = self._load_transcript(session_id)
         except Exception:  # noqa: BLE001 - an unreadable transcript means "no binding yet"
-            return []
+            return None
+        for event in reversed(events):
+            if event.get("type") != "context":
+                continue
+            if payload_key is not None and not SessionStoreBase.payload_key_is_set(
+                event, payload_key
+            ):
+                continue
+            return event
+        return None
+
+    @staticmethod
+    def _payload_of(event: dict[str, Any] | None) -> dict[str, object] | None:
+        """An event's payload when it is a usable mapping, else ``None``.
+
+        A payload that is not a dict carries no binding and must not be handed to
+        :meth:`_reconstruct` as if it did — ``None`` is what "this session has no
+        context to rebuild from" has always looked like here.
+        """
+        if event is None:
+            return None
+        payload = event.get("payload")
+        return payload if isinstance(payload, dict) else None

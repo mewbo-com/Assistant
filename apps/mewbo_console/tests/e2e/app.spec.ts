@@ -160,7 +160,7 @@ test("create session with Hi", async ({ page }) => {
 
 test("create session with tool-call query", async ({ page }) => {
   const errors = trackConsoleErrors(page);
-  const query = "Search the internet for is Krishnakanth Alagiri is?";
+  const query = "Search the internet for who won the last chess world championship?";
   await setupApiRoutes(page, {
     sessions: [],
     notifications: [],

@@ -3,9 +3,9 @@
 import sys
 import types
 
-from mewbo_core import llm as llm_module
 from mewbo_core.config import LLMConfig, set_config_override
-from mewbo_core.llm import (
+from mewbo_core.llm import llm as llm_module
+from mewbo_core.llm.llm import (
     build_chat_model,
     model_supports_prompt_caching,
     model_supports_reasoning_effort,
@@ -47,6 +47,33 @@ def test_build_chat_model_includes_reasoning_effort(monkeypatch):
     # drop_params must be inside model_kwargs to reach litellm.acompletion();
     # ChatLiteLLM has no drop_params field so top-level kwarg is silently ignored.
     assert model_kwargs.get("drop_params") is True
+
+
+def test_build_chat_model_enables_streaming():
+    """The model Mewbo builds must actually stream — asserted on the REAL class.
+
+    Deliberately not stubbed: the defect this pins was invisible to a stub,
+    because it lived in ``ChatLiteLLM``'s own constructor. It puts ``streaming``
+    into ``model_fields_set`` with ``False``, and langchain-core's
+    ``_streaming_disabled`` reads that as an opt-out that OVERRIDES an explicit
+    ``stream=True`` — so ``astream()`` degraded to one buffered ``ainvoke`` while
+    a hand-built streaming stub kept every other test green.
+
+    Three behaviours ride on this, and all three were dead: the transport bound
+    reverts to an inter-chunk gap instead of capping total generation time, the
+    first-token and stream-idle deadlines arm because chunk progress is reported,
+    and ``agent_message_delta`` reaches the CLI and console token streams.
+    """
+    set_config_override({"llm": {"reasoning_effort": "", "reasoning_effort_models": []}})
+
+    model = build_chat_model(model_name="gpt-4o-mini", openai_api_base=None)
+    inner = getattr(model, "_llm", model)
+
+    assert inner.streaming is True
+    # The predicates langchain-core actually consults. Asserting the field alone
+    # would have passed even while streaming was disabled.
+    assert inner._streaming_disabled(stream=True) is False
+    assert inner._should_stream(async_api=True) is True
 
 
 def test_build_chat_model_prefixes_openai_model(monkeypatch):
@@ -550,11 +577,13 @@ def test_build_chat_model_omits_cache_injection_points_for_unsupported(monkeypat
 # call), so they exercise the exact adapter path production uses.
 #
 # Ground truth at the installed stack (litellm 1.88.0, langchain-litellm 0.6.6,
-# langchain-core 1.4.1): ``bound.astream()`` falls back to ``ainvoke`` because
-# langchain-core disables streaming when ``streaming`` is in ``model_fields_set``
-# and False — so the non-streaming path is what fires in production. The
-# streaming test forces ``streaming=True`` to cover the other path a different
-# langchain-core version would take.
+# langchain-core 1.4.1): ``build_chat_model`` sets ``streaming=True``, so the
+# STREAMING path is what fires in production. It has to be set explicitly —
+# ``ChatLiteLLM``'s constructor puts ``streaming`` into ``model_fields_set`` with
+# ``False``, and langchain-core reads that as an opt-out that overrides even an
+# explicit ``stream=True``, which silently degraded every call to one buffered
+# ``ainvoke``. Both paths are still covered here: a caller may pass
+# ``stream=False``, and the normalizer has to hold either way.
 _HIDDEN_USAGE = (11, 7, 18)  # prompt, completion, total
 
 
@@ -646,8 +675,8 @@ def _usage_metadata_from_astream(model):
 def test_hidden_usage_lost_without_normalizer_nonstream():
     """Reproduce: usage stranded in _hidden_params reads as zero tokens.
 
-    This is the production path — ``astream`` falls back to ``ainvoke`` at the
-    installed langchain-core version.
+    The buffered path, which a caller still reaches by passing ``stream=False``.
+    Production streams; the normalizer must cover both.
     """
     model = _real_chat_model(streaming=False)
     model.client = _fake_litellm_client(
@@ -709,3 +738,50 @@ def test_build_chat_model_installs_usage_normalizer():
     set_config_override({"llm": {"api_base": "", "api_key": ""}})
     model = build_chat_model(model_name="openai/some-proxy-model", openai_api_base=None)
     assert isinstance(model.client, llm_module._UsageNormalizingLiteLLM)
+
+
+def test_proxy_registration_forces_the_openai_provider(monkeypatch):
+    """A proxy-reported provider must never reach the registered entry.
+
+    Every route is reached through the proxy as an OpenAI-compatible endpoint,
+    so the catalogue key is ``openai/<name>``. The proxy reports the provider it
+    uses to reach the model upstream — ``anthropic`` for a Claude-backed route —
+    and storing that alongside an ``openai/`` key makes the lookup reject its own
+    record, because it infers the provider from the prefix. That mismatch
+    resolved the model to the default window on the deployed stack while a
+    synthetic fixture that happened to say ``openai`` passed locally.
+    """
+    import httpx
+    import litellm
+    from mewbo_core.llm import llm as llm_module
+
+    class _Resp:
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        @staticmethod
+        def json() -> dict:
+            return {
+                "data": [
+                    {
+                        "model_name": "anthropic-glm-5.2[1m]",
+                        # As the proxy really reports it.
+                        "model_info": {
+                            "max_input_tokens": 1048576,
+                            "litellm_provider": "anthropic",
+                        },
+                    }
+                ]
+            }
+
+    # ``httpx`` is imported inside the function, so the module attribute is the
+    # real one — patch there rather than on ``llm_module``.
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
+    llm_module._REGISTERED_PROXY_BASES.discard("http://proxy/v1")
+
+    assert llm_module.register_proxy_model_capabilities("http://proxy/v1", "k") == 1
+    assert litellm.model_cost["openai/anthropic-glm-5.2[1m]"]["litellm_provider"] == "openai"
+    assert (
+        litellm.get_model_info("openai/anthropic-glm-5.2[1m]")["max_input_tokens"] == 1048576
+    )

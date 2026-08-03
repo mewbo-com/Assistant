@@ -9,7 +9,7 @@
  *
  * ## The auth-disabled contract
  *
- * With auth off, `/me` returns the legacy full-power principal, so `session`
+ * With auth off, `/me` returns a full-power principal, so `session`
  * is non-null, `authEnabled` is false, and `can()` answers true for everything.
  * Consumers therefore render exactly as they did before this layer existed —
  * no feature flag, no branch, no second code path to keep alive. A consumer

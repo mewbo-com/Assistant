@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass
 
 import pytest
-from mewbo_core.commands import (
+from mewbo_core.session.commands import (
     COMMANDS,
     CommandContext,
     CommandError,
@@ -17,7 +17,7 @@ from mewbo_core.commands import (
 
 
 def _make_ctx(tmp_path) -> CommandContext:
-    from mewbo_core.session_store import create_session_store
+    from mewbo_core.session.session_store import create_session_store
 
     store = create_session_store(root_dir=str(tmp_path))
     sid = store.create_session()
@@ -222,7 +222,7 @@ def test_compact_returns_transcript_render_with_short_body(
     full summary in metadata. The summary itself is the ``context_compacted``
     event recorded by ``record_compaction`` — clients render that via their
     compaction log component instead of dumping it into the chat."""
-    from mewbo_core.compact import CompactionMode
+    from mewbo_core.session.compact import CompactionMode
 
     @dataclass
     class FakeCompactionResult:

@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """FleetPanel — the selectable hypervisor fleet.
 
-Replaces the read-only fleet tree (the old ``AgentPanel``, which dumped each
-sub-agent's tool-call *names*). Every agent in the hypervisor tree — root plus
-every sub-agent / parallel agent — is a SELECTABLE row whose content is a
-compact one-glance summary, never a tool-name dump::
+Every agent in the hypervisor tree — root plus every sub-agent / parallel
+agent — is a SELECTABLE row whose content is a compact one-glance summary,
+never a dump of the sub-agent's tool-call names::
 
     <glyph> <label/type> · <model> · <N tools> · <elapsed> · <in→out tokens>
 

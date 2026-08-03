@@ -75,11 +75,11 @@ export function SearchSuggestions({
             {filtered.map((p, i) => (
               // A recent-query suggestion REPLAYS its stored run (GET snapshot)
               // when it has a run_id + a replay handler — never a fresh POST.
-              // Falls back to pre-filling a new run for legacy entries.
+              // Falls back to pre-filling a new run for entries with no run_id.
               // value/key must be UNIQUE per entry (run_id, else `<q>-<index>`):
               // cmdk identifies items by `value`, so a shared `p.q` made every
               // rerun of a query hover/select as one. Duplicates are already
-              // gone (dedupePastQueries), so the index is only a legacy fallback.
+              // gone (dedupePastQueries), so the index is only a fallback.
               <CommandItem
                 key={pastQueryKey(p, i)}
                 value={pastQueryKey(p, i)}

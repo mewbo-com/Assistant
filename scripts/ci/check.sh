@@ -23,7 +23,10 @@ done <<< "${changed_files}"
 # Run Python checks when Python files changed (or when detection yields nothing).
 if [[ "${has_python}" == true ]] || [[ -z "${changed_files}" ]]; then
   echo "==> Running Python checks..."
-  uv run ruff format --check .
+  # Mirrors the Python lint gate exactly: `ruff check` + mypy. Formatting is not
+  # enforced anywhere in CI and the tree is not ruff-format clean, so a
+  # `ruff format --check` here fails on hundreds of untouched files and makes
+  # this script unrunnable rather than protective.
   uv run ruff check .
   uv run mypy
   uv run pytest

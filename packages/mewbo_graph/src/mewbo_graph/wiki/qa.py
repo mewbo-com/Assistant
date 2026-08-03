@@ -22,10 +22,10 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from mewbo_core.common import get_logger
-from mewbo_core.skills import _slugify_skill_name as _slugify
+from mewbo_core.tooling.skills import _slugify_skill_name as _slugify
 
 from mewbo_graph.wiki.memory_types import MAX_INSIGHT_CHARS
-from mewbo_graph.wiki.types import QaAnswer
+from mewbo_graph.wiki.types import CommitScope, QaAnswer
 
 if TYPE_CHECKING:
     from mewbo_graph.wiki.store import WikiStoreBase
@@ -53,22 +53,45 @@ class QaFinalizer:
 
     _TERMINAL: frozenset[str] = frozenset({"complete", "cancelled", "error"})
 
-    @staticmethod
-    def current_turn_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Events belonging to the MOST RECENT turn — after the last ``meta`` event.
+    @classmethod
+    def current_turn_events(cls, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Events belonging to the MOST RECENT turn of the append-only log.
 
-        A continued answer (:meth:`WikiQaSession.follow_up`) re-emits
-        ``meta`` at the start of every turn, so it is already a reliable turn
-        boundary on the append-only log — no new event type needed. Reconciliation
-        (block/accessed-source folding, terminal idempotency checks) MUST scope to
-        this slice: without it, a later turn's ``block_open`` events collide BY
-        INDEX with an earlier turn's in the cumulative log, corrupting both.
+        THE turn-boundary rule — every consumer (this class's reconciliation AND
+        ``wiki_emit_answer``'s atomicity guard) asks HERE rather than deriving its
+        own, because the two deriving it separately is precisely how a delivered
+        answer got discarded. A turn opens two ways:
+
+        * a ``meta`` event — a NEW question (:meth:`WikiQaSession.start` /
+          ``follow_up`` emit one per turn), which opens a turn outright; and
+        * an answer landing AFTER a terminal verdict — a re-drive of the SAME
+          question (a recovery ``continue`` on a session that failed) re-engages
+          the existing run and emits no ``meta`` of its own, so without this arm
+          its slice still carried the previous run's terminal ``error``, the
+          idempotency guard below matched it, and the six blocks it had just
+          written were never reconciled onto the snapshot.
+
+        A terminal event alone does NOT open the next turn: the boundary moves
+        only once a ``block_open`` actually follows one, so the re-drive's own
+        probe ``access`` events (which land between the verdict and the emit) stay
+        inside the slice they belong to, and a straggler event arriving after a
+        clean ``complete`` cannot re-open a settled turn and get it re-stamped.
+
+        Scoping is load-bearing, not tidiness: every turn restarts block indices
+        at 0, so an unscoped fold collides a later turn's blocks BY INDEX with an
+        earlier turn's and corrupts both.
         """
-        last_meta_idx = -1
+        start = 0
+        reopen_at = -1  # index just past the last terminal — armed, not yet taken
         for i, ev in enumerate(events):
-            if ev.get("type") == "meta":
-                last_meta_idx = i
-        return events[last_meta_idx + 1 :] if last_meta_idx >= 0 else events
+            kind = ev.get("type")
+            if kind == "meta":
+                start, reopen_at = i + 1, -1
+            elif kind in cls._TERMINAL:
+                reopen_at = i + 1
+            elif kind == "block_open" and reopen_at >= 0:
+                start, reopen_at = reopen_at, -1
+        return events[start:]
 
     @classmethod
     def close(cls, store: WikiStoreBase, answer_id: str, error: str | None = None) -> bool:
@@ -82,7 +105,10 @@ class QaFinalizer:
         """
         events = cls.current_turn_events(store.load_qa_events(answer_id))
         if any(ev.get("type") in cls._TERMINAL for ev in events):
-            return False  # already terminal — idempotent
+            # Already terminal — idempotent. Scoped to THIS turn, so an earlier
+            # run's verdict never vetoes a later run's success, while the current
+            # turn's own ``complete`` still short-circuits a second close.
+            return False
 
         blocks = cls._blocks_from_events(events)
         if not blocks and not error:
@@ -213,8 +239,8 @@ class QaFinalizer:
         (best score wins), orders scored hits by descending score with the
         unscored entries after, and caps to the configured top-N — so the trail
         stays a tight, high-signal list instead of the full unranked
-        graph-navigation set. Backward-tolerant: a legacy event carrying bare
-        ``refs`` strings folds as unscored entries.
+        graph-navigation set. An event carrying bare ``refs`` strings instead
+        of ``records`` folds as unscored entries.
         """
         from mewbo_graph.wiki.qa_access import QaAccessRecord  # noqa: PLC0415
 
@@ -517,7 +543,15 @@ class AccessedSourceResolver:
             entity_key_for_node,
         )
 
-        key_by_node = {n.node_id: entity_key_for_node(n) for n in store.query_graph(slug)}
+        # Unscoped deliberately: these refs were recorded by earlier sessions,
+        # and a node id embeds the symbol's byte offset, so any edit since then
+        # re-keyed it out of the live generation. Scoping here would turn a
+        # resolvable historical citation into an ``unknown(...)`` label — the
+        # same reason ``CodeStructureProvider.entity_key_of`` reads the union.
+        key_by_node = {
+            n.node_id: entity_key_for_node(n)
+            for n in store.query_graph(slug, scope=CommitScope.every())
+        }
         return [cls._resolve_one(store, slug, r, key_by_node) for r in out]
 
     @staticmethod

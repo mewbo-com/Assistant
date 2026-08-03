@@ -150,7 +150,7 @@ def test_settings_round_trip(store) -> None:
 
 
 def test_settings_absent_reads_none(store) -> None:
-    """A project onboarded before the record existed has none — the NORMAL state."""
+    """A project first indexed before the record existed has none — the NORMAL state."""
     assert store.get_project_settings(SLUG) is None
 
 
@@ -230,11 +230,11 @@ def test_update_project_with_no_writable_field_is_a_noop(store) -> None:
 
 
 def test_finalize_does_not_wipe_an_edited_desc(tmp_path: Path) -> None:
-    """THE regression this feature exists to prevent.
+    """A user's edited description survives the next reindex.
 
     ``Project`` is rebuilt WHOLESALE at every finalize, and the description
-    normally comes from the platform API — so without the read-preserve seam a
-    user's edited description is silently overwritten on the next reindex.
+    normally comes from the platform API — so without the read-preserve seam the
+    edit is silently overwritten.
     """
     import mewbo_graph.plugins.wiki.finalize as mod
     from mewbo_graph.plugins.wiki.finalize import WikiFinalizeTool
@@ -349,7 +349,7 @@ def test_refresh_prefers_the_settings_record_over_the_job_sidecars(tmp_path: Pat
     """An edit is only real if the next index actually runs with it."""
     store = JsonWikiStore(root_dir=tmp_path)
     store.create_project(_project())
-    # A stale sidecar from the original onboarding.
+    # A stale sidecar from the original index.
     store.create_job(
         IndexingJob(
             job_id="old-job", slug=SLUG, status="complete",
@@ -418,7 +418,7 @@ def test_legacy_submission_scan_orders_by_phase_not_by_uuid(tmp_path: Path) -> N
 
 
 def test_start_seeds_the_settings_record(tmp_path: Path) -> None:
-    """Onboarding materialises the edit target, so GET settings works immediately."""
+    """The first index materialises the edit target, so GET settings works immediately."""
     store = JsonWikiStore(root_dir=tmp_path)
     runtime = MagicMock()
     runtime.wiki_store = store

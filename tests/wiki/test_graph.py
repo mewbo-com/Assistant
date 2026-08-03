@@ -92,12 +92,12 @@ def test_stable_node_id_deterministic(graph):
 #
 # ``QueryCursor.captures()`` groups matches per capture NAME, but the per-name
 # lists are NOT guaranteed to be mutually index-aligned — their order varies
-# run-to-run. ``_extract`` used to ``zip(captures["class.def"], captures
-# ["class.name"])``, which silently attached a node's name to the WRONG def's
-# byte range whenever the two lists came back in different orders (corrupting the
-# graph + any downstream resolver that matches on name). The fix orders each list
-# by start byte before zipping; this test forces the worst-case misalignment
-# (defs descending, names ascending) so it fails deterministically without it.
+# run-to-run. A bare ``zip(captures["class.def"], captures["class.name"])``
+# silently attaches a node's name to the WRONG def's byte range whenever the two
+# lists come back in different orders, corrupting the graph and any downstream
+# resolver that matches on name. ``_extract`` orders each list by start byte
+# before zipping; this test forces the worst-case misalignment (defs descending,
+# names ascending) so it fails deterministically without that ordering.
 
 _PAIR_SRC = b"""\
 class Base:
@@ -213,4 +213,44 @@ def test_parse_file_skips_unsupported_extension(graph, tmp_path):
     f.write_text("# nothing here")
     result = graph.parse_file(slug="x/y", file_path=f, repo_root=tmp_path)
     assert result.skipped == ["x.md"]
+    assert result.nodes == []
+
+
+def test_parse_file_skips_minified_basename(graph, tmp_path):
+    f = tmp_path / "bundle.min.js"
+    f.write_text("function a(){return 1}\n")
+    result = graph.parse_file(slug="x/y", file_path=f, repo_root=tmp_path)
+    assert result.skipped == ["bundle.min.js"]
+    assert result.nodes == []
+
+
+def test_parse_file_skips_minified_by_line_length(graph, tmp_path):
+    """A single enormous line is minification's mechanical signature.
+
+    No `.min.` marker in the name here — the exclusion must fire on shape
+    alone, since a real bundle's basename convention is not guaranteed.
+    """
+    f = tmp_path / "generated_but_not_marked.js"
+    f.write_text("function longFn(){" + "a" * 2000 + ";return 1}\n")
+    result = graph.parse_file(slug="x/y", file_path=f, repo_root=tmp_path)
+    assert result.skipped == ["generated_but_not_marked.js"]
+    assert result.nodes == []
+
+
+def test_parse_file_does_not_flag_real_source_as_minified(graph, tmp_path):
+    """A normal file with ordinary line lengths must parse as usual."""
+    f = tmp_path / "normal.js"
+    f.write_text("function plainFn() {\n  return 1;\n}\n")
+    result = graph.parse_file(slug="x/y", file_path=f, repo_root=tmp_path)
+    assert result.skipped == []
+    assert {n.name for n in result.nodes if n.type != "File"} == {"plainFn"}
+
+
+def test_parse_file_skips_vendored_directory(graph, tmp_path):
+    vendor_dir = tmp_path / "packages" / "mewbo_tools" / "vendor" / "aider"
+    vendor_dir.mkdir(parents=True)
+    f = vendor_dir / "io.py"
+    f.write_text("def helper():\n    pass\n")
+    result = graph.parse_file(slug="x/y", file_path=f, repo_root=tmp_path)
+    assert result.skipped == [str(Path("packages/mewbo_tools/vendor/aider/io.py"))]
     assert result.nodes == []

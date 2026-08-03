@@ -7,8 +7,8 @@ import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from mewbo_core.key_store_mongo import MongoKeyStore
-from mewbo_core.session_store import SessionStoreBase
+from mewbo_core.secrets.key_store_mongo import MongoKeyStore
+from mewbo_core.session.session_store import SessionStoreBase
 from mewbo_core.triggers.store import TriggerStoreBase
 
 from mewbo_demo_seeder.models import SeedApiKey, SeedBundle, SeedSession, SeedTrigger
@@ -101,7 +101,7 @@ class DemoSeeder:
             ts = start + timedelta(seconds=event.at_seconds)
             # ``append_event`` stamps its own ts UNLESS the event carries one; the
             # rebased ts we pass overrides it (record = {"ts": now, **event}), which
-            # is what gives a seeded transcript historical timestamps.
+            # is what gives a seeded transcript back-dated timestamps.
             self._sessions.append_event(
                 sid,
                 event.to_event(

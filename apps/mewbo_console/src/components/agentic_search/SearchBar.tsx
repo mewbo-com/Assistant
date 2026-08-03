@@ -18,8 +18,8 @@ interface SearchBarProps {
   onChange: (value: string) => void
   onSubmit: (value: string) => void
   /** Replay a stored run by id (GET snapshot) — past-query suggestions use this
-   *  instead of re-running. Optional so legacy call sites stay valid; when
-   *  absent a past-query item falls back to pre-filling a fresh run. */
+   *  instead of re-running. Optional; when absent a past-query item falls
+   *  back to pre-filling a fresh run. */
   onReplay?: (runId: string) => void
   workspace: Workspace
   workspaces: Workspace[]
@@ -36,7 +36,7 @@ interface SearchBarProps {
   sources?: SourceCatalogEntry[]
   onOpenConfig?: (workspace: Workspace) => void
   /** Fast/Auto/Deep budget + model override — rendered (in the scope control)
-   *  when provided; absent for legacy call sites that don't wire run config. */
+   *  only when provided. */
   scope?: SearchScope
 }
 
@@ -154,8 +154,7 @@ export function SearchBar({
 
   // Toolbar — exactly two controls, shared by both variants: the workspace
   // context pill and the progressively-disclosed scope control. The scope
-  // control renders only when the run-config props are present (legacy call
-  // sites that don't wire tier/model stay valid).
+  // control renders only when the run-config props are present.
   const toolbarLeft = (
     <>
       <WorkspacePill
@@ -225,10 +224,10 @@ export function SearchBar({
               "block w-full bg-transparent border-0 outline-none px-1 text-[hsl(var(--foreground))] placeholder:text-[hsl(var(--muted-foreground))]",
               // `composerInputCls()` — always `text-field`, a composer
               // input's size full stop, hero-vs-compact is padding only.
-              // This was previously a raw `text-base`/`text-sm` ternary, both
-              // under the 16px iOS zoom floor, and invisible to the
-              // typography guard test because cmdk's `<Command.Input>`
-              // doesn't match its `<input>`/`<Input>` element scan.
+              // A raw `text-base`/`text-sm` ternary here would sit under the
+              // 16px iOS zoom floor and go undetected by the typography guard
+              // test, since cmdk's `<Command.Input>` doesn't match its
+              // `<input>`/`<Input>` element scan.
               composerInputCls(),
               isHero ? "pb-3" : "pb-2"
             )}

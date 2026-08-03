@@ -1,10 +1,17 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Ban, Lock, Trash2, Unlock } from 'lucide-react';
-import { CommandSpec, CreateWorktreeInput, QueryMode, SessionContext } from '../types';
+import {
+  CommandSpec,
+  CreateWorktreeInput,
+  QueryMode,
+  SessionContext,
+  SessionTarget,
+} from '../types';
 import { SkillSummary } from '../api/contracts';
 import { cn } from '../lib/utils';
 import { useSessionSpec } from '../hooks/useSessionSpec';
+import { useRebindProject } from '../hooks/useRebindProject';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { Button } from './ui/button';
 import { useMcpTools } from '../hooks/useMcpTools';
@@ -15,7 +22,9 @@ import { useModels } from '../hooks/useModels';
 import { useCommands } from '../hooks/useCommands';
 import { useContainerCompact } from '../hooks/useContainerCompact';
 import { useProjectGit } from '../hooks/useProjectGit';
+import { MANAGED_PREFIX, ProjectLabel } from '../utils/projectLabel';
 import { executeCommand } from '../api/client';
+import { reasonFrom } from '../api/httpBase';
 import { parseCommandInput } from '../lib/commands';
 import { parseMentionInput, spliceMention } from '../lib/mentions';
 import { FILE_INPUT_ACCEPT, filterAttachments } from '../lib/attachments';
@@ -36,10 +45,9 @@ import { InputComposerBody } from './InputComposerBody';
  * the running/command tints, driven by the `data-halo`/`data-running`/
  * `data-command` attributes the call site sets on this div; `composerCard()`
  * only adds Tasks' own flex body plus the base elevation, which lifts
- * `--elev-1` → `--elev-2` when expanded (focus or an open menu). The
- * border-colour ramp that used to live here is gone — border colour and all
- * behavioural tints now come from the CSS family, so Tasks, Search, and the
- * ComposerShell siblings read as one system.
+ * `--elev-1` → `--elev-2` when expanded (focus or an open menu). Border
+ * colour and all behavioural tints come from the CSS family, not a local
+ * ramp, so Tasks, Search, and the ComposerShell siblings read as one system.
  */
 function composerCard(state: { expanded: boolean }): string {
   const shadow = state.expanded ? '[box-shadow:var(--elev-2)]' : '[box-shadow:var(--elev-1)]';
@@ -179,11 +187,18 @@ interface InputBarProps {
   mode: 'home' | 'detail';
   sessionId?: string;
   sessionContext?: SessionContext;
+  /**
+   * `target` is home-mode only and is NOT part of `context` on purpose: it does
+   * not describe the turn, it decides which endpoint mints the session. The
+   * caller routes on it (`App.handleCreateAndRun`); a detail-mode composer
+   * never passes it because an existing session's binding is not retargetable.
+   */
   onSubmit?: (
     query: string,
     context?: SessionContext,
     mode?: QueryMode,
-    attachments?: File[]
+    attachments?: File[],
+    target?: SessionTarget | null
   ) => void;
   onStop?: () => void;
   isRunning?: boolean;
@@ -219,6 +234,11 @@ export function InputBar({
   const isExpanded = isFocused || isConfigOpen || isModelOpen;
   const [activeSkill, setActiveSkill] = useState<string | null>(sessionContext?.skill ?? null);
   const [activeProject, setActiveProject] = useState<string | null>(sessionContext?.project ?? null);
+  // What the session is ABOUT, held BESIDE `activeProject` and never inside it.
+  // A target routes creation to a product's own endpoint rather than adding a
+  // context key, so folding it into the project string would make every reader
+  // of that string wrong. Home-mode only — see `targetsEnabled` below.
+  const [activeTarget, setActiveTarget] = useState<SessionTarget | null>(null);
   const [activeModel, setActiveModel] = useState<string | null>(sessionContext?.model ?? null);
   // Opt-in cross-model fallback. ``fallbackEnabled`` gates the feature;
   // ``fallbackModels`` is the ordered chain. Both are per-session run settings
@@ -241,18 +261,27 @@ export function InputBar({
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const [queryMode, setQueryMode] = useState<QueryMode>(sessionContext?.mode ?? 'act');
   const popupDirection = mode === 'home' ? 'down' : 'up';
+  // `auto` is a MODE, not a directory: the agent has not chosen a project yet,
+  // and the backend's `ProjectCatalog.resolve` refuses the sentinel outright so
+  // that "never chose" stays distinguishable from "chose the scratch dir". So
+  // every project-SCOPED read below has to treat it as unscoped — passing it
+  // through would ask the tool, skill, git and file endpoints to resolve a key
+  // no resolver accepts, on every render. Composed once here rather than at
+  // four call sites, because a lookup that missed the guard would fail quietly
+  // (an empty list reads as "this project has no MCP tools", not as an error).
+  const scopedProject = ProjectLabel.isAuto(activeProject) ? null : activeProject;
   const {
     tools: mcpTools,
     loading: mcpLoading,
     error: mcpError,
     refresh: refreshMcp
-  } = useMcpTools(activeProject);
+  } = useMcpTools(scopedProject);
   const {
     skills: availableSkills,
     loading: skillsLoading,
     error: skillsError,
     refresh: refreshSkills
-  } = useSkills(activeProject);
+  } = useSkills(scopedProject);
   const {
     models: availableModels,
     defaultModel,
@@ -277,11 +306,11 @@ export function InputBar({
         (p) => p.project_id === activeWorktree && p.is_worktree,
       );
       if (parent?.parent_project_id) {
-        return `managed:${parent.parent_project_id}`;
+        return `${MANAGED_PREFIX}${parent.parent_project_id}`;
       }
     }
-    return activeProject;
-  }, [activeProject, activeWorktree, availableProjects]);
+    return scopedProject;
+  }, [scopedProject, activeWorktree, availableProjects]);
   const projectGit = useProjectGit(projectForGit);
   // Default-fill ``activeBranch`` with the parent's current HEAD as soon as
   // the API responds, but only if the user hasn't already made a selection
@@ -321,6 +350,43 @@ export function InputBar({
     sessionEditable.allowed_tools !== true;
   const toolsLocked = toolBindingLocked && !toolsUnlocked;
 
+  // ── Purpose-bound project lock ────────────────────────────────────────────
+  // Same server predicate as the tool ceiling, a different remedy: a project
+  // has NO sanctioned per-run override at all (`SessionSpec` only allows it
+  // `OVERRIDABLE_WHEN_UNBOUND` — a request that declares `project` on a
+  // purpose-bound session is refused and logged server-side, with no "unlock
+  // this turn" escape hatch like the tool ceiling has). So the only way to
+  // change it is the durable rebind below; the picker (`ConfigMenu`) routes a
+  // pick through that instead of local state while this is true.
+  //
+  // Auto-select rides that same rebind route and is deliberately NOT hidden by
+  // the lock, because `auto` is a bind rather than an unbind — see the
+  // `projectLocked` prop doc on `ConfigMenu` for the full argument. What the
+  // lock still buys here is the send omission below: a bound session's project
+  // is never re-declared per turn, whichever key it is bound to.
+  const projectBindingLocked =
+    mode === 'detail' &&
+    sessionSpec?.purpose_bound === true &&
+    sessionEditable.project !== true;
+  const rebindProject = useRebindProject(sessionId);
+  const handleRebindProject = useCallback(
+    (project: string) => {
+      rebindProject.mutate(project, {
+        onSuccess: (response) => {
+          setActiveProject(response.spec.project);
+          toast.success(`Session rebound to ${response.spec.project ?? project}.`);
+        },
+        onError: (err) => {
+          toast.error(reasonFrom(err) || 'Could not rebind the project.');
+        },
+      });
+    },
+    [rebindProject],
+  );
+  const projectRebindError = rebindProject.error
+    ? reasonFrom(rebindProject.error) || 'Could not rebind the project.'
+    : null;
+
   // ── Slash commands ──────────────────────────────────────────────────────
   const { commands } = useCommands();
   const queryClient = useQueryClient();
@@ -357,8 +423,8 @@ export function InputBar({
     attachments: mentionAttachments,
   } = useProjectFiles({
     session: sessionId ?? null,
-    project: activeProject,
-    enabled: Boolean(sessionId || activeProject),
+    project: scopedProject,
+    enabled: Boolean(sessionId || scopedProject),
   });
   useEffect(() => {
     setMentionPickerOpen(mentionModeActive);
@@ -481,9 +547,10 @@ export function InputBar({
     });
   }, []);
 
-  // Sync local state from session context when navigating between sessions
+  // Sync local state from session context when navigating between sessions.
+  // Deliberately does NOT write `activeProject` — that has exactly one writer,
+  // the effect below.
   useEffect(() => {
-    setActiveProject(sessionContext?.project ?? null);
     setActiveSkill(sessionContext?.skill ?? null);
     setActiveModel(sessionContext?.model ?? null);
     setQueryMode(sessionContext?.mode ?? 'act');
@@ -495,12 +562,53 @@ export function InputBar({
     setFallbackEnabled((sessionContext?.fallback_models?.length ?? 0) > 0);
   }, [sessionContext?.project, sessionContext?.skill, sessionContext?.model, sessionContext?.mode, sessionContext?.mcp_tools, sessionContext?.branch, sessionContext?.fallback_models]);
 
+  // THE single writer of `activeProject` outside a user's own pick. The durable
+  // spec is authoritative; `sessionContext` is the fallback for a session with
+  // no typed spec at all (`source: "legacy_context"`). Reading only the newest
+  // raw `context` event instead would leave a purpose-bound session showing
+  // "Temporary directory" even though `GET /spec` reports the real, durable
+  // binding (see apps/mewbo_console/CLAUDE.md, "InputBar session context
+  // hydration").
+  //
+  // Sole ownership replaces an ordering contract that only held when BOTH
+  // effects' deps moved in the same commit: the reset effect above also wrote
+  // this field, and a `context` event carrying (say) a new `model` while
+  // `project` stayed ABSENT moved only ITS deps — so it ran alone and blanked
+  // a spec-bound project permanently. One writer, and the ordering question
+  // stops existing.
+  //
+  // `sessionId` earns its place in the deps even though nothing here reads it:
+  // switching between two sessions that both resolve to the same values (no
+  // spec, no context project) must still clear a local pick carried over from
+  // the previous one. A genuine spec change — a NEW object identity from
+  // `useSessionSpec` — likewise re-runs this and discards an un-sent local
+  // pick, which is intended: an idle refetch is safe (TanStack's structural
+  // sharing hands back the same object when the payload is unchanged), so this
+  // only fires when the binding itself moved.
+  useEffect(() => {
+    setActiveProject(sessionSpec?.project ?? sessionContext?.project ?? null);
+  }, [sessionId, sessionSpec, sessionContext?.project]);
+
+  // `activeTarget`'s single writer outside the user's own pick, held to the same
+  // discipline as `activeProject` directly above — one effect owns the field, so
+  // no ordering contract between two effects can exist to break.
+  //
+  // What differs is that there is nothing to RESTORE. A target is spent at
+  // creation: the product's endpoint hands back a session already bound, and no
+  // event or spec field carries the choice back, so the only honest reaction to
+  // a session switch is to clear it. `sessionId` is the whole dependency, for
+  // the same reason it earns its place above — moving between two sessions must
+  // never carry a local pick across.
+  useEffect(() => {
+    setActiveTarget(null);
+  }, [sessionId]);
+
   // If the session context resolves to a managed project that is itself a
   // worktree, lift its id into ``activeWorktree`` so the composer shows
   // both the parent (via ``projectForGit``) and the worktree highlighted.
   useEffect(() => {
-    if (!activeProject || !activeProject.startsWith('managed:')) return;
-    const id = activeProject.slice('managed:'.length);
+    if (!activeProject || !activeProject.startsWith(MANAGED_PREFIX)) return;
+    const id = activeProject.slice(MANAGED_PREFIX.length);
     const matched = availableProjects.find((p) => p.project_id === id);
     if (matched?.is_worktree) {
       setActiveWorktree((prev) => (prev === id ? prev : id));
@@ -640,7 +748,23 @@ export function InputBar({
     });
   };
   const handleResetAll = () => {
-    setActiveProject(null);
+    // A bound session's project is not a local pick to throw away: there is no
+    // wire representation of "clear the project" at all — an omitted `project`
+    // means INHERIT to `SessionSpecOverrides.from_request_context`, and while
+    // the binding is locked the send omits it either way. So blanking the pill
+    // to "Temporary directory" would state a change the next turn cannot make,
+    // and nothing re-hydrates it. Restore the durable value instead. HOME mode
+    // keeps plain null: a new session legitimately has no project yet.
+    setActiveProject(
+      mode === 'detail'
+        ? (sessionSpec?.project ?? sessionContext?.project ?? null)
+        : null,
+    );
+    // A target exists only in home mode and only until the session is minted,
+    // so "restore rather than null" has no meaning for it — there is no durable
+    // value to restore to. Home mode clears it; in detail mode it is already
+    // null and unsettable, and this is a no-op rather than a special case.
+    setActiveTarget(null);
     setActiveSkill(null);
     setActiveModel(null);
     setActiveBranch(null);
@@ -656,7 +780,11 @@ export function InputBar({
     setActiveProject(next);
     // Switching projects must drop branch/worktree picks — they were
     // anchored to the *old* repo and would otherwise leak into a session
-    // run against a completely different working tree.
+    // run against a completely different working tree. This is also what keeps
+    // `AUTO_PROJECT` honest: the sentinel names no tree at all, so a worktree
+    // carried over from a previous pick would otherwise win at submit time
+    // (`projectForContext` prefers `activeWorktree`) and quietly bind a session
+    // the user just put into auto mode.
     setActiveBranch(null);
     setActiveWorktree(null);
   }, []);
@@ -778,8 +906,13 @@ export function InputBar({
     // verbatim in the session context. The backend's
     // ``_populate_worktree_context`` derives ``repo`` and ``branch`` from
     // the worktree id, so we don't double-send those.
+    //
+    // `AUTO_PROJECT` travels this same line unchanged: it is a project KEY, not
+    // an absence, so it rides the existing `{ project }` slot rather than
+    // earning a field of its own. Picking Auto clears `activeWorktree`
+    // (`handleSelectProject`), so the branch above can never shadow it.
     const projectForContext = activeWorktree
-      ? `managed:${activeWorktree}`
+      ? `${MANAGED_PREFIX}${activeWorktree}`
       : activeProject;
     const branchForContext =
       !activeWorktree &&
@@ -794,18 +927,35 @@ export function InputBar({
       fallbackEnabled
         ? fallbackModels.filter((m) => m !== modelToSend)
         : [];
-    const context: SessionContext = {
-      // A purpose-bound session drops tool overrides server-side, so while the
-      // ceiling is locked we omit the key entirely (never an empty array — that
-      // is itself an override, "grant no tools") and let the binding stand.
-      ...(toolsLocked ? {} : { mcp_tools: mcps.filter((m) => m.active).map((m) => m.id) }),
-      ...(activeSkill ? { skill: activeSkill } : {}),
-      ...(projectForContext ? { project: projectForContext } : {}),
-      ...(branchForContext ? { branch: branchForContext } : {}),
-      ...(modelToSend ? { model: modelToSend } : {}),
-      ...(fallbackForContext.length > 0 ? { fallback_models: fallbackForContext } : {})
-    };
-    void onSubmit(inputValue.trim(), context, queryMode, attachedFiles);
+    // A targeted send omits every WORKSPACE key. The session it will run in is
+    // minted by the product's own endpoint, already bound to that wiki project
+    // or app, and a purpose-bound session refuses a client-declared project,
+    // branch, skill or tool ceiling — the same server predicate the two locks
+    // above answer to. Re-declaring them would only be logged and dropped, once
+    // per turn. The model choice is the user's and travels unchanged.
+    const context: SessionContext = activeTarget
+      ? {
+          ...(modelToSend ? { model: modelToSend } : {}),
+          ...(fallbackForContext.length > 0 ? { fallback_models: fallbackForContext } : {}),
+        }
+      : {
+          // A purpose-bound session drops tool overrides server-side, so while the
+          // ceiling is locked we omit the key entirely (never an empty array — that
+          // is itself an override, "grant no tools") and let the binding stand.
+          ...(toolsLocked ? {} : { mcp_tools: mcps.filter((m) => m.active).map((m) => m.id) }),
+          ...(activeSkill ? { skill: activeSkill } : {}),
+          // Same reasoning as the tool ceiling: a locked project has no per-turn
+          // override path at all, so re-sending it would only be logged and
+          // refused server-side on every single turn. The picker can no longer
+          // diverge `activeProject` from the bound value while locked — a pick
+          // goes through the rebind mutation instead — so this omission drops
+          // nothing a submit would otherwise need.
+          ...(projectBindingLocked ? {} : (projectForContext ? { project: projectForContext } : {})),
+          ...(branchForContext ? { branch: branchForContext } : {}),
+          ...(modelToSend ? { model: modelToSend } : {}),
+          ...(fallbackForContext.length > 0 ? { fallback_models: fallbackForContext } : {})
+        };
+    void onSubmit(inputValue.trim(), context, queryMode, attachedFiles, activeTarget);
     setInputValue('');
     setAttachedFiles([]);
     if (textareaRef.current) {
@@ -885,6 +1035,16 @@ export function InputBar({
       onSelectProject={handleSelectProject}
       onSelectSkill={setActiveSkill}
       onResetAll={handleResetAll}
+      // Home mode only: a target is spent minting the session, and an existing
+      // session's purpose binding is durable — the server refuses to retarget
+      // it — so a detail-mode control could only offer a pick that fails.
+      targetsEnabled={mode === 'home'}
+      activeTarget={activeTarget}
+      onSelectTarget={setActiveTarget}
+      projectLocked={projectBindingLocked}
+      projectRebinding={rebindProject.isPending}
+      projectRebindError={projectRebindError}
+      onRebindProject={handleRebindProject}
       gitRepo={projectGit.gitRepo}
       branches={projectGit.branches}
       currentBranch={projectGit.currentBranch}

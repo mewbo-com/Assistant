@@ -309,11 +309,11 @@ def test_merge_with_new_identity_retires_old_node(store) -> None:
 
 
 def test_deduper_classify_delegates_to_resolution_ladder(store) -> None:
-    """The fuzzy/LLM tiers now route through the generic ResolutionLadder.
+    """The fuzzy/LLM tiers route through the generic ResolutionLadder.
 
-    Behavior is pinned by the regression suite above; this characterizes the
-    structural seam (one ladder, two callers) so the delegation can't silently
-    regress to a hand-rolled second ladder.
+    Behaviour is pinned by the suite above; this characterizes the structural
+    seam (one ladder, two callers) so the delegation cannot silently become a
+    hand-rolled second ladder.
     """
     from mewbo_graph.entities.resolver import ResolutionLadder
     from mewbo_graph.wiki.memory import InsightDeduper

@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.mewbo.aura.data.api.QuestionAnswerItemDto
 import com.mewbo.aura.data.model.AttachmentPayload
 import com.mewbo.aura.data.model.ChatItem
+import com.mewbo.aura.data.model.ComposerScope
 import com.mewbo.aura.data.model.SessionEvent
 import com.mewbo.aura.data.model.TextPayload
 import com.mewbo.aura.data.model.TranscriptReducer
@@ -179,15 +180,17 @@ class ChatViewModel @Inject constructor(
         viewModelScope.launch { settingsStore.setSelectedModel(id ?: "") }
     }
 
-    /** Fetches both composer-options catalogs on every sheet open (task brief: no caching) -
+    /** Fetches both composer-options catalogs on every sheet open (no caching) -
      * failures degrade to [onNotice] rather than wiping whatever catalog/selection is already in
      * state. Existing selections ([ChatUiState.composerScope]'s `selectedProjectKey`/`activeToolIds`)
-     * are preserved across a re-fetch. Tools are fetched scoped to the currently-selected project
-     * (bug fix: this used to always fetch the unscoped/global catalog, so the picker never reflected
-     * a project's own tool set) - [selectProject] is what keeps this scoped as the pick changes. */
+     * are preserved across a re-fetch. Tools are fetched scoped to the currently-selected project -
+     * fetching the unscoped/global catalog instead would leave the picker not reflecting a
+     * project's own tool set - and [selectProject] is what keeps this scoped as the pick changes. */
     fun refreshComposerScope(onNotice: (String) -> Unit) {
         viewModelScope.launch {
-            val project = _state.value.composerScope.selectedProjectKey
+            // toolScopeKey, not selectedProjectKey: in auto mode there is no project to scope a
+            // catalog to yet (ComposerScope.toolScopeKey has the why), so the fetch goes unscoped.
+            val project = _state.value.composerScope.toolScopeKey
             val projectsDeferred = async { sessionScopeRepository.projects() }
             val toolsDeferred = async { sessionScopeRepository.tools(project = project) }
             val projects = projectsDeferred.await()
@@ -207,11 +210,11 @@ class ChatViewModel @Inject constructor(
         }
     }
 
-    /** Options sheet's Project pick - `null` = Temporary. Editable only pre-session (the sheet
-     * itself gates the row's clickability once a session exists). A project switch resets
-     * [ComposerScope.activeToolIds] to `null` (a narrowed set carried over from the PREVIOUS
-     * project's tool catalog is meaningless against this one) and silently re-fetches the tools
-     * catalog scoped to the new key - a failed re-fetch just leaves the prior catalog in place
+    /** Options sheet's Project pick - `null` = Temporary, [ComposerScope.AUTO_PROJECT_KEY] = let
+     * Mewbo pick. Editable whenever no run is in flight (the sheet itself gates the row). A project
+     * switch resets [ComposerScope.activeToolIds] to `null` (a narrowed set carried over from the
+     * PREVIOUS project's tool catalog is meaningless against this one) and silently re-fetches the
+     * tools catalog scoped to the new key - a failed re-fetch just leaves the prior catalog in place
      * rather than surfacing a notice, same degrade posture as [refreshComposerScope]. */
     fun selectProject(key: String?) {
         projectOverriddenForCurrentChat = true
@@ -219,7 +222,7 @@ class ChatViewModel @Inject constructor(
             it.copy(composerScope = it.composerScope.copy(selectedProjectKey = key, activeToolIds = null))
         }
         viewModelScope.launch {
-            val tools = sessionScopeRepository.tools(project = key) ?: return@launch
+            val tools = sessionScopeRepository.tools(project = ComposerScope.toolScopeKeyOf(key)) ?: return@launch
             _state.update {
                 // A fast double-switch can land this response after a NEWER pick — drop it then.
                 if (it.composerScope.selectedProjectKey != key) it
@@ -429,7 +432,7 @@ class ChatViewModel @Inject constructor(
         // A send while a run is already Sending/Streaming is a steer into that run (202 enqueue,
         // spec §6.2 C4) - known structurally from the CURRENT phase, no need to wait on the
         // network round-trip to know the bubble should render queued (spec §6.12). See
-        // SendDecision's own doc for the bug this phaseForSend call fixes (fix-round-3 Important #3).
+        // SendDecision's own doc for the bug this phaseForSend call fixes.
         val currentPhase = _state.value.runPhase
         val isSteering = SendDecision.isSteering(currentPhase)
         // Attachments can't ride a steer - `/message` has no attachments field (RunRepository) -
@@ -509,7 +512,7 @@ class ChatViewModel @Inject constructor(
      * The session is permanently terminated (a 410 on any mutation). Flips the pre-wired
      * terminal state: the composer disables and any ErrorCard drops its Retry
      * ([ChatUiState.sessionEnded]), instead of surfacing a retryable error that would 410 forever
-     * (bug #3, the infinite-retry loop). runPhase must leave Sending/Streaming so the liveness spark
+     * in an infinite retry loop. runPhase must leave Sending/Streaming so the liveness spark
      * stops. Deliberately NO client ErrorCard - the calm terminated composer block carries the
      * message (DESIGN.md §6: no error residue).
      *
@@ -654,18 +657,26 @@ class ChatViewModel @Inject constructor(
     }
 
     /**
-     * Submits the human's [answers] to a pending ask-user question ([ChatItem.Question]) — the blocked
-     * `ask_user_question` tool call resolves and the run continues. A HUMAN-tap answer wired the same
-     * way retry/fork flow (ViewModel → repository), deliberately NOT the auto-serviced
-     * `device_tool_call` pipeline.
+     * Submits the human's [answers] (plus optional group-level [notes]) to an ask-user question
+     * ([ChatItem.Question]) — whether it's still blocking the run, or the run already moved on
+     * ([com.mewbo.aura.data.model.QuestionResolution.RunMovedOn], in which case the answer lands as a
+     * new message instead of resolving the original call). A HUMAN-tap answer wired the same way
+     * retry/fork flow (ViewModel → repository), deliberately NOT the auto-serviced `device_tool_call`
+     * pipeline.
      *
      * The AUTHORITATIVE card settle is the `user_question_answered` SSE event ([TranscriptReducer]),
-     * which the live subscription is already following (the run is blocked, so `running` is true) — so
-     * [onResult] only steers the card's local submitting state: `true` on accept/already-answered
-     * (leave the spinner; the event flips the card read-only), `false` on genuine failure (the card
-     * re-enables and shows a transient notice). No session id ⇒ `false` (nothing to answer against).
+     * which the live subscription is already following — so [onResult] only steers the card's local
+     * submitting state: `true` on accept/already-answered (leave the spinner; the event flips the card
+     * to its next state), `false` on genuine failure (the card re-enables and shows a transient
+     * notice). No session id ⇒ `false` (nothing to answer against).
      */
-    fun answerQuestion(callId: String, callToken: String, answers: List<QuestionAnswerItemDto>, onResult: (Boolean) -> Unit) {
+    fun answerQuestion(
+        callId: String,
+        callToken: String,
+        answers: List<QuestionAnswerItemDto>,
+        notes: String?,
+        onResult: (Boolean) -> Unit,
+    ) {
         val id = binding.currentId
         if (id == null) {
             onResult(false)
@@ -673,7 +684,7 @@ class ChatViewModel @Inject constructor(
         }
         viewModelScope.launch {
             try {
-                val result = runRepository.answerQuestion(id, callId, callToken, answers)
+                val result = runRepository.answerQuestion(id, callId, callToken, answers, notes)
                 onResult(result != QuestionAnswerResult.Failed)
             } catch (e: CancellationException) {
                 throw e
@@ -772,7 +783,7 @@ class ChatViewModel @Inject constructor(
         _state.update { if (it.dictation is DictationState.Final) it.copy(dictation = DictationState.Idle) else it }
     }
 
-    /** Pull-up handoff draft (user directive 2026-07-04): text carried from the assist overlay's
+    /** Pull-up handoff draft: text carried from the assist overlay's
      * pill when it was swiped up into the app (`AuraNavHost` reads it off the chat destination's
      * `SavedStateHandle` and seeds it here). Deliberately its OWN one-shot field rather than a ride
      * on the [DictationState.Final] path: a Final also tags the pending send Voice, which would
@@ -799,15 +810,14 @@ class ChatViewModel @Inject constructor(
         val events = runRepository.live(id)
         streamJob = viewModelScope.launch {
             try {
-                // A SharedFlow's own collect() never completes on its own (unlike the raw cold
-                // flow this used to collect directly) - transformWhile is what makes THIS
-                // collector actually stop once the run is genuinely over, instead of idling
-                // forever. It emits every event through unchanged, then stops pulling further
-                // ones the moment it sees stream_end - the definitive "nothing more is ever
-                // coming through this connection" signal (SessionStreamClient's own terminal-frame
-                // handling) - or a materialized StreamError (review finding F2's upstream-failure
-                // path). Without this, the Done-fallback below and the catch block underneath were
-                // both dead code (review finding F2).
+                // A SharedFlow's own collect() never completes on its own - transformWhile is what
+                // makes THIS collector actually stop once the run is genuinely over, instead of
+                // idling forever. It emits every event through unchanged, then stops pulling
+                // further ones the moment it sees stream_end - the definitive "nothing more is
+                // ever coming through this connection" signal (SessionStreamClient's own
+                // terminal-frame handling) - or a materialized StreamError (the upstream-failure
+                // path). Without this, the Done-fallback below and the catch block underneath
+                // would both be dead code.
                 events
                     .transformWhile { event ->
                         emit(event)
@@ -845,7 +855,7 @@ class ChatViewModel @Inject constructor(
      * opens an observable intermediate state: a `Completion` event's fold already flips the
      * just-finalized [ChatItem.AssistantMessage.isStreaming] to `false` (so [ChatTranscript] renders
      * it as settled markdown) one emission BEFORE `runPhase` actually leaves [RunPhase.Streaming].
-     * Since the 2026-07-04 liveness directive, [ChatTranscript]'s `showThinking = isRunLive` keeps
+     * [ChatTranscript]'s `showThinking = isRunLive` keeps
      * the thinking spark visible for the WHOLE run (`Sending`/`Streaming`) - so in that split gap
      * `runPhase` is still `Streaming` and the spark would flash on for one frame BELOW an already-
      * finalized reply, right at turn completion. Folding both into one `copy(...)` clears `runPhase`
@@ -856,7 +866,7 @@ class ChatViewModel @Inject constructor(
     // call site) - bind()'s own history-replay loop is the ONE caller that passes false, so
     // catching up a fresh binding's reducer state never routes already-finalized-elsewhere history
     // through the live speak-along pipeline. See bind()'s own primeAlreadySpoken call, right after
-    // that replay loop, for the other half of this fix.
+    // that replay loop, for the other half.
     private fun applyEvent(event: SessionEvent, pending: Boolean = false, completionPhase: RunPhase? = null, speakAlong: Boolean = true) {
         // replay gate: `widget_ready` events are server-persisted, so a history re-fold
         // (bind) or SSE backlog replay (subscribeLive) - both routed through here - would otherwise
@@ -870,7 +880,7 @@ class ChatViewModel @Inject constructor(
         if (widgetGateDropsReplay(event, widgetsEnabled)) return
         reducerState = TranscriptReducer.fold(reducerState, event, pending)
         clientTail = emptyList()
-        publish(completionPhase, speakAlong)
+        publish(completionPhase, speakAlong, projectFrom = event)
     }
 
     private fun appendClientError(message: String) {
@@ -879,7 +889,31 @@ class ChatViewModel @Inject constructor(
         publish(completionPhase = RunPhase.Error)
     }
 
-    private fun publish(completionPhase: RunPhase? = null, speakAlong: Boolean = true) {
+    /**
+     * [projectFrom], when it is a persisted `context` event, re-points
+     * [ComposerScope.selectedProjectKey] at the project that event names - the ONE seam that keeps
+     * "which project is this session in" LIVE.
+     *
+     * The model can now move the session itself (`switch_project`), and every such move persists a
+     * `context` event. Reading the project once at session load would leave the open-session chrome
+     * claiming the project the turn STARTED in for the rest of the run. Folding it here, at the one
+     * ingestion point both the history replay and the live SSE collector pass through, means a
+     * revisited session and a session watched live converge on the same answer by construction
+     * rather than by two readers agreeing.
+     *
+     * Adopting it into `selectedProjectKey` - the value the NEXT `/query` resends - rather than into
+     * a display-only field is the same law the session-load hydration already encodes: the backend
+     * re-resolves scope from every request's own context, so resending anything other than where the
+     * session actually IS migrates it. After a switch that is the switched-to project, not the
+     * `auto` sentinel the turn opened with, which would send the session back to a scratch cwd
+     * mid-conversation.
+     *
+     * [ComposerScope.activeToolIds] is deliberately left alone. A user's tool narrowing is their
+     * pick; the catalog-mismatch argument that resets it in [selectProject] belongs to a USER
+     * switch, where the catalog is re-fetched in the same breath - silently discarding it because
+     * the model moved would be a surprise with no visible cause.
+     */
+    private fun publish(completionPhase: RunPhase? = null, speakAlong: Boolean = true, projectFrom: SessionEvent? = null) {
         val items = reducerState.chatItems + clientTail
         // feeds the transcript's current LAST assistant message through the speak-
         // along pipeline on every fold - SpeechController's own modality/mute/closedKey gating makes
@@ -893,7 +927,15 @@ class ChatViewModel @Inject constructor(
                 muted = _state.value.speechMuted,
             )
         }
-        _state.update { it.copy(items = items, runPhase = completionPhase ?: it.runPhase) }
+        _state.update {
+            it.copy(
+                items = items,
+                runPhase = completionPhase ?: it.runPhase,
+                composerScope = it.composerScope.copy(
+                    selectedProjectKey = SessionEvent.adoptContextProject(projectFrom, it.composerScope.selectedProjectKey),
+                ),
+            )
+        }
     }
 }
 

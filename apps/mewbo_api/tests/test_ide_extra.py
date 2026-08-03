@@ -9,9 +9,9 @@ Stubs Docker and Mongo.  Covers the lines missed by test_ide_manager.py:
 - IdeInstance.to_dict with and without include_password
 - IdeInstance.url + container_name properties
 - IdeManager._forget (deadline file + probe cache cleared)
-- IdeManager._safe_remove_container: APIError on get, APIError on remove,
+- DockerContainerBackend.teardown: APIError on get, APIError on remove,
   DockerUnavailable path
-- IdeManager._container_running: APIError on get returns False
+- DockerContainerBackend.is_running: APIError on get returns False
 - IdeManager.extend: expires_at in the past raises ValueError
 - IdeManager.extend: naive expires_at coerced to UTC
 - IdeManager._probe_status: cache hit path
@@ -33,6 +33,7 @@ import pytest
 from docker.errors import APIError, NotFound
 from mewbo_api.ide import (
     SESSION_ID_RE,
+    DockerContainerBackend,
     IdeInstance,
     IdeManager,
     IdeStore,
@@ -68,8 +69,6 @@ class InMemoryStore:
             expires_at=src.expires_at,
             max_deadline=src.max_deadline,
             extensions=src.extensions,
-            cpus=src.cpus,
-            memory=src.memory,
         )
 
     def insert(self, instance: IdeInstance) -> None:
@@ -158,8 +157,6 @@ def cfg(state_dir: str) -> WebIdeConfig:
         image="codercom/code-server:latest",
         default_lifetime_hours=1,
         max_lifetime_hours=8,
-        cpus=1.0,
-        memory="1g",
         pids_limit=512,
         network="mewbo-ide",
         state_dir=state_dir,
@@ -225,8 +222,6 @@ def _make_instance(sid: str = VALID_SID, **overrides) -> IdeInstance:
         expires_at=now + timedelta(hours=1),
         max_deadline=now + timedelta(hours=8),
         extensions=0,
-        cpus=1.0,
-        memory="1g",
     )
     defaults.update(overrides)
     return IdeInstance(**defaults)
@@ -300,21 +295,21 @@ def test_forget_cleans_up_doc_file_and_probe_cache(
 
 
 # ---------------------------------------------------------------------------
-# IdeManager._safe_remove_container edge-cases
+# DockerContainerBackend.teardown edge-cases
 # ---------------------------------------------------------------------------
 
 
-def test_safe_remove_container_api_error_on_get(
+def test_teardown_api_error_on_get(
     manager: IdeManager,
     fake_client: FakeDockerClient,
 ) -> None:
     """APIError from containers.get is swallowed → returns False."""
     fake_client.containers.get_should_raise = APIError("daemon glitch")
-    result = manager._safe_remove_container("mewbo-ide-any")
+    result = manager._backend.teardown(VALID_SID)
     assert result is False
 
 
-def test_safe_remove_container_api_error_on_remove(
+def test_teardown_api_error_on_remove(
     manager: IdeManager,
     fake_client: FakeDockerClient,
 ) -> None:
@@ -322,18 +317,18 @@ def test_safe_remove_container_api_error_on_remove(
 
     # Plant a container that raises on remove()
     class ErrorContainer:
-        name = "mewbo-ide-err"
+        name = f"mewbo-ide-{VALID_SID}"
         status = "running"
 
         def remove(self, force: bool = False) -> None:
             raise APIError("cannot remove")
 
-    fake_client.containers._by_name["mewbo-ide-err"] = ErrorContainer()
-    result = manager._safe_remove_container("mewbo-ide-err")
+    fake_client.containers._by_name[ErrorContainer.name] = ErrorContainer()
+    result = manager._backend.teardown(VALID_SID)
     assert result is False
 
 
-def test_safe_remove_container_docker_unavailable_returns_false(
+def test_teardown_docker_unavailable_returns_false(
     cfg: WebIdeConfig, store: InMemoryStore
 ) -> None:
     """DockerUnavailable during _docker() → returns False without propagating."""
@@ -341,30 +336,30 @@ def test_safe_remove_container_docker_unavailable_returns_false(
 
     mgr = IdeManager(cfg, store, docker_client=None)
     with patch("mewbo_api.ide.docker_from_env", side_effect=DockerException("no sock")):
-        result = mgr._safe_remove_container("mewbo-ide-any")
+        result = mgr._backend.teardown(VALID_SID)
     assert result is False
 
 
-def test_safe_remove_container_not_found_on_remove(
+def test_teardown_not_found_on_remove(
     manager: IdeManager,
     fake_client: FakeDockerClient,
 ) -> None:
     """If the container disappears between get() and remove(), handle NotFound gracefully."""
 
     class VanishingContainer:
-        name = "mewbo-ide-vanish"
+        name = f"mewbo-ide-{VALID_SID}"
         status = "running"
 
         def remove(self, force: bool = False) -> None:
             raise NotFound("already gone")
 
-    fake_client.containers._by_name["mewbo-ide-vanish"] = VanishingContainer()
-    result = manager._safe_remove_container("mewbo-ide-vanish")
+    fake_client.containers._by_name[VanishingContainer.name] = VanishingContainer()
+    result = manager._backend.teardown(VALID_SID)
     assert result is False
 
 
 # ---------------------------------------------------------------------------
-# IdeManager._container_running with APIError on get
+# DockerContainerBackend.is_running with APIError on get
 # ---------------------------------------------------------------------------
 
 
@@ -373,7 +368,7 @@ def test_container_running_api_error_on_get_returns_false(
     fake_client: FakeDockerClient,
 ) -> None:
     fake_client.containers.get_should_raise = APIError("oops")
-    assert manager._container_running("mewbo-ide-any") is False
+    assert manager._backend.is_running(VALID_SID) is False
 
 
 # ---------------------------------------------------------------------------
@@ -480,8 +475,6 @@ def test_stop_handles_docker_unavailable_gracefully(
         expires_at=now + timedelta(hours=1),
         max_deadline=now + timedelta(hours=8),
         extensions=0,
-        cpus=1.0,
-        memory="1g",
     )
     store.insert(pre)
 
@@ -491,8 +484,6 @@ def test_stop_handles_docker_unavailable_gracefully(
             image="img",
             default_lifetime_hours=1,
             max_lifetime_hours=8,
-            cpus=1.0,
-            memory="1g",
             pids_limit=512,
             network="net",
             state_dir=tmp,
@@ -507,19 +498,19 @@ def test_stop_handles_docker_unavailable_gracefully(
 
 
 # ---------------------------------------------------------------------------
-# IdeManager._safe_remove_file
+# DockerContainerBackend._safe_remove_file
 # ---------------------------------------------------------------------------
 
 
 def test_safe_remove_file_missing_returns_false() -> None:
-    assert IdeManager._safe_remove_file("/nonexistent/path/file.txt") is False
+    assert DockerContainerBackend._safe_remove_file("/nonexistent/path/file.txt") is False
 
 
 def test_safe_remove_file_existing_returns_true() -> None:
     with tempfile.NamedTemporaryFile(delete=False) as f:
         path = f.name
     assert os.path.exists(path)
-    result = IdeManager._safe_remove_file(path)
+    result = DockerContainerBackend._safe_remove_file(path)
     assert result is True
     assert not os.path.exists(path)
 
@@ -565,8 +556,6 @@ def test_ide_store_from_doc_handles_naive_created_at() -> None:
         "expires_at": now + timedelta(hours=1),
         "max_deadline": now + timedelta(hours=8),
         "extensions": 0,
-        "cpus": 1.0,
-        "memory": "1g",
     }
     inst = IdeStore._from_doc(doc)
     assert inst.created_at.tzinfo is not None
@@ -584,7 +573,7 @@ def test_ensure_rolls_back_on_deadline_file_failure(
     project_path: str,
 ) -> None:
     with patch.object(
-        IdeManager,
+        DockerContainerBackend,
         "_write_deadline",
         side_effect=OSError("disk full"),
     ):

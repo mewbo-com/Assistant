@@ -19,7 +19,7 @@ fun AuraTheme(
     reducedMotion: Boolean = false,
     content: @Composable () -> Unit,
 ) {
-    // [R4 2026-07-10] The OS-level "Remove animations" accessibility setting must be honored
+    // [R4] The OS-level "Remove animations" accessibility setting must be honored
     // regardless of the in-app toggle (WCAG motion-sensitivity): animator scale 0 ⇒ reduced
     // motion, OR-ed (never replacing) the app's own setting. ONE seam for both hosts
     // (MainActivity + AuraSession) since both compose through this function. Read once per

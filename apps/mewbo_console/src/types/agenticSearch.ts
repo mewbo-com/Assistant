@@ -49,7 +49,7 @@ export interface Workspace {
   sources: string[]
   instructions: string
   created: string
-  /** Canonical ISO timestamps; `created` is the legacy display label. */
+  /** Canonical ISO timestamps. `created` is a pre-formatted display label — prefer these for computation. */
   created_at?: string
   updated_at?: string
   past_queries: PastQuery[]

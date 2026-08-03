@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 
 import { SettingsModel } from "./SettingsModel";
 import { FACETS } from "./facets";
+import { FACET_ICONS, facetIcon } from "./facetIcons";
 
 // --- fixture schema --------------------------------------------------------
 
@@ -153,6 +154,50 @@ describe("SettingsModel.groups", () => {
     expect(agent?.title).toBe("Agent");
     // section description comes from the $ref-sibling, falling back to def.
     expect(model().section("llm")?.description).toBe("Primary model settings.");
+  });
+});
+
+describe("SettingsModel.visibleGroups", () => {
+  it("keeps a panes-only facet (e.g. repositories) visible when pane counts say so, hidden otherwise", () => {
+    // The fixture schema never mentions "repositories" — it still shows up as
+    // an empty-sections group, the same shape `access` and `security` take
+    // when nothing in AppConfig carries their x-group.
+    const repositories = model()
+      .groups()
+      .find((g) => g.id === "repositories");
+    expect(repositories).toBeDefined();
+    expect(repositories?.sections).toEqual([]);
+
+    expect(
+      model()
+        .visibleGroups({})
+        .some((g) => g.id === "repositories")
+    ).toBe(false);
+    expect(
+      model()
+        .visibleGroups({ repositories: 2 })
+        .some((g) => g.id === "repositories")
+    ).toBe(true);
+  });
+});
+
+// --- facets registry ---------------------------------------------------
+
+describe("facets.ts / facetIcons.ts registry integrity", () => {
+  it("resolves every facet's iconName through FACET_ICONS, never the Settings2 fallback", () => {
+    for (const facet of FACETS) {
+      expect(
+        facetIcon(facet.iconName),
+        `facet "${facet.id}" declares iconName "${facet.iconName}", which isn't ` +
+          `registered in FACET_ICONS — it would silently render Settings2 instead`
+      ).toBe(FACET_ICONS[facet.iconName]);
+    }
+  });
+
+  it("orders facets with unique, strictly ascending `order` values", () => {
+    const orders = FACETS.map((f) => f.order);
+    expect(orders).toEqual([...orders].sort((a, b) => a - b));
+    expect(new Set(orders).size).toBe(orders.length);
   });
 });
 

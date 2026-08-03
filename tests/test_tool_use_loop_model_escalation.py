@@ -14,8 +14,8 @@ from unittest.mock import MagicMock, patch
 
 from langchain_core.messages import SystemMessage
 from mewbo_core.common import get_system_prompt
-from mewbo_core.tool_registry import ToolSpec
-from mewbo_core.tool_use_loop import ToolUseLoop
+from mewbo_core.loop.tool_use_loop import ToolUseLoop
+from mewbo_core.tooling.tool_registry import ToolSpec
 from test_tool_use_loop import (
     _allow_all_policy,
     _make_agent_context,
@@ -69,7 +69,7 @@ def test_escalation_rerenders_prompt_and_edit_variant():
     assert _GEMMA_MARKER not in base_system  # base = no gemma nudge
     messages = [SystemMessage(content=base_system)]
 
-    with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+    with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
         mock_build.return_value.bind_tools.return_value = MagicMock()
         tool_schemas, model = loop._apply_model_escalation(
             "gemma-2-9b",
@@ -98,7 +98,7 @@ def test_no_escalation_is_a_noop():
     sentinel_schemas: list = []
     sentinel_model = object()
 
-    with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+    with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
         tool_schemas, model = loop._apply_model_escalation(
             "openai/gpt-4o",  # same model — no switch
             messages,
@@ -119,7 +119,7 @@ def test_tool_guidance_applies_per_model_override_in_production_path():
     # Drives the REAL _render_tool_guidance render site (not a direct
     # registry.render): a gpt- model must get the structured-patch nudge that
     # pairs with its edit-tool variant; a non-matching model must not, and must
-    # equal the legacy raw-file guidance byte-for-byte.
+    # equal the raw-file guidance byte-for-byte.
     # Production model ids are bare (the proxy prefix is added only at the
     # LiteLLM call seam), which is the form the prompt registry matches against.
     loop = ToolUseLoop(
@@ -133,7 +133,7 @@ def test_tool_guidance_applies_per_model_override_in_production_path():
     loop._active_model = "claude-opus-4-8"
     guidance = loop._render_tool_guidance()
     assert _PATCH_NUDGE not in guidance
-    # Base render is byte-identical to the legacy path (no override matched).
+    # Base render is byte-identical when no override matches.
     assert guidance == get_system_prompt("tools/file-edit")
 
 

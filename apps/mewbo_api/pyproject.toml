@@ -18,7 +18,6 @@ dependencies = [
   "gunicorn>=22.0.0",
   "imapclient>=3.0,<4.0",
   "mistune>=3.0,<4.0",
-  "docker>=7.0,<8.0",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +31,15 @@ dependencies = [
 # see packages/mewbo_graph/src/mewbo_graph/wiki/embedder.py.
 wiki = [
     "mewbo-graph[treesitter,retrieval]>=0.0.13",
+]
+# DockerContainerBackend (ide.py) — the pre-broker Web IDE path used by the
+# existing test suite and by a developer running the API against a local
+# daemon with no broker configured. The api image installs WITHOUT this
+# extra: the deployed api no longer touches /var/run/docker.sock at all,
+# that access having moved to the dedicated mewbo-ide broker service
+# (docker/Dockerfile.ide). Dev and CI install it via `--all-extras`.
+docker = [
+    "docker>=7.0,<8.0",
 ]
 
 [project.scripts]

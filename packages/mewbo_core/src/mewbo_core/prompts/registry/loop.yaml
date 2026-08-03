@@ -105,9 +105,11 @@ loop.section.deferred_tools:
     Trailing instruction line of the deferred-tool catalog — tells the model to
     load schemas via tool_search before invoking. (The dynamic server/tool
     listing above it is composed in code; this static directive is its tail.)
+    States that the ids above are COMPLETE so the model selects one directly
+    instead of spending a turn asking which tools exist.
   token_budget: Injected only when tool_search is enabled and deferred tools exist.
   template: |-
-    Schemas are not loaded — call `tool_search` with keywords (e.g. server name, action) or `select:<tool_id>` to load them before invoking.
+    Only the schemas are withheld — the tool ids listed above are the complete set, so never spend a call just to find out which tools exist. Load the ones you need with `tool_search` using `select:<tool_id>` (comma-separate several in one call), or search by keyword (server name, action) when you know the capability but not the id. A tool's schema must be loaded before you invoke it.
 
 loop.section.plan_execution:
   purpose: >-
@@ -158,8 +160,8 @@ loop.depth.root:
     {%- endif %}
 
     ## Async delegation protocol (when you spawn)
-    {% raw %}- spawn_agent returns immediately with {agent_id, status: 'submitted'}.{% endraw %}
-    - spawn_agents(tasks=[...]) fans out many at once, returning ordered agent_ids (per-slot 'rejected' if the pool is full) — the preferred path for independent subtasks.
+    {% raw %}- spawn_agent returns immediately with {agent_id, status: 'submitted'} — accepted, whether it starts running right away or a moment later; either way, track it via check_agents until it reaches a terminal state.{% endraw %}
+    - spawn_agents(tasks=[...]) fans out many at once, returning an agent_id for every task — a busy pool only delays when a task starts running, it never drops the task. 'rejected' marks only a permanent refusal (unknown agent_type, unresolvable project, model unavailable, depth exceeded), never a capacity effect — the preferred path for independent subtasks.
     - Continue with independent work while children execute in background.
     - React to '[Agent xxx finished: ...]' notifications between your steps.
     - Call check_agents to see tree state and collect completed results.
@@ -301,6 +303,54 @@ loop.verification_failed:
     The completion check did not pass. Output:
     {{ output }}
     Address the failures above, then complete the task.
+
+# Required-terminal gate. Injected when a natural-completion claim leaves a
+# session tool's declared terminal obligation unmet (e.g. a composed answer
+# never delivered through its accept-state tool call). States plainly that the
+# reply text was discarded and the model must CALL the tool, mirroring
+# loop.verification_failed's thin factual frame — no mention of the gate's
+# mechanics.
+loop.required_terminal_missing:
+  purpose: >-
+    Feedback injected when a natural-completion claim leaves a declared
+    required-terminal obligation unmet — states that the reply text was
+    discarded and the agent must CALL the named tool(s), never narrate the
+    call as text.
+  token_budget: Injected once per refusal, bounded by the same nudge cap the promise gate uses.
+  variables: [tool_ids]
+  template: |-
+    Your reply text was NOT delivered — the user has seen nothing. Completing this task REQUIRES calling: {{ tool_ids }}. Call the tool now; never write the call out as text.
+
+# The two recovery re-prompts. Both are driven from SessionRuntime rather than
+# from the loop: they open a NEW turn on an already-terminal session instead of
+# steering a live one. They live beside the gate prompts above because the
+# escalation ladder is continuous — the required-terminal gate nudges in-band
+# while the context is still warm, and loop.goal_unmet_retry is what remains
+# once that gate is exhausted and the session has already ended.
+loop.recovery_continue:
+  purpose: >-
+    Re-prompt for a ``continue`` recovery — resume an interrupted session
+    without repeating completed work.
+  token_budget: >-
+    Terse by design. The original task and prior work already reach the model
+    through the system prompt (recent events + any compaction summary), so
+    keeping this HumanMessage small preserves the prompt-cache prefix.
+  variables: []
+  template: |-
+    You were previously interrupted by an error. Review the conversation context and continue from where you left off without repeating completed work.
+
+loop.goal_unmet_retry:
+  purpose: >-
+    Re-prompt for the ONE automatic re-invocation of a session that terminated
+    without meeting an explicit, machine-checkable goal — names the goal, states
+    plainly that it was not met, and asks for the outstanding result to be
+    DELIVERED through the tool that carries it rather than narrated as text.
+  token_budget: >-
+    Injected at most ONCE for the whole life of a session; the recovery marker
+    written alongside it is what bounds the budget.
+  variables: [goal]
+  template: |-
+    This session ended without meeting its stated goal: {{ goal }}. Review the conversation context and produce the outstanding result now. Deliver it through the tool call that completes the task — reply text alone is not delivery — and do not repeat work that already succeeded.
 
 loop.agent_results_header:
   purpose: >-

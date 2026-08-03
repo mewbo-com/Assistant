@@ -44,10 +44,6 @@
   "compaction": {
     "caveman_mode": false
   },
-  "reflection": {
-    "enabled": false,
-    "model": ""
-  },
   "langfuse": {
     "enabled": false,
     "host": "",
@@ -65,27 +61,20 @@
   },
   "cli": {
     "disable_textual": false,
-    "approval_style": "inline",
     "remote": {
       "base_url": "",
       "token": ""
     }
-  },
-  "chat": {
-    "port": 8501,
-    "address": "127.0.0.1"
   },
   "api": {
     "master_token": "msk-strong-password",
     "allow_external_cwd": false
   },
   "agent": {
-    "enabled": true,
     "max_depth": 5,
     "max_concurrent": 20,
     "default_sub_model": "",
     "allowed_models": [],
-    "sub_agent_max_steps": 10,
     "default_denied_tools": [],
     "edit_tool": "search_replace_block",
     "llm_call_timeout": 120.0,

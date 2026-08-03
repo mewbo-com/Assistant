@@ -67,6 +67,10 @@ class PermissionCatalog:
     GIT_CREDENTIALS_READ: Final[Literal["git_credentials.read"]] = "git_credentials.read"
     GIT_CREDENTIALS_WRITE: Final[Literal["git_credentials.write"]] = "git_credentials.write"
 
+    # -- repository registry ------------------------------------------------
+    REPOSITORIES_READ: Final[Literal["repositories.read"]] = "repositories.read"
+    REPOSITORIES_WRITE: Final[Literal["repositories.write"]] = "repositories.write"
+
     # -- web IDE -----------------------------------------------------------
     IDE_ACCESS: Final[Literal["ide.access"]] = "ide.access"
 

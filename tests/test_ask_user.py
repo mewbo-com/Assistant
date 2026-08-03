@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for ``mewbo_core.ask_user`` — the ask-user-question contract.
+"""Unit tests for ``mewbo_core.tooling.ask_user`` — the ask-user-question contract.
 
 Covers the Pydantic contract (question shape, answer IR, batch bounds), the
 ``QuestionDispatcher`` registration seam, and ``AskUserQuestionTool.handle``
@@ -12,8 +12,12 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from mewbo_core.ask_user import (
+from mewbo_core.classes import ActionStep
+from mewbo_core.tooling.ask_user import (
     ASK_USER_QUESTION_TOOL_ID,
+    MAX_QUESTION_NOTES_CHARS,
+    MAX_QUESTION_TIMEOUT_S,
+    QUESTION_TIMEOUT_MARGIN_S,
     AskUserQuestionArgs,
     AskUserQuestionTool,
     QuestionAnswerItem,
@@ -21,7 +25,6 @@ from mewbo_core.ask_user import (
     QuestionDispatchResult,
     UserQuestion,
 )
-from mewbo_core.classes import ActionStep
 from pydantic import ValidationError
 
 
@@ -120,6 +123,47 @@ class TestQuestionContract:
             QuestionAnswerItem.model_validate({"text": "t", "x": 1})
 
 
+class TestExecutionCeiling:
+    """``timeout_seconds`` -> ``execution_ceiling()`` — the loop's outer
+    ``wait_for`` bound for a call that opts out of waiting forever."""
+
+    def test_absent_timeout_is_unbounded(self):
+        assert _args().execution_ceiling() is None
+
+    def test_set_timeout_adds_the_dispatcher_margin(self):
+        args = _args(timeout_seconds=60)
+        assert args.execution_ceiling() == 60 + QUESTION_TIMEOUT_MARGIN_S
+
+    @pytest.mark.parametrize("value", [0, -1])
+    def test_non_positive_timeout_rejected_at_definition(self, value):
+        with pytest.raises(ValidationError):
+            _args(timeout_seconds=value)
+
+    def test_timeout_above_the_ceiling_rejected_at_definition(self):
+        with pytest.raises(ValidationError):
+            _args(timeout_seconds=MAX_QUESTION_TIMEOUT_S + 1)
+
+    def test_timeout_at_the_ceiling_accepted(self):
+        args = _args(timeout_seconds=MAX_QUESTION_TIMEOUT_S)
+        assert args.timeout_seconds == MAX_QUESTION_TIMEOUT_S
+
+
+class TestNotesPlaceholder:
+    """``notes_placeholder`` validation — non-empty, stripped, bounded."""
+
+    def test_whitespace_only_rejected_at_definition(self):
+        with pytest.raises(ValidationError):
+            _args(notes_placeholder="   ")
+
+    def test_padded_value_is_stripped(self):
+        args = _args(notes_placeholder="  Anything else?  ")
+        assert args.notes_placeholder == "Anything else?"
+
+    def test_oversized_value_rejected_at_definition(self):
+        with pytest.raises(ValidationError):
+            _args(notes_placeholder="x" * 121)
+
+
 class TestAnswerItem:
     def test_indexes_xor_text(self):
         with pytest.raises(ValidationError):
@@ -187,6 +231,43 @@ class TestAnswerResolution:
             _args().render_answers([QuestionAnswerItem(selected_indexes=[0, 1])])
 
 
+class TestRenderAnswersNotes:
+    """The optional free-text notes line ``render_answers`` appends.
+
+    Notes are additional prose, never validated against a question — so
+    these exercise the append/omit/truncate behaviour independently of
+    answer resolution.
+    """
+
+    def test_notes_appended_as_a_trailing_line(self):
+        args = _args()
+        rendered = args.render_answers(
+            [QuestionAnswerItem(selected_indexes=[0])], notes="keep it minimal"
+        )
+        assert rendered == "Scope: Root only\nNotes: keep it minimal"
+
+    def test_no_notes_omits_the_line(self):
+        args = _args()
+        rendered = args.render_answers([QuestionAnswerItem(selected_indexes=[0])])
+        assert "Notes:" not in rendered
+
+    def test_blank_notes_omits_the_line(self):
+        args = _args()
+        rendered = args.render_answers(
+            [QuestionAnswerItem(selected_indexes=[0])], notes="   "
+        )
+        assert "Notes:" not in rendered
+
+    def test_notes_truncated_to_the_cap(self):
+        args = _args()
+        long_notes = "x" * (MAX_QUESTION_NOTES_CHARS + 500)
+        rendered = args.render_answers(
+            [QuestionAnswerItem(selected_indexes=[0])], notes=long_notes
+        )
+        notes_line = rendered.split("\nNotes: ", 1)[1]
+        assert len(notes_line) == MAX_QUESTION_NOTES_CHARS
+
+
 class TestDispatcherSeam:
     def test_unregistered_by_default(self):
         assert QuestionDispatcher.available() is False
@@ -222,7 +303,7 @@ class TestAskUserQuestionTool:
         assert tool.terminal_reason() == "awaiting_approval"
 
     def test_handle_without_dispatcher_returns_unavailable_envelope(self):
-        from mewbo_core.tool_use_loop import _session_tool_error_envelope
+        from mewbo_core.loop.tool_use_loop import _session_tool_error_envelope
 
         tool = AskUserQuestionTool("sess-1")
         result = asyncio.run(tool.handle(_step({"questions": [
@@ -232,7 +313,7 @@ class TestAskUserQuestionTool:
         assert _session_tool_error_envelope(result) is not None
 
     def test_handle_invalid_args_returns_validation_envelope(self):
-        from mewbo_core.tool_use_loop import _session_tool_error_envelope
+        from mewbo_core.loop.tool_use_loop import _session_tool_error_envelope
 
         class _MustNotDispatch:
             async def dispatch(self, session_id, args):  # pragma: no cover
@@ -283,10 +364,11 @@ class TestAskUserQuestionTool:
             ("declined", "sent a new message instead"),
             ("interrupted", "interrupted the run"),
             ("cancelled", "cancelled before the user answered"),
+            ("timed_out", "arrives as a new user message"),
         ],
     )
     def test_handle_non_answer_outcomes_render_plainly(self, outcome, needle):
-        from mewbo_core.tool_use_loop import _session_tool_error_envelope
+        from mewbo_core.loop.tool_use_loop import _session_tool_error_envelope
 
         class _Fake:
             async def dispatch(self, session_id, args):
@@ -301,3 +383,65 @@ class TestAskUserQuestionTool:
         # Legitimate outcomes are NOT failures — the envelope detector must
         # not reclassify them.
         assert _session_tool_error_envelope(result) is None
+
+    def test_handle_timed_out_names_both_continuations(self):
+        """The ``timed_out`` render must give the model something to act on:
+        the elapsed wait, that a later answer still arrives, and both ways
+        forward — proceeding on an assumption or stopping to report it."""
+        from mewbo_core.loop.tool_use_loop import _session_tool_error_envelope
+
+        class _Fake:
+            async def dispatch(self, session_id, args):
+                return QuestionDispatchResult(outcome="timed_out")
+
+        QuestionDispatcher.register(_Fake())
+        tool = AskUserQuestionTool("sess-1")
+        result = asyncio.run(
+            tool.handle(
+                _step(
+                    {
+                        "questions": [{"header": "H", "question": "Q?"}],
+                        "timeout_seconds": 60,
+                    }
+                )
+            )
+        )
+        assert "60s" in result.content
+        assert "arrives as a new user message" in result.content
+        assert "to proceed on the most reasonable" in result.content
+        assert "or to stop and report" in result.content
+        # Timing out is an ordinary result, not a failed step.
+        assert _session_tool_error_envelope(result) is None
+
+
+class TestExecutionTimeoutHook:
+    """``AskUserQuestionTool.execution_timeout`` is what
+    ``ToolUseLoop._declared_execution_timeout`` reads (via ``getattr``) to
+    lift the flat 120s ceiling for this call.
+    """
+
+    def test_valid_args_with_timeout_returns_the_margin_ceiling(self):
+        tool = AskUserQuestionTool("sess-1")
+        ceiling = tool.execution_timeout(
+            {"questions": [{"header": "H", "question": "Q?"}], "timeout_seconds": 60}
+        )
+        assert ceiling == 60 + QUESTION_TIMEOUT_MARGIN_S
+
+    def test_valid_args_without_timeout_is_unbounded(self):
+        tool = AskUserQuestionTool("sess-1")
+        assert (
+            tool.execution_timeout({"questions": [{"header": "H", "question": "Q?"}]})
+            is None
+        )
+
+    def test_dict_failing_validation_falls_back_to_unbounded(self):
+        tool = AskUserQuestionTool("sess-1")
+        # Empty questions list fails AskUserQuestionArgs' min_length=1 — the
+        # hook must degrade rather than raise; handle() reports the real
+        # validation error separately.
+        assert tool.execution_timeout({"questions": []}) is None
+
+    @pytest.mark.parametrize("bad_input", ["not-a-dict", None, 42, ["questions"]])
+    def test_non_dict_falls_back_to_unbounded(self, bad_input):
+        tool = AskUserQuestionTool("sess-1")
+        assert tool.execution_timeout(bad_input) is None

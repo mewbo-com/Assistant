@@ -20,9 +20,14 @@ test("tasks — session detail with logs", async ({ demo }) => {
   // shot is stable even if that heuristic changes.
   await demo.ensureLogsTab();
 
-  // Both hero tool steps must be present before the capture.
+  // All three seeded tool steps must be present before the capture — the
+  // session's file_read AND its file_edit both cite the same path
+  // (SEED.readFile), so asserting only the read card (as this spec used to)
+  // left the diff card — the shape family's own accent, DiffCard's
+  // `border-l-agent-4` — unchecked; a run that dropped it still passed.
   await expect(demo.card("border-l-[3px]", SEED.shellCommand)).toBeVisible();
   await expect(demo.card("border-l-agent-1", SEED.readFile)).toBeVisible();
+  await expect(demo.card("border-l-agent-4", SEED.readFile)).toBeVisible();
 
   await demo.capturePage("tasks");
 });

@@ -27,7 +27,14 @@ import {
 } from './api/client';
 import { useConfig } from './hooks/useConfig';
 import { useSessions } from './hooks/useSessions';
-import { AttachmentPayload, QueryMode, SessionContext, SessionSummary } from './types';
+import {
+  AttachmentPayload,
+  QueryMode,
+  SessionContext,
+  SessionSummary,
+  SessionTarget,
+} from './types';
+import { openTargetSession } from './utils/sessionTarget';
 import { copyText } from './utils/clipboard';
 import { logApiError } from './utils/errors';
 import { useNotifications } from './hooks/useNotifications';
@@ -63,14 +70,13 @@ interface SessionDetailRouteProps {
   id: string;
   sessions: SessionSummary[];
   archivedSessions: SessionSummary[];
-  loading: boolean;
   archivedLoading: boolean;
   refreshArchived: () => Promise<void>;
   refresh: () => Promise<void>;
   applyTitle: (sessionId: string, title: string) => void;
   onSelectSession: (sessionId: string) => void;
   onBack: () => void;
-  // Session-header obligations, re-homed from the old detail NavBar.
+  // Session-header obligations.
   onRenameTitle: (sessionId: string, title: string) => Promise<void>;
   onRegenerateTitle: (sessionId: string) => Promise<string>;
   onArchive: (sessionId: string) => void;
@@ -83,11 +89,16 @@ interface SessionDetailRouteProps {
 // Resolves a session by id from active + archived lists, lazily fetching the
 // archived list if the id isn't found locally. Mirrors the hydration logic the
 // old activeSession lookup performed via a side-effect useEffect.
+//
+// The lists are an ENRICHMENT here, never a gate: `GET /api/sessions` summarises
+// every session and is measured in seconds on a large deployment, while this
+// page's own per-session fetches answer for one session in a fraction of that.
+// So the page mounts from the id alone and `SessionDetailView` fills the
+// subject's fields from whichever source arrives first (see its `subject`).
 function SessionDetailRoute({
   id,
   sessions,
   archivedSessions,
-  loading,
   archivedLoading,
   refreshArchived,
   refresh,
@@ -102,51 +113,37 @@ function SessionDetailRoute({
   onExport,
   langfuseBaseUrl,
 }: SessionDetailRouteProps) {
-  const session =
+  const listed =
     sessions.find((s) => s.session_id === id) ||
     archivedSessions.find((s) => s.session_id === id);
 
   useEffect(() => {
-    if (!session && !archivedLoading) {
+    if (!listed && !archivedLoading) {
       void refreshArchived();
     }
-  }, [session, archivedLoading, refreshArchived]);
+  }, [listed, archivedLoading, refreshArchived]);
 
-  if (session) {
-    return (
-      <SessionDetailView
-        session={session}
-        onTitleUpdate={applyTitle}
-        onSessionChange={refresh}
-        onSelectSession={onSelectSession}
-        onBack={onBack}
-        onRenameTitle={onRenameTitle}
-        onRegenerateTitle={onRegenerateTitle}
-        onArchive={onArchive}
-        onUnarchive={onUnarchive}
-        onShare={onShare}
-        onExport={onExport}
-        langfuseUrl={langfuseBaseUrl ? `${langfuseBaseUrl}/${session.session_id}` : null}
-      />
-    );
-  }
+  // Stands in until a listing row exists — the id is the one fact routing
+  // supplies, and every other field the page shows is either in the transcript
+  // or in the per-session poll's own response. Memoised so an unrelated list
+  // refresh can't hand the view a fresh object identity every render.
+  const fallback = useMemo<SessionSummary>(() => ({ session_id: id, title: "" }), [id]);
 
   return (
-    <div className="flex-1 overflow-y-auto p-6">
-      {loading ?
-        <div className="text-sm text-[hsl(var(--muted-foreground))]">Loading session…</div> :
-        <div className="space-y-2">
-          <div className="text-sm text-[hsl(var(--muted-foreground))]">
-            Session not found.
-          </div>
-          <button
-            onClick={onBack}
-            className="text-xs text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))] transition-colors">
-            Back to sessions
-          </button>
-        </div>
-      }
-    </div>
+    <SessionDetailView
+      session={listed ?? fallback}
+      onTitleUpdate={applyTitle}
+      onSessionChange={refresh}
+      onSelectSession={onSelectSession}
+      onBack={onBack}
+      onRenameTitle={onRenameTitle}
+      onRegenerateTitle={onRegenerateTitle}
+      onArchive={onArchive}
+      onUnarchive={onUnarchive}
+      onShare={onShare}
+      onExport={onExport}
+      langfuseUrl={langfuseBaseUrl ? `${langfuseBaseUrl}/${id}` : null}
+    />
   );
 }
 
@@ -231,6 +228,8 @@ export function App() {
     refreshArchived,
     archive,
     unarchive,
+    pin,
+    unpin,
     updateTitle,
     regenerateTitle,
     applyTitle
@@ -253,27 +252,60 @@ export function App() {
   query: string,
   context?: SessionContext,
   mode?: QueryMode,
-  attachments?: File[]) =>
+  attachments?: File[],
+  target?: SessionTarget | null) =>
   {
     setActionError(null);
     setCreating(true);
+    let sessionId: string;
     try {
-      const sessionId = await create(context);
+      // A target REPLACES `create`; it does not decorate it. The product's route
+      // mints a session already bound to that wiki project or app, which is the
+      // whole reason a target cannot be expressed as a context key — a plain
+      // session with an extra field on it would reach the product's tools with
+      // nothing for them to resolve.
+      //
+      // The composer is a CREATE surface, so a targeted submit always asks for a
+      // genuinely NEW session (`{requestNew: true}`) rather than the endpoint's
+      // default get-or-create reuse. Reuse is still correct for the gallery card /
+      // app header "open" buttons — those call `openProjectSession`/`openAppSession`
+      // directly, never through this function, so they are untouched by this flag.
+      sessionId = target ? await openTargetSession(target, { requestNew: true }) : await create(context);
+    } catch (err) {
+      // The operator is still on the landing page, so its inline Alert is the
+      // right surface — and there is no session to show them instead. This is
+      // the whole reason the target call sits BEFORE the hop: it is the one
+      // failure that leaves nothing to navigate to, so it must fail here, where
+      // an inline Alert is still mounted, rather than after.
+      setActionError(logApiError('createAndRun', err));
+      setCreating(false);
+      return;
+    }
+    // Routing needs nothing but the id, and the session page can already paint
+    // its shell (header, composer, and the run's starting beat) from the
+    // transcript. Waiting for /query to be accepted first held the operator on
+    // the landing page for a round trip that told them nothing.
+    goToSession(sessionId);
+    // The landing page's job is done the moment we leave it: leaving `creating`
+    // set would strand its composer as busy if the operator navigated back
+    // while the query below is still in flight.
+    setCreating(false);
+    try {
       const attachmentRecords: AttachmentPayload[] | undefined =
       attachments && attachments.length > 0 ?
       await uploadAttachments(sessionId, attachments) :
       undefined;
       await postQuery(sessionId, query, context, mode, attachmentRecords);
-      goToSession(sessionId);
       await refresh();
       window.setTimeout(() => {
         void refresh();
       }, 800);
     } catch (err) {
-      const message = logApiError('createAndRun', err);
-      setActionError(message);
-    } finally {
-      setCreating(false);
+      // `actionError` renders on the landing page, which is no longer mounted —
+      // setting it here would swallow the failure. A toast is the surface that
+      // reaches the operator on the session page they are now looking at, and
+      // the same one every other post-navigation action failure uses.
+      toast.error(logApiError('createAndRun', err));
     }
   };
   // assistant-ui composer submit seam (`onNew` on the external-store runtime).
@@ -366,8 +398,7 @@ export function App() {
     );
   }
 
-  // What the rail is scoped to — computed at the same altitude the old
-  // `landingNav` was. `wiki > search > apps > tasks`; a session page and the
+  // What the rail is scoped to: `wiki > search > apps > tasks`; a session page and the
   // task landing are both Tasks. `/settings` scopes the rail's section to the
   // settings facets while marking NO product row current (it has no switcher
   // row), which is how that route gets primary navigation without a fifth
@@ -446,7 +477,6 @@ export function App() {
               id={decodeURIComponent(params.id)}
               sessions={sessions}
               archivedSessions={archivedSessions}
-              loading={loading}
               archivedLoading={archivedLoading}
               refreshArchived={refreshArchived}
               refresh={refresh}
@@ -478,6 +508,8 @@ export function App() {
               onLoadArchived={refreshArchived}
               onArchive={archive}
               onUnarchive={unarchive}
+              onPin={pin}
+              onUnpin={unpin}
               isCreating={creating}
               onRetry={refresh} />
           </div>

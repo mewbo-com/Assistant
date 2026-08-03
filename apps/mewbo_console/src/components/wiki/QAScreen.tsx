@@ -45,6 +45,7 @@ import { cn } from "@/lib/utils";
 import { LiveBlocks } from "./LiveBlocks";
 import { ModelChip } from "./ModelPicker";
 import { QADock } from "./QADock";
+import { SessionJumpButton } from "./SessionJumpButton";
 import { SourceCard } from "./SourceCard";
 import { SourceHrefProvider } from "./markdownComponents";
 import { WikiTopBar } from "./WikiTopBar";
@@ -77,7 +78,10 @@ export function QAScreen({ question, pageId, slug, model: urlModel, answerId }: 
     resolveSourceHref,
     storedModel,
     setStoredModel,
+    storedMode,
+    setStoredMode,
     renderedTurns,
+    sessionId,
     onAsk,
   } = useQaConversation({ question, pageId, slug, model: urlModel, answerId });
 
@@ -86,7 +90,11 @@ export function QAScreen({ question, pageId, slug, model: urlModel, answerId }: 
       <WikiTopBar repo={repoSlug} showBackToAll showSettings />
       <div id="wiki-scroller" className="flex-1 overflow-y-auto pb-32">
         <div className="max-w-[1200px] mx-auto px-4 sm:px-6">
-          <div className="pt-8">
+          {/* The back-link row doubles as the conversation-level chrome: the
+              session jump belongs HERE, not inside `TurnView`, because one
+              session answers every turn of a conversation — mounting it per
+              turn would repeat one affordance N times for one destination. */}
+          <div className="pt-8 flex items-center justify-between gap-3">
             <button
               type="button"
               onClick={() => navigate(buildHref({ kind: "page", pageId, slug }))}
@@ -95,6 +103,13 @@ export function QAScreen({ question, pageId, slug, model: urlModel, answerId }: 
               <ArrowLeft className="h-3.5 w-3.5" />
               {repoSlug}
             </button>
+            {sessionId && (
+              <SessionJumpButton
+                sessionId={sessionId}
+                label="Watch the answering session"
+                title="Open the Mewbo session answering this question"
+              />
+            )}
           </div>
 
           {renderedTurns.map((turn, i) => (
@@ -122,6 +137,8 @@ export function QAScreen({ question, pageId, slug, model: urlModel, answerId }: 
         placeholder="Ask a follow-up question"
         model={storedModel}
         onModelChange={setStoredModel}
+        mode={storedMode}
+        onModeChange={setStoredMode}
         onAsk={onAsk}
       />
     </div>

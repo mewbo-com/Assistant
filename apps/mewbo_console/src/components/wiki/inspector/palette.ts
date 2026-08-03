@@ -42,9 +42,9 @@ export const SYMBOL_KINDS: ReadonlySet<string> = new Set([
 
 /**
  * The kind dot class for any node kind (falls back to the soft edge token).
- * Reads the single canonical `graphTheme.KIND_DOT` map — this module used to
- * keep its own copy of the same values, which is exactly the kind of drift
- * `graphTheme.ts` exists to prevent. The cast is required here, and only
+ * Reads the single canonical `graphTheme.KIND_DOT` map — keeping a local copy
+ * of the same values here would be exactly the kind of drift `graphTheme.ts`
+ * exists to prevent. The cast is required here, and only
  * here: callers pass a plain `string` (a dangling edge target's kind, or
  * other unvalidated wire data), while `KIND_DOT` itself stays keyed by the
  * closed `GraphNodeKind` union everywhere else it's read.

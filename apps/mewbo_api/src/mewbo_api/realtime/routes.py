@@ -1,7 +1,7 @@
 """Realtime token-streaming draft synthesis — ``POST /v1/draft/stream``.
 
 Token-streaming path: the
-:class:`~mewbo_core.draft_stream.DraftStreamer` bridges one tool-light
+:class:`~mewbo_core.session.draft_stream.DraftStreamer` bridges one tool-light
 ``.astream()`` of LLM token deltas to Flask's sync WSGI as server-sent events,
 ending with an additive terminal ``done`` frame carrying the backing
 ``session_id`` (also sent up front in the ``X-Mewbo-Session`` header).
@@ -20,8 +20,8 @@ injected by ``init_realtime``.
 
 The namespace is mounted at ``/v1/draft`` (``draft_ns``) → ``/v1/draft/stream``.
 
-The no-loop, retrieval-only structured synthesis lane (formerly the sibling
-``POST /v1/structured/fast``) now lives as ``mode: "synthesis"`` ON the agentic
+The no-loop, retrieval-only structured synthesis lane lives as
+``mode: "synthesis"`` ON the agentic
 ``POST /v1/structured`` endpoint — see ``mewbo_api.structured.synthesis``,
 which reuses the shared :class:`RealtimeSessionRecorder` + ``WikiGroundingProvider``
 glue this package owns.
@@ -35,8 +35,8 @@ from typing import Any
 from flask import Response, request, stream_with_context
 from flask_restx import Namespace, Resource, fields
 from mewbo_core.common import get_logger
-from mewbo_core.draft_stream import DraftStreamer
-from mewbo_core.structured_synthesis import _format_citations
+from mewbo_core.loop.structured_synthesis import _format_citations
+from mewbo_core.session.draft_stream import DraftStreamer
 
 from mewbo_api.auth.guard_registry import guard
 from mewbo_api.realtime.recorder import RealtimeSessionRecorder
@@ -83,7 +83,7 @@ draft_ns = Namespace(
 )
 
 # Error-envelope/message examples for this namespace (the draft route only emits
-# the legacy ``{"message": ...}`` shape, but the kit is the one DRY home). Built
+# the ``{"message": ...}`` shape, but the kit is the one DRY home). Built
 # at module level so the import-time decorators can see it; ``Draft`` prefix
 # namespaces the generated model names on the shared Api registry.
 kit = ApiResponseKit(draft_ns, prefix="Draft")

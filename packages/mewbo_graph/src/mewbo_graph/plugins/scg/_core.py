@@ -3,7 +3,7 @@
 The SCG deterministic core (store, parser, router, aligner, memory bridge,
 providers) lives **down** in the same library at ``mewbo_graph.scg``; the wiki
 memory substrate this bridge also touches lives down at ``mewbo_graph.wiki``.
-Both are imported DOWN — no longer a one-way boundary UP into an app. The wiki
+Both are imported DOWN; neither reaches UP into an app. The wiki
 tools each carry a private ``_resolve_runtime()`` / ``_make_embedder()`` late
 import; this module consolidates that seam into ONE atomic resolver class so the
 six SCG tools share a single, test-patchable bridge (DRY).
@@ -27,7 +27,7 @@ from mewbo_core.common import MockSpeaker
 if TYPE_CHECKING:  # type-only — never imported at runtime in a core-only install
     from collections.abc import Callable
 
-    from mewbo_core.types import Event
+    from mewbo_core.contracts.types import Event
 
     from mewbo_graph.scg.entity_resolution import TypeAligner
     from mewbo_graph.scg.memory_bridge import ScgMemoryBridge

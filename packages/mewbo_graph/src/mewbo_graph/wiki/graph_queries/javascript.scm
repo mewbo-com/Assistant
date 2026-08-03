@@ -20,6 +20,25 @@
   (class_heritage
     (identifier) @superclass.name))
 
+; Arrow-function and function-expression consts. `.jsx` shares this grammar,
+; and a React `.jsx` module is almost entirely `const Foo = () => …` — the same
+; reason typescript.scm carries this pattern; see the longer note there.
+(variable_declarator
+  name: (identifier) @function.name
+  value: [(arrow_function) (function_expression)]) @function.def
+
+; Generator functions — `function* gen()` is its own node type.
+(generator_function_declaration
+  name: (identifier) @function.name) @function.def
+
+; A class field holding an arrow is a method in all but syntax. JavaScript names
+; this node `field_definition` with a `property:` field, where TypeScript uses
+; `public_field_definition` with `name:` — the two grammars genuinely differ, so
+; the pattern cannot simply be shared.
+(field_definition
+  property: (property_identifier) @method.name
+  value: [(arrow_function) (function_expression)]) @method.def
+
 ; ES6 imports — `import x from 'mod'` / `import { y } from 'mod'`
 (import_statement
   source: (string) @import.module)

@@ -199,16 +199,20 @@ def test_cmd_context_over_warning_hint(monkeypatch) -> None:
         ]
     )
 
-    import mewbo_cli.tui.status.context_meter as cm
+    import mewbo_core.session.token_budget as token_budget
 
     def _fake_config(*keys, default=None):
-        if keys == ("llm", "model_context_windows"):
+        if keys == ("token_budget", "model_context_windows"):
             return {}
-        if keys == ("llm", "default_context_window"):
+        if keys == ("token_budget", "default_context_window"):
             return 1000
         return default
 
-    monkeypatch.setattr(cm, "get_config_value", _fake_config)
+    # ContextMeter() delegates window resolution to
+    # ``get_model_max_input_tokens``, so the fake config has to sit where that
+    # resolver reads it, not on the CLI meter module.
+    monkeypatch.setattr(token_budget, "get_config_value", _fake_config)
+    monkeypatch.setattr(token_budget, "_litellm_max_input_tokens", lambda _name: None)
     ctx = SimpleNamespace(
         console=console,
         state=SimpleNamespace(model_name="x", session_id="s"),

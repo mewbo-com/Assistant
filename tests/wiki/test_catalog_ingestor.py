@@ -20,7 +20,7 @@ import pytest
 from mewbo_graph.wiki.catalog import CatalogIngestor
 from mewbo_graph.wiki.retriever import HybridRetriever
 from mewbo_graph.wiki.store import JsonWikiStore
-from mewbo_graph.wiki.types import CatalogDocument, Embedding
+from mewbo_graph.wiki.types import CatalogDocument, CommitScope, Embedding
 
 # ── Fixtures / helpers ──────────────────────────────────────────────────────
 
@@ -101,7 +101,7 @@ def test_ingest_creates_complete_project_with_populated_graph(store):
     assert project.pages == 4
     assert project.landing_page_id == report.landing_page_id
     # Non-empty graph → the finalize honesty gate is satisfied honestly.
-    assert len(store.query_graph("acme/catalog")) == 3
+    assert len(store.query_graph("acme/catalog", scope=CommitScope.every())) == 3
 
 
 def test_ingest_writes_pages_and_graph_nodes_for_each_doc(store):
@@ -115,7 +115,7 @@ def test_ingest_writes_pages_and_graph_nodes_for_each_doc(store):
         assert CatalogIngestor._doc_id("acme/catalog", doc.id) in page_ids
         assert doc.title in titles
     # one graph node per doc, carrying searchable text
-    nodes = store.query_graph("acme/catalog")
+    nodes = store.query_graph("acme/catalog", scope=CommitScope.every())
     names = {n.name for n in nodes}
     assert "Aurora Standing Desk" in names
     assert any("ergonomic" in (n.docstring or "") for n in nodes)
@@ -156,7 +156,7 @@ def test_reingest_same_ids_upserts_no_duplicates(store):
     assert report.total_documents == 3  # not 6
     # 3 doc pages + 1 landing page (no churn on re-ingest).
     assert len(store.list_pages("acme/catalog")) == 4
-    assert len(store.query_graph("acme/catalog")) == 3
+    assert len(store.query_graph("acme/catalog", scope=CommitScope.every())) == 3
     titles = {p.title for p in store.list_pages("acme/catalog")}
     assert "Aurora Standing Desk (v2)" in titles
     assert "Aurora Standing Desk" not in titles  # the old body was replaced
@@ -201,7 +201,7 @@ def test_slug_colliding_ids_do_not_overwrite_each_other(store):
 
     assert report.total_documents == 2
     # 2 distinct doc pages + landing page; 2 distinct graph nodes.
-    assert len(store.query_graph("acme/catalog")) == 2
+    assert len(store.query_graph("acme/catalog", scope=CommitScope.every())) == 2
     titles = {p.title for p in store.list_pages("acme/catalog")}
     assert {"Foo Bar (space)", "Foo Bar (dash)"} <= titles
     # The two content-addressed ids are genuinely different.

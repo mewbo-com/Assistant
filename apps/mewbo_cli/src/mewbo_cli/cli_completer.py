@@ -26,7 +26,7 @@ from mewbo_tools.integration.file_catalog import FileCatalog
 from prompt_toolkit.completion import Completer, Completion
 
 if TYPE_CHECKING:
-    from mewbo_core.skills import SkillRegistry
+    from mewbo_core.tooling.skills import SkillRegistry
     from prompt_toolkit.completion import CompleteEvent
     from prompt_toolkit.document import Document
 

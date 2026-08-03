@@ -42,7 +42,7 @@ from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict
 
-from mewbo_core.session_provenance import KNOWN_SURFACES
+from mewbo_core.session.session_provenance import KNOWN_SURFACES
 
 # The operating systems Mewbo reports. ``InstructionContext.platform`` is
 # ``platform.system().lower()`` (``orchestrator.py``), so these are the

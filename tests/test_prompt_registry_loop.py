@@ -1,13 +1,11 @@
 """Golden byte-equality tests for the migrated tool-use-loop prompts.
 
-Phase 1 is a VERBATIM extraction: the registry must reproduce the exact bytes
-that ``tool_use_loop.py`` previously hardcoded (system-prompt section wrappers,
-the depth/delegation role prompts, budget/stall/interrupt injections, the
-final-answer synthesis directive, the compaction drive/re-injection markers,
-and the plan-mode reminders). Each ``EXPECTED_*`` literal below is a frozen copy
-of the original constant/f-string; if a future edit retunes a prompt, the
-byte-equality assertion fails loudly. The originals live in the registry now
-(``loop.yaml``); this test is the contract that the migration changed nothing.
+``loop.yaml`` owns every prompt ``tool_use_loop.py`` sends: system-prompt
+section wrappers, the depth/delegation role prompts, budget/stall/interrupt
+injections, the final-answer synthesis directive, the compaction
+drive/re-injection markers, and the plan-mode reminders. Each ``EXPECTED_*``
+literal below is a frozen copy of what the registry must render; if an edit
+retunes a prompt, the byte-equality assertion fails loudly.
 
 A representative ``model=`` is passed to the per-step injected prompts (section
 wrappers + depth guidance) to prove they still render the base template — no
@@ -16,7 +14,7 @@ model override exists yet, so per-model convergence wiring is a no-op today.
 
 from __future__ import annotations
 
-from mewbo_core.prompt_registry import get_prompt_registry
+from mewbo_core.llm.prompt_registry import get_prompt_registry
 
 # A model that does not match any override prefix — proves base render holds.
 _MODEL = "claude-opus-4-8"
@@ -128,9 +126,12 @@ def test_section_tool_guidance_is_verbatim():
 def test_section_deferred_tools_is_verbatim():
     reg = get_prompt_registry()
     assert reg.render("loop.section.deferred_tools", model=_MODEL) == (
-        "Schemas are not loaded — call `tool_search` with keywords "
-        "(e.g. server name, action) or `select:<tool_id>` to load them "
-        "before invoking."
+        "Only the schemas are withheld — the tool ids listed above are the "
+        "complete set, so never spend a call just to find out which tools "
+        "exist. Load the ones you need with `tool_search` using "
+        "`select:<tool_id>` (comma-separate several in one call), or search by "
+        "keyword (server name, action) when you know the capability but not "
+        "the id. A tool's schema must be loaded before you invoke it."
     )
 
 
@@ -189,10 +190,16 @@ def _shared_root_sections() -> list[str]:
     return [
         "",
         "## Async delegation protocol (when you spawn)",
-        "- spawn_agent returns immediately with {agent_id, status: 'submitted'}.",
-        "- spawn_agents(tasks=[...]) fans out many at once, returning ordered"
-        " agent_ids (per-slot 'rejected' if the pool is full) — the preferred"
-        " path for independent subtasks.",
+        "- spawn_agent returns immediately with {agent_id, status: 'submitted'}"
+        " — accepted, whether it starts running right away or a moment later;"
+        " either way, track it via check_agents until it reaches a terminal"
+        " state.",
+        "- spawn_agents(tasks=[...]) fans out many at once, returning an"
+        " agent_id for every task — a busy pool only delays when a task"
+        " starts running, it never drops the task. 'rejected' marks only a"
+        " permanent refusal (unknown agent_type, unresolvable project, model"
+        " unavailable, depth exceeded), never a capacity effect — the"
+        " preferred path for independent subtasks.",
         "- Continue with independent work while children execute in background.",
         "- React to '[Agent xxx finished: ...]' notifications between your steps.",
         "- Call check_agents to see tree state and collect completed results.",
@@ -355,6 +362,16 @@ def test_agents_still_running_is_verbatim():
     )
 
 
+def test_required_terminal_missing_is_verbatim():
+    reg = get_prompt_registry()
+    tool_ids = "wiki_emit_answer"
+    assert reg.render("loop.required_terminal_missing", tool_ids=tool_ids) == (
+        "Your reply text was NOT delivered — the user has seen nothing. "
+        f"Completing this task REQUIRES calling: {tool_ids}. Call the tool "
+        "now; never write the call out as text."
+    )
+
+
 def test_final_answer_synthesis_is_verbatim():
     reg = get_prompt_registry()
     assert reg.render("loop.final_answer_synthesis") == (
@@ -453,9 +470,9 @@ def test_plan_mode_reminder_is_verbatim():
     reg = get_prompt_registry()
     plan_path = "/home/u/.mewbo/plans/sess.md"
     bullets = "    - `ls`\n    - `cat`"
-    # The original call site read the file via get_system_prompt(), which
-    # .strip()s — so the historical bytes carried NO trailing newline. The
-    # registry entry uses `|-` to reproduce that exactly.
+    # The call site reads the file via get_system_prompt(), which .strip()s,
+    # so the expected bytes carry NO trailing newline. The registry entry uses
+    # `|-` to match.
     expected = (
         _EXPECTED_PLAN_MODE_REMINDER.strip()
         .replace("{plan_path}", plan_path)

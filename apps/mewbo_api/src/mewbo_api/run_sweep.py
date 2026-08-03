@@ -30,7 +30,7 @@ test that imports ``backend.py`` triggers it against whatever store the test
 config points at. It is idempotent (a re-import settles nothing), but it IS a
 write. Set ``MEWBO_BOOT_RUN_SWEEP=0`` to skip entirely (env-driven, default on;
 no config-schema knob). See ``apps/mewbo_api/CLAUDE.md`` → the ``/variables``
-prime-at-boot post-mortem for why import == startup here.
+prime-at-boot note for why import == startup here.
 
 Deployment note: prod is gunicorn ``--workers 1``, so the sweep runs once per
 process. A multi-worker deployment would invoke it once per worker; that is
@@ -49,8 +49,8 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 
 from mewbo_core.common import get_logger
-from mewbo_core.session_store import SessionStoreBase
-from mewbo_core.types import Event, EventRecord
+from mewbo_core.contracts.types import Event, EventRecord
+from mewbo_core.session.session_store import SessionStoreBase
 
 logging = get_logger(name="api.run_sweep")
 
@@ -62,20 +62,18 @@ _BOOT_SWEEP_ENV = "MEWBO_BOOT_RUN_SWEEP"
 # Events that occur ONLY within a root run's active lifetime — their presence
 # after the last ``completion`` marks a turn that began and never closed:
 # ``run_accepted`` (a run started) and the ``llm_call_start``/``llm_call_end``
-# bracket (the exact window the incident died in — a transcript ending on
-# ``llm_call_start`` with no matching end and no completion). Deliberately a
-# NARROW positive allowlist, and three event types are EXCLUDED because each can
-# land legitimately AFTER a completed run's ``completion`` and would FALSE-FLIP
-# it: a bare ``user`` turn (a queued next turn), a background ``sub_agent`` stop
-# (a child lifecycle event past the drain window), and ``user_steer`` (a
-# ``/message`` racing the run-handle teardown — ``is_running`` briefly lags the
-# completion write, so a steer can append just after it). ``user_steer`` is also
-# redundant: a genuinely-orphaned steered run is already anchored by the
-# ``run_accepted`` that started it (after the last completion). An unrecognised
-# or post-completion event therefore counts as NON-progress by construction: the
-# worst case is a MISSED orphan (status stays ``idle`` — no regression), never a
-# completed run wrongly flipped. Miss-only is the contract. (``action_plan`` is
-# not emitted as a transcript event, so it is not listed.)
+# bracket — a transcript ending on ``llm_call_start`` with no matching end and
+# no completion is the orphan shape this catches. A NARROW positive allowlist:
+# three event types are EXCLUDED because each can land legitimately AFTER a
+# completed run's ``completion`` and would FALSE-FLIP it — a bare ``user`` turn
+# (a queued next turn), a background ``sub_agent`` stop (a child lifecycle event
+# past the drain window), and ``user_steer`` (a ``/message`` racing the
+# run-handle teardown, since ``is_running`` briefly lags the completion write).
+# ``user_steer`` is redundant anyway: an orphaned steered run is already anchored
+# by the ``run_accepted`` that started it. So an unrecognised or post-completion
+# event counts as NON-progress by construction, and the worst case is a MISSED
+# orphan (status stays ``idle``), never a completed run wrongly flipped.
+# Miss-only is the contract.
 _RUN_MARKER_EVENTS: frozenset[str] = frozenset(
     {
         "run_accepted",
@@ -84,11 +82,10 @@ _RUN_MARKER_EVENTS: frozenset[str] = frozenset(
     }
 )
 
-# Only settle runs whose LAST activity is recent. The window bounds the one-time
-# backfill when this sweep first ships (an ancient abandoned mid-call session is
-# not the incident this fixes and should not resurface as a fresh red card);
-# steady-state boots only ever see runs orphaned since the previous start, well
-# inside it.
+# Only settle runs whose LAST activity is within this window. Sized so a
+# steady-state boot always covers everything orphaned since the previous start,
+# while an abandoned mid-call session older than it is left alone rather than
+# surfaced as a fresh failure.
 _RECENT_ACTIVITY_WINDOW = timedelta(days=7)
 
 # The sweeper examines only each candidate's event TAIL, never scanning full

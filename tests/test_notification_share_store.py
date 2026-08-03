@@ -1,8 +1,8 @@
 """Tests for notification and share stores."""
 
 from mewbo_core.config import set_config_override
-from mewbo_core.notifications import NotificationStore
-from mewbo_core.share_store import ShareStore
+from mewbo_core.session.notifications import NotificationStore
+from mewbo_core.session.share_store import ShareStore
 
 
 def test_notification_store_handles_corrupt_json(tmp_path):

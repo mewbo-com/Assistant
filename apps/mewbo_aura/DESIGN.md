@@ -8,19 +8,19 @@
 > stale — fix it. Every visual change to the app must be checked against §7 (regressions that
 > must never recur) before it ships.
 
-Provenance shorthand used below: **[R1]** = user directive 2026-07-04 round 1 (compact design
-language), **[R2]** = 2026-07-04 round 2 (breathability + aura correction), **[R3]** = 2026-07-04
-round 3 (footer under every completed response; 2× breathability — doubled turn band + doubled
-bubble→response gap), **[R4]** = user directive 2026-07-10 (overlay presence redesign —
-pill mass: overlay-only height/action-circle/type-scale tokens; context-preserving scrim gradient;
-3-phase invocation bloom + session resting glow; a11y channel),
-**[R5]** = user directive 2026-07-11 (device feedback on 0.0.30-debug: the overlay
+Provenance shorthand used below, in directive order (each supersedes the one before it): **[R1]**
+= user directive, round 1 (compact design language), **[R2]** = round 2 (breathability + aura
+correction), **[R3]** = round 3 (footer under every completed response; 2× breathability —
+doubled turn band + doubled bubble→response gap), **[R4]** = user directive (overlay presence
+redesign — pill mass: overlay-only height/action-circle/type-scale tokens; context-preserving
+scrim gradient; 3-phase invocation bloom + session resting glow; a11y channel),
+**[R5]** = user directive (device feedback on 0.0.30-debug: the overlay
 aurora must be a pretty MULTI-HUE field [blue + violet + ember], FLUID toward the edges [2-octave
 wave + per-row liquid level], and STRONGER at the edges [persistent edge-lit perimeter floor]; plus
 a fluid synthesizer-style RMS voice bar),
 **[Ref]** = measured reference-capture
 values, **[Rev F]** = instrumented uiautomator audit. Precedence: **the
-newest user directive wins over every measured reference value**. Do not "fix" a directive value
+highest-numbered user directive wins over every measured reference value**. Do not "fix" a directive value
 back toward reference parity — record a new directive instead.
 
 ## 1. Philosophy
@@ -53,7 +53,7 @@ back toward reference parity — record a new directive instead.
 | markdown H4–H6 | = `bodyMessage` verbatim | — | [Ref] (heading by placement only) |
 | `sectionHeader` / `metaTrailing` | **14** | Normal | [R1] |
 | `chipLabel` | **13** | Normal | [R1] |
-| `toolCardDisplay` | **36 / 44** | Normal | action-card payload line (§6); GMS reference capture 2026-07-12 |
+| `toolCardDisplay` | **36 / 44** | Normal | action-card payload line (§6); GMS reference capture |
 | `caption` | **12 / 17** | Normal | [R1] · [R2] |
 
 Laws: user bubbles and assistant text share `bodyMessage` (voice is distinguished by the bubble
@@ -72,17 +72,17 @@ and spacing, not size.
 | `Turn.gapAbove / gapBelow` | **48dp / 48dp** | the turn band: 48 + hairline + 48 [R2 introduced, R3 doubled] |
 | `ActionRow` | icon **20dp** in 48dp cells, `topMargin` **8dp** | ≈22dp ink response→footer [R2]; 48dp = a11y floor, never shrink |
 | `ActivityGroup` | rowHeight 36dp, topGapAfterBubble 32dp [R3], detailMaxHeight 200dp | tool fold geometry [Ref] |
-| `ToolCard` | paddingVertical **20dp**, headerIconSize **16dp**, headerIconGap **4dp**, headerToContentGap **12dp** | promoted-tool action card (§6); GMS reference capture 2026-07-12. Reuses `AssistantText.gutter` (24dp) + `Composer.internalPadding` (16dp) — only these four were uncovered |
+| `ToolCard` | paddingVertical **20dp**, headerIconSize **16dp**, headerIconGap **4dp**, headerToContentGap **12dp** | promoted-tool action card (§6); GMS reference capture. Reuses `AssistantText.gutter` (24dp) + `Composer.internalPadding` (16dp) — only these four were uncovered |
 | `Markdown.headingTopGap / BottomGap` | 36 / 16dp | headings cling to what follows (~2:1) [Ref measured] |
 | `UserBubble` | pad 16/12, rightMargin 24, maxWidth 0.78 | [Rev F] |
-| `DrawerRow` recents (rail) | rowHeight **44dp** (vs 56dp action rows), `dateGroupTopPad` 12dp, `runningDotSize` 8dp trailing | compact, date-grouped Recents [2026-07-03 directive] |
+| `DrawerRow` recents (rail) | rowHeight **44dp** (vs 56dp action rows), `dateGroupTopPad` 12dp, `runningDotSize` 8dp trailing | compact, date-grouped Recents [user directive] |
 | `Composer.overlayHeight` | **84dp** | [R4] overlay-only pill height (vs docked 64dp) — full conversational surface, not a media strip |
 | `Composer.overlayActionCircleSize` | **56dp** | [R4] overlay-only trailing circle/tile size (vs docked 44dp) — primary voice action dominates |
-| `Composer.scopeRowStartInset` | **48dp** (= `horizontalMargin` 16 + `height/2` 32) | docked scope-row start anchor: `radiusPill` is `CircleShape` (a 50% stadium), so the corner curve becomes the straight edge exactly `height/2` in from the pill edge — align composer content there, not to `horizontalMargin` alone [2026-07-14 directive] |
-| `Composer.scopeRowIconSize` | **16dp** | scope-row glyph, one step down from the 24dp `iconSize` to sit proportionate to `chipLabel`/`sectionHeader` text [2026-07-14] |
-| `DrawerSheet.shadowElevation` | **16dp** | the drop shadow under the left drawer — `ModalDrawerSheet` casts NONE by default (m3 1.4.0 forwards only `drawerTonalElevation`, tinted toward `accentPrimary`), so it is applied via `Modifier.shadow(…, RectangleShape, clip = false)` at the call site [2026-07-14 side-rail polish] |
+| `Composer.scopeRowStartInset` | **48dp** (= `horizontalMargin` 16 + `height/2` 32) | docked scope-row start anchor: `radiusPill` is `CircleShape` (a 50% stadium), so the corner curve becomes the straight edge exactly `height/2` in from the pill edge — align composer content there, not to `horizontalMargin` alone [user directive] |
+| `Composer.scopeRowIconSize` | **16dp** | scope-row glyph, one step down from the 24dp `iconSize` to sit proportionate to `chipLabel`/`sectionHeader` text |
+| `DrawerSheet.shadowElevation` | **16dp** | the drop shadow under the left drawer — `ModalDrawerSheet` casts NONE by default (m3 1.4.0 forwards only `drawerTonalElevation`, tinted toward `accentPrimary`), so it is applied via `Modifier.shadow(…, RectangleShape, clip = false)` at the call site [side-rail polish] |
 
-**Recents rail [2026-07-03 directive].** The left drawer's session history is a *navigation list*,
+**Recents rail [user directive].** The left drawer's session history is a *navigation list*,
 not a conversational turn stream — so §1.2's "never cramped" law (which governs turn separation in
 the chat surface) does not apply here. History rows are deliberately DENSER than the New chat /
 Search chats action rows (44dp vs 56dp), and every recents title is **flush at `screenGutter`**,
@@ -93,7 +93,7 @@ indented every title ~36dp past the header; running-session liveness is now a TR
 "All" via the "Recents" header's overflow menu — the rail's analogue of the console's
 `DEFAULT_VISIBLE_ORIGINS` (mobile ↔ task sessions don't bleed either way).
 
-**Recents-row long-press actions [2026-07-04].** Long-pressing a recents row opens
+**Recents-row long-press actions.** Long-pressing a recents row opens
 `SessionActionsSheet` (Rename / Archive — the API has no session hard-delete, so no Delete row):
 standard sheet anatomy (§4 — `surfaceInput`, `radiusBubble` top corners, drag handle, 56dp action
 rows at `screenGutter`), header = the session title, archive glyph hand-ported (no
@@ -129,7 +129,7 @@ full-width, bubble-scale surfaces), `radiusThumb` 16dp (code blocks), `radiusCar
 overlay's SMALL floating response card — deliberately tighter; do not reach for it just because a
 thing is called a "card").
 
-**Side-rail + scope tokens [2026-07-14].** `surfaceDrawer #0F1012` (the left drawer's whole-column fill,
+**Side-rail + scope tokens.** `surfaceDrawer #0F1012` (the left drawer's whole-column fill,
 roughly midway `surfaceCanvas`→`surfaceInput`) is its OWN token — NOT `surfaceSelected` (which is the
 rail's selected-row pill fill; a whole-canvas use would erase that highlight, §7.8) nor `surfaceInput`
 (bubbles/composer/chips). `scopeProject #B79CE8` (amethyst) / `scopeTool #5CC8D6` (cyan) tint the
@@ -137,7 +137,7 @@ composer scope-row + project/tool-picker GLYPHS only (never body text) — a coo
 deliberately distinct from `accentPrimary`/`accentError` and clear of the rejected yellow/brown/green
 (§4 aura color law).
 
-**The action card must not wear `surfaceInput`** (§6, 2026-07-12): that token fills the composer,
+**The action card must not wear `surfaceInput`** (§6): that token fills the composer,
 every bottom sheet, the attachment tiles AND the chip family, so a card wearing it dissolves into the
 chrome around it — the precise opposite of a surface whose only purpose is to be seen. It takes
 `surfaceSelected`, one step lighter and uncontested at that scale. Picking a token by its NAME
@@ -162,7 +162,7 @@ fade is owned by the caller's own `AnimatedVisibility`. Superseded seams, all de
 **Overlay bloom colors [R4]:** the overlay's live/resting bottom glow renders `AuraColors.
 auroraOverlayLiveBloom` — `#6D85B9` (bright stop) / `#4562A0` (fade stop), the raw reference-capture
 scanline values — restored because chat's darkened `auroraOverlayBloom` pair (`#33436E`/`#131C36`,
-2026-07-03 dark-blend directive) rendered mathematically present but perceptually invisible once
+dark-blend directive) rendered mathematically present but perceptually invisible once
 composited under the overlay's own scrim; chat keeps the darkened pair untouched. The one-shot
 ignition phase lerps toward `AuraColors.auroraIgnitionBloom` — `#5C7BF0` (bright) / `#23336B` (deep),
 `accentPrimary`-adjacent — before settling back to whichever pair the caller owns (CPU-side lerp,
@@ -196,7 +196,7 @@ edge glow) and must NEVER render in the chat surface — the user explicitly rej
 | App state | Visual | Contract |
 |---|---|---|
 | **Resting** (idle, no run, invocation window elapsed) | **Solid background. NO aura. Transparent top bar.** | [R2] "the native resting state of the app is just a solid color background" |
-| **Fresh invocation** (app/chat screen just opened) | bottom blue glow, ambient, **30s** window (`AMBIENT_INVOCATION_WINDOW_MS`, ≥3× the prior ~10s per a 2026-07-14 directive; §7.21), then fades out smoothly | [R2] |
+| **Fresh invocation** (app/chat screen just opened) | bottom blue glow, ambient, **30s** window (`AMBIENT_INVOCATION_WINDOW_MS`, ≥3× the prior ~10s per user directive; §7.21), then fades out smoothly | [R2] |
 | **Run live** (Sending/Streaming) | bottom blue glow (Thinking), slightly faster than ambient — speed changes phase-continuous, never a jump | [R2]; speed boost constant lives in `ChatScreen` |
 | **Run live** (transcript) | `AuraSpark` row visible at the transcript bottom for the ENTIRE run — follow-ups and mid-turn tool phases included | [R1] |
 | **Run complete** (run just settled, chat still open) | bottom glow blooms from Thinking's contracted hug into the wider `Listening` ambient breathe, **30s** window **re-armed on every completion** (`completionArmToken`), then fades to `Hidden` — the SAME bounded linger a fresh invocation gives, deliberately NOT empty-gated (it fires precisely because a response landed into a non-empty transcript) | [R2] window · re-arm |
@@ -216,7 +216,7 @@ bloom) — see `ui/aurora/CLAUDE.md`. An abrupt on→off flash is a photosensiti
 §7.15 stays valid — the ease-off itself is unchanged, only WHEN it fires moved to the linger's end.
 Caller-knob so the overlay keeps its own quick dismiss (§7.15).
 
-**Overlay invocation — the perimeter bloom ([R4 2026-07-10]).** The assist overlay
+**Overlay invocation — the perimeter bloom ([R4]).** The assist overlay
 (distinct surface from chat — an on-screen overlay is always live, so it is NOT bound by the
 solid-resting law above) opens with a one-shot PERIMETER bloom that rides `AuroraEdgeGlow`'s
 entrance and decays into the bottom-only live glow. Keyframes, from the moment the overlay leaves
@@ -272,7 +272,7 @@ record a new directive instead.
   only when expanded; input AND result share one monospace `ToolCallCodeBlock` on
   `surfaceSelected`. Never a filled card, never a sheet, never auto-expanded.
 - **Action card (promoted tools) — the ONE sanctioned exception to "never a filled card", and NOT a
-  loosening of the fold law above.** *User directive 2026-07-12:* the fold exists for the ordinary,
+  loosening of the fold law above.** *User directive:* the fold exists for the ordinary,
   typically-uninteresting tool call; a tool we deliberately pick **because its result is something
   the user must SEE** (an alarm being set) gets its own dedicated component. Emphasis is a curated
   editorial decision we make — never a property a tool can claim for itself. Mechanically: a short
@@ -283,12 +283,12 @@ record a new directive instead.
   **The card does NOT suppress the turn's prose reply** — the wire sends exactly one `assistant`
   event per turn and the reducer never drops it, so a promoted turn renders `[card] → [prose]`, card
   above narration (§6 turn shape). The reference app *does* replace its prose with the card; we
-  diverge **by decision, not omission** (*user directive 2026-07-12*, after the divergence was put to
+  diverge **by decision, not omission** (*user directive*, after the divergence was put to
   them explicitly): a turn's narration can carry more than the tool's own result — a model that sets
   an alarm AND answers something else would lose the something else — and it is not ours to delete.
   The mild restatement on tool-only turns is the accepted cost. Do NOT "fix" this toward reference
   parity, and do not write card copy that assumes the card is the whole answer.
-  Anatomy is Google's own, lifted from a GMS-device `uiautomator` capture (2026-07-12) where the
+  Anatomy is Google's own, lifted from a GMS-device `uiautomator` capture where the
   resource-ids spell the architecture out — `action_card_entity` = an **entity header** (glyph +
   quiet label: *which tool is this*) over **swappable content blocks** (the payload). We cloned that
   ANATOMY and nothing else: every value is an Aura token (§2/§3/§4), never Google's pixels/hexes.
@@ -322,14 +322,14 @@ is a blocking review failure.
 
 1. **Tool groups below the response/footer** → reducer turn invariant (§6), contract-tested in
    `TranscriptReducerTest`.
-2. **Always-on aurora wash at rest** (2026-07-04, reverted same day) → §5: resting = solid
+2. **Always-on aurora wash at rest** (shipped, then reverted the same day) → §5: resting = solid
    background; aura strictly invocation/run-gated (chat surface — the overlay's [R4] session pool
    is out of this entry's scope).
 3. **Lost transparent top bar** (side effect of the wash layer) → §5 law; `ChatSurface` renders
    no backdrop layer behind the top bar.
 4. **Gold/green wash in chat** → §4 aura color law: blue bottom glow only in chat.
 5. **Auto-expanded fat tool cards** → §6 tool fold: default-collapsed, cardless, forever. **Scope
-   note (2026-07-12):** this entry governs the GENERIC many-tools fold only. The promoted-tool
+   note:** this entry governs the GENERIC many-tools fold only. The promoted-tool
    action card (§6) is a filled card BY DESIGN and is not a re-run of this regression — do not
    "fix" it back into the fold. The distinction that keeps both laws true: the fold renders whatever
    arrives, so it must stay cheap and quiet; the action card renders only what we hand-picked, so it
@@ -365,7 +365,7 @@ is a blocking review failure.
     state so the last tree stays visible during reparse, and throttle the reparse to ~20 Hz via
     `rememberStreamedText`. Never feed the raw per-token buffer straight into a fresh parse.
 
-17. **A dither that is present, reachable, and still does nothing** (2026-07-14, physical Pixel;
+17. **A dither that is present, reachable, and still does nothing** (physical Pixel;
     shipped and survived four aurora rounds). `AuroraEdgeGlow`/`AuroraWashTop` added
     their dither to the UNPREMULTIPLIED colour and only then multiplied by alpha. Skia surfaces are
     premultiplied — the framebuffer receives `rgb * alpha` — so the dither's real amplitude was
@@ -383,7 +383,7 @@ is a blocking review failure.
     noise; IGN is ordered).
     **Accepted consequence, not a bug:** the chat ramp spans only ~50–84 codes, so a CORRECT dither
     necessarily converts contours into fine grain. Do not "fix" the grain by weakening the dither.
-18. **Absolute uptime narrowed to Float in the shared frame clock** (2026-07-14; the same bug
+18. **Absolute uptime narrowed to Float in the shared frame clock** (the same bug
     class an earlier single-call-site fix missed). `ShaderFrameClock` fed `withInfiniteAnimationFrameMillis`'s value — milliseconds
     since BOOT — straight into a Float. At 5 days' uptime that is ~4.3e8 ms, where the float32 ULP
     is 32 ms, so shader phase advanced only every OTHER frame (4-frame stalls at ~11 days): the
@@ -400,8 +400,8 @@ is a blocking review failure.
     ramp (a correctly dithered ramp has NO flat runs), and distinct-value count of the dither at
     high `fragCoord.y`.
 
-20. **Disclaimer renders during a live turn** (2026-07-14 — supersedes the same-day
-    "disclaimer joint collapses to 0dp during streaming" form). The bottom-anchored disclaimer was
+20. **Disclaimer renders during a live turn** (supersedes an earlier version of this fix —
+    "disclaimer joint collapses to 0dp during streaming"). The bottom-anchored disclaimer was
     gated on `hasSettledReply` ALONE — correct on turn 1, but on every FOLLOW-UP turn a prior reply is
     already settled, so during Sending/Streaming the disclaimer stayed pinned at the transcript bottom
     under the fresh user bubble + spark, AHEAD of the new turn's response and its footer. It must NOT
@@ -416,18 +416,18 @@ is a blocking review failure.
     inset was this-entry-superseded compensation to hold the disclaimer off the spark; it is gone. Any
     future predicate above the disclaimer must preserve the "settled turn only" gate (`ui/chat/CLAUDE.md`).
 21. **Do NOT retune the fresh-invocation ambient linger back down.** `ChatScreen.AMBIENT_INVOCATION_WINDOW_MS`
-    is **30s** as of a user directive 2026-07-14 (≥3× the prior ~10s) — a longer, calmer "the app just
+    is **30s** per user directive (≥3× the prior ~10s) — a longer, calmer "the app just
     woke up" breathe (§5). This is the §1 precedence ladder in action (a newer directive over the older
     value); record a new directive rather than "correcting" it back toward the old 10s. A directive-value
     guard, not a shipped-wrong bug — filed here so the value survives a future tuning pass.
-22. **The assist overlay must hold the screen awake while it is showing** (2026-07-14). A voice turn can
+22. **The assist overlay must hold the screen awake while it is showing.** A voice turn can
     run long with no touch input to reset the OS dim timer, so without a flag the screen dims
     mid-response. `FLAG_KEEP_SCREEN_ON` is set on the session's real `Window` (the `window?.window`
     Dialog-indirection reference, `voice/CLAUDE.md`) in `AuraSession.onShow()` and cleared on BOTH
     teardown paths (`onHide` AND `onDestroy` — a kill/unbind without a preceding hide would otherwise
     strand it on), mirroring `AssistOverlayPresence.visible`'s set/clear. The debug preview host carries
     a parity one-liner. Overlay-scoped — the chat surface at rest is untouched (§5 solid-resting law).
-23. **Transcript items pop / hard-cut on toggle instead of reflowing** (2026-07-14). The
+23. **Transcript items pop / hard-cut on toggle instead of reflowing.** The
     transcript `LazyColumn` had NO item animation — the spark and disclaimer hard-cut on their
     run-phase toggle, tool rows had an entrance (`ChipEntranceAnimator`) but zero placement/removal
     transition, so a live turn's mount/shuffle/unmount read as flicker. → **Every transcript row
@@ -439,6 +439,20 @@ is a blocking review failure.
     per-delta-faded — content rows pass `fadeEdges = false` (placement + removal fade only); only the
     spark and disclaimer, which have no entrance animator of their own, pass `fadeEdges = true` to fade
     on both mount and unmount.
+24. **Bottom sheets rendered past the viewport with no way to reach what fell below the fold.** A
+    plain, non-scrollable `Column` sat directly in `ModalBottomSheet`'s `ColumnScope` content slot,
+    which caps nothing. Tall, data-driven content — the unbounded model catalog, the project list —
+    rendered under the status bar AND past the navigation bar, so the rows below the fold were simply
+    unreachable; and with no scrollable descendant to claim a vertical drag past touch slop, the drag
+    translated the whole sheet instead of scrolling its content. Worse: with no scroll container to
+    consume the gesture first, a scroll attempt landed on a row's `clickable` instead and silently
+    changed the user's selected model. → **Every bottom sheet goes through `ui/common/AuraBottomSheet.kt`
+    — `ModalBottomSheet` is never called directly anywhere else, enforced by `SheetContainerContractTest`.**
+    Bounded content uses the `AuraBottomSheet` entry point (a scrollable `Column`); unbounded,
+    data-driven content uses `AuraListBottomSheet` (a `LazyColumn`). A rider on the same defect class:
+    the two action sheets WERE bounded and could never overflow, but padded their bottom row with a
+    fixed dp constant instead of a real `WindowInsets.navigationBars` inset, leaving the last touch
+    target under the gesture bar — an inset is not a padding constant.
 
 ## 8. Enforcement map
 
@@ -446,15 +460,17 @@ is a blocking review failure.
   suite; keep green on any event/serialization change).
 - Token discipline → review law (no literals outside `ui/theme/`); tokens carry provenance KDoc.
 - Aura contract → `ChatScreen` (sole glow owner) + `ui/aurora/CLAUDE.md` shader laws.
+- Sheet contract (bounding/scroll/insets) → `ui/common/AuraBottomSheet.kt` + `SheetContainerContractTest`
+  (no direct `ModalBottomSheet` call anywhere else).
 - This file → linked from the app-root `CLAUDE.md` tree table; scoped CLAUDE.mds cite it instead
   of restating values, so there is exactly one place values live.
 
 ## 9. Iconography
 
-Icon sourcing has ONE order of preference (user directive 2026-07-14: never hand-roll an icon when an
+Icon sourcing has ONE order of preference (user directive: never hand-roll an icon when an
 off-the-shelf one covers the case):
 
-1. **`material-icons-extended` first for any NEW glyph** (added to the dependency catalog 2026-07-14,
+1. **`material-icons-extended` first for any NEW glyph** (added to the dependency catalog,
    BOM-managed 1.7.8; R8 strips the unused glyphs in release). A semantically-correct extended glyph
    beats a hand-rolled path.
 2. **`ui/chat/ChatIcons.kt`'s hand-rolled set is FROZEN LEGACY.** Existing reuses stay — a reused

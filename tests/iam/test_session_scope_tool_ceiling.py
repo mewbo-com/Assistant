@@ -24,7 +24,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from mewbo_api.auth.session_scope import SessionScopeResolver
-from mewbo_core.tool_use_loop import ToolUseLoop
+from mewbo_core.loop.tool_use_loop import ToolUseLoop
 from mewbo_iam import (
     AuthMethod,
     AuthSettings,
@@ -80,7 +80,7 @@ def _resolver(*, baseline: frozenset[str] | None = None) -> SessionScopeResolver
 
 def _loop_for(scope) -> ToolUseLoop:
     """Build a real ``ToolUseLoop`` under *scope*, stubbing only the LLM client."""
-    with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+    with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
         mock_build.return_value = MagicMock()
         mock_build.return_value.bind_tools.return_value = MagicMock()
         return ToolUseLoop(

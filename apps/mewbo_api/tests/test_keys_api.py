@@ -3,7 +3,7 @@
 # mypy: ignore-errors
 import pytest
 from mewbo_api import backend
-from mewbo_core.key_store import KeyStore
+from mewbo_core.secrets.key_store import KeyStore
 
 
 @pytest.fixture()

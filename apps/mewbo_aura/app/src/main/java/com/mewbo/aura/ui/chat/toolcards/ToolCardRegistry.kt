@@ -28,6 +28,7 @@ object ToolCardRegistry {
             "device_set_alarm" -> AlarmToolCard(call = call, modifier = modifier)
             "device_set_timer" -> TimerToolCard(call = call, modifier = modifier)
             "device_send_sms" -> SmsToolCard(call = call, modifier = modifier)
+            "switch_project" -> SwitchProjectToolCard(call = call, modifier = modifier)
             else -> GenericToolCard(call = call, modifier = modifier)
         }
     }

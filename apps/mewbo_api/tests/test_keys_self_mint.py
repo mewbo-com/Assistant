@@ -32,7 +32,7 @@ from typing import Any
 import pytest
 from flask import request as flask_request
 from mewbo_api import backend
-from mewbo_core.key_store import KeyStore
+from mewbo_core.secrets.key_store import KeyStore
 from mewbo_iam.settings import AuthSettings
 from mewbo_iam.stores.roles import JsonRoleStore
 
@@ -43,7 +43,7 @@ class SelfMintHarness:
     Mutates the ONE ``AuthKit`` the app built at import rather than binding a
     replacement: ``guard.requires`` hoists its permission guards at decoration
     time, so a rebind would swap the api-key check and leave the permission
-    checks pointed at the old kit. Saves and restores the originals because
+    checks pointed at a stale kit. Saves and restores the originals because
     this app is a process-wide singleton shared with the rest of the suite.
     """
 
@@ -305,7 +305,7 @@ def test_a_caller_without_mint_own_is_refused(mints):
 
 
 def test_admin_mint_refuses_a_malformed_owner_subject(mints):
-    """`{"owner_subject": "alice"}` used to mint a key that raised at auth time."""
+    """`{"owner_subject": "alice"}` must not mint a key that raises at auth time."""
     resp = mints.mint(mints.admin, {"label": "x", "owner_subject": "alice"})
     assert resp.status_code == 400
     assert "user:<id>" in resp.get_json()["message"]
@@ -339,7 +339,7 @@ def test_admin_mint_may_still_grant_roles_it_does_not_hold(mints):
 def test_admin_mint_may_still_leave_roles_absent(mints):
     """The legacy unrestricted key is an ADMIN prerogative and must survive.
 
-    This is the one case the self-service tier can no longer produce, and the
+    This is the one case the self-service tier cannot produce, and the
     line between the fix and a regression: an admin omitting `roles` still
     mints a record with no `roles` field, which resolves to the legacy
     full-power default.

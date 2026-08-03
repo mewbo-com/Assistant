@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import queue
 
-from mewbo_core.session_event_bus import (
+from mewbo_core.contracts.types import EventRecord
+from mewbo_core.session.session_event_bus import (
     SessionEventBus,
     get_session_event_bus,
     reset_session_event_bus_for_tests,
     set_session_event_bus,
 )
-from mewbo_core.types import EventRecord
 
 
 def _event(text: str = "hi") -> EventRecord:

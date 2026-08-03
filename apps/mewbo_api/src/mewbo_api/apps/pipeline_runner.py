@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""``AppPipelineRunner`` — the deterministic code-pipeline execution engine (Phase 2).
+"""``AppPipelineRunner`` — the deterministic code-pipeline execution engine.
 
 A ``mode="code"`` pipeline is a Python file in the app bundle exposing
 ``def run(params: dict, ctx) -> Any``. This class executes it — with NO LLM call
 — at two seams: a trigger fire (the platform runs the engine synchronously and
 writes a ``{kind:"scheduled"}`` ledger row, never re-engaging the maintainer
 session) and on demand (the ``run_pipeline`` SessionTool + the REST run endpoint).
-It is the ONE new primitive this phase adds; everything else rides existing seams.
+It is the ONE new primitive added for code pipelines; everything else rides existing seams.
 
 ## Execution substrate — in-process ``exec`` in a curated namespace (v1)
 
@@ -34,6 +34,17 @@ thread lingers (near-zero cost if it blocks/sleeps; one core if it busy-spins)
 until the process recycles. A subprocess harness with a hard kill is the phase-2.5
 hardening; the in-process engine is the smallest coherent v1 and is documented as
 such here rather than pretended otherwise.
+
+**What the watchdog DOES bound is the durable half, and that is the correctness
+half.** A lingering thread whose writes still land is not a slow run, it is a
+FALSE report: the caller is told ``timeout``/``failed`` while the collection keeps
+filling from a run nobody is waiting for and no ledger row describes. So the
+watchdog sets a cooperative stop on the run's :class:`PipelineContext` BEFORE it
+raises, and every side-effecting surface (``ctx.collection(…).upsert``/``delete``,
+``ctx.exec``, ``ctx.llm``) checks it and REFUSES. The thread keeps burning CPU
+until it exits; it stops changing the world. What it wrote BEFORE the deadline is
+real, so it rides out on ``PipelineExecutionError.docs_written`` and into the
+``failed`` row rather than being reported as nothing.
 
 ## Where pipeline code lives (the placement decision)
 
@@ -100,14 +111,19 @@ The gates, all applied BEFORE a process is spawned:
 2. **Hardened argv + env** — git gets ``-c credential.helper=`` (the mounted
    read-only credential store otherwise turns an auth rejection into an EBUSY
    that masks the real error) and the shared
-   :func:`mewbo_graph.plugins.wiki.clone.hardened_git_env`. Every binary gets a
+   :func:`mewbo_graph.plugins.wiki.clone.hardened_git_env`, which also blanks
+   the GLOBAL and SYSTEM git config. That second half is what makes the
+   ``-c`` ban below hold: an operator's global ``url.<a>.insteadOf=<b>``
+   rewrites the remote AFTER ``allow_egress`` has vetted the argv, so an argv
+   naming a declared host reached an undeclared one — the same redirect the
+   banned flag exists to stop, arriving by the other door. Every binary gets a
    terminal-prompt-off/pager-off overlay over the SERVER PROCESS ENVIRONMENT,
    which it INHERITS in full — deliberately, because the credential posture
    below depends on it.
 3. **Bounds** — a per-call wall-clock timeout clamped by the pipeline's own
    ``timeout_seconds``, killed as a PROCESS GROUP so a spawned helper dies with
    it; a byte-accurate output cap; and stdout/stderr *and the timeout message*
-   redacted through :func:`mewbo_core.secret_redaction.get_secret_redactor`
+   redacted through :func:`mewbo_core.contracts.secret_redaction.get_secret_redactor`
    before reaching the pipeline or a ``PipelineRun.error`` ledger row.
 4. **No dry runs** — a dry run REFUSES exec (code ``dry_run``). ``ctx.llm`` may
    run under one because it cannot mutate the world; a subprocess can, and
@@ -151,8 +167,9 @@ from typing import TYPE_CHECKING, Any
 import jsonschema
 from mewbo_core.builtin_plugins.widget_builder.linter import lint
 from mewbo_core.common import get_logger
-from mewbo_core.secret_redaction import SecretRedactor, get_secret_redactor
+from mewbo_core.contracts.secret_redaction import SecretRedactor, get_secret_redactor
 from mewbo_graph.plugins.wiki.clone import hardened_git_env
+from mewbo_tools.integration.landlock import ShellScope, scoped_preexec
 
 from mewbo_api.apps.plugin.linter import (
     LintFinding,
@@ -161,7 +178,7 @@ from mewbo_api.apps.plugin.linter import (
     format_findings,
 )
 
-from .models import PipelineResult
+from .models import PIPELINE_TIMEOUT_CEILING_SECONDS, PipelineResult
 from .store import CollectionCapExceeded
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -320,12 +337,23 @@ class PipelineExecutionError(Exception):
     ``str(err)`` is a clean, agent-visible ``"<code>: <message>"`` — the
     ``run_pipeline`` tool renders it verbatim, mirroring ``submit_app``'s "a
     lifecycle rejection is agent-visible feedback" convention.
+
+    ``docs_written`` carries what the run had ALREADY written when it failed, so
+    the ledger records a partial write rather than an empty one — a failure is not
+    a guarantee that nothing landed, and the ``PipelineResult`` a caller would
+    otherwise read the counts off is only ever produced on success.
+    :meth:`AppPipelineRunner.execute` fills it from the run's own
+    :class:`PipelineContext`; a failure raised BEFORE a context exists (params,
+    lint, entrypoint) leaves it empty, which is then the truth.
     """
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self, code: str, message: str, *, docs_written: dict[str, int] | None = None
+    ) -> None:
         """Bind the failure ``code`` bucket + human ``message`` (the ``str()`` is both)."""
         self.code = code
         self.message = message
+        self.docs_written: dict[str, int] = dict(docs_written or {})
         super().__init__(f"{code}: {message}")
 
 
@@ -519,18 +547,30 @@ class PipelineExecutor:
             raise PipelineExecutionError("exec", str(exc)) from None
         command = self._hardened_argv(list(argv))
         timeout = self._effective_timeout(timeout_seconds)
+        # The active root is this call's OWN workspace — never the ambient
+        # `active_project_root` contextvar, which names whatever project the
+        # AGENT session (not this pipeline invocation) is working in. An app
+        # bound to a `kind="shared"` workspace must keep that project reachable,
+        # which is exactly what passing the workspace root as the active root
+        # guarantees (`ShellScope.for_active_root` denies every OTHER configured
+        # project and re-admits this one). ``scope`` is ``None`` — and the spawn
+        # unscoped — whenever `agent.shell_sandbox` is off or nothing survived
+        # compilation.
+        scope = ShellScope.for_active_root(str(self._workspace_root))
         try:
-            proc = subprocess.Popen(  # noqa: S603 - argv-only, allowlist-gated above
-                command,
-                cwd=str(self._workspace_root),
-                env=self._env(command[0]),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                errors="replace",  # binary output must not raise mid-communicate
-                start_new_session=True,
-            )
+            with scoped_preexec(scope) as hook:
+                proc = subprocess.Popen(  # noqa: S603 - argv-only, allowlist-gated above
+                    command,
+                    cwd=str(self._workspace_root),
+                    env=self._env(command[0]),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    errors="replace",  # binary output must not raise mid-communicate
+                    start_new_session=True,
+                    preexec_fn=hook,
+                )
         except FileNotFoundError as exc:
             # Raised by the spawn itself, NOT by communicate() — the binary name is
             # one of the vetted set, so it carries no secret and needs no redaction.
@@ -605,6 +645,28 @@ class PipelineExecutor:
         an allowlisted binary sees the API process's environment — declare
         accordingly. ``git`` routes through the ONE shared env builder
         (``hardened_git_env``) rather than a second copy of it here.
+
+        INHERITING ``HOME`` IS NOT REACHING IT. Under ``agent.shell_sandbox``
+        the Landlock scope grants sibling DIRECTORIES at each ancestor level,
+        so ``~/.config`` resolves and ``tea``/``gh`` keep their logins, while
+        loose files at ``$HOME`` root (``.gitconfig``, ``.git-credentials``)
+        do not and ``$HOME`` itself is not listable. That costs git nothing:
+        its global config is blanked below and the argv already disables the
+        credential helper. UNVERIFIED — whether an SSH agent still resolves.
+        Its socket normally sits outside the denied set, but that is reasoning
+        about the scope, not a measurement of it.
+
+        AMBIENT ENV IS NOT AMBIENT GIT CONFIG, and only git is treated this
+        way: ``hardened_git_env`` blanks the global and system git config, so a
+        pipeline's git sees only the repository's own ``.git/config``. A
+        pipeline depending on an operator's global ``insteadOf`` rewrite or
+        ``http.*`` override therefore behaves differently here than the same
+        command typed on the host — intended, since those settings redirect a
+        call the argv gates already vetted. It costs no commit identity: the
+        subcommand allowlist is read-shaped, so ``git commit`` is refused
+        before a process is spawned, as is the ``git -c user.email=`` form
+        that would supply one. Setting ``GIT_AUTHOR_*``/``GIT_COMMITTER_*``
+        here would guard a path authorization makes unreachable.
         """
         env = hardened_git_env() if binary == "git" else dict(os.environ)
         env["GIT_TERMINAL_PROMPT"] = "0"
@@ -647,6 +709,14 @@ class _PipelineCollection:
     enforcement seam ``app_data`` uses (never re-implemented). Under ``dry_run`` it
     still schema-validates (so a preview catches a bad doc) and COUNTS what would
     write, but performs no durable write.
+
+    Every mutating method opens on ``ensure_side_effects_allowed`` — the injected cooperative
+    stop check (:meth:`PipelineContext.ensure_side_effects_allowed`). It is what makes the
+    watchdog's timeout TRUE: the worker thread outlives the join, so without this
+    its writes keep landing durably after the caller has been told the run failed.
+    The check precedes the store call, never follows it — ``_record`` runs AFTER
+    the write, so guarding the accounting point alone would refuse the count and
+    keep the write.
     """
 
     def __init__(
@@ -659,6 +729,7 @@ class _PipelineCollection:
         max_docs: int,
         dry_run: bool,
         record: Callable[[str, int], None],
+        ensure_side_effects_allowed: Callable[[], None],
     ) -> None:
         """Bind the app/collection scope + the store, cap, dry-run flag, and counter."""
         self._app_id = app_id
@@ -668,9 +739,11 @@ class _PipelineCollection:
         self._max_docs = max_docs
         self._dry_run = dry_run
         self._record = record
+        self._ensure_side_effects_allowed = ensure_side_effects_allowed
 
     def upsert(self, key: str, doc: dict[str, Any]) -> None:
         """Write one document (schema-validated, cap-enforced) — counted on the run."""
+        self._ensure_side_effects_allowed()
         if not isinstance(key, str) or not key.strip():
             raise PipelineExecutionError("validation", "upsert requires a non-empty string key")
         if not isinstance(doc, dict):
@@ -699,7 +772,13 @@ class _PipelineCollection:
         sort: str | None = None,
     ) -> list[dict[str, Any]]:
         """Read documents back — ``{key, doc, updated_at}`` rows (updated_at as ISO)."""
-        bounded = max(0, min(int(limit), _MAX_QUERY_LIMIT))
+        limit = int(limit)
+        if limit > _MAX_QUERY_LIMIT:
+            raise PipelineExecutionError(
+                "validation",
+                f"limit {limit} exceeds the maximum of {_MAX_QUERY_LIMIT}",
+            )
+        bounded = max(0, limit)
         docs = self._data_store.query(
             self._app_id, self._name, filter=filter, limit=bounded, sort=sort
         )
@@ -709,6 +788,7 @@ class _PipelineCollection:
 
     def delete(self, key: str) -> bool:
         """Delete one document; report whether it existed. A no-op under ``dry_run``."""
+        self._ensure_side_effects_allowed()
         if not isinstance(key, str) or not key.strip():
             raise PipelineExecutionError("validation", "delete requires a non-empty string key")
         if self._dry_run:
@@ -774,6 +854,35 @@ class PipelineContext:
         # pre-run check against a prior manifest still re-globs — inherent).
         self.read_paths: set[str] = set()
         self.glob_results: dict[str, list[str]] = {}
+        # Cooperative stop — the ONLY lever the watchdog has over a worker thread
+        # that outlives it. ``threading.Event`` because the two sides are genuinely
+        # different threads: the runner sets it from the caller's thread once it
+        # stops waiting, the pipeline's own thread reads it on every side effect.
+        self._stopped = threading.Event()
+        self._stop_reason = ""
+
+    def stop(self, reason: str) -> None:
+        """Refuse every LATER side effect on this run — the watchdog's only lever.
+
+        Python cannot kill the worker thread, so a timed-out pipeline keeps
+        running; what this stops is the part that matters, the durable half.
+        After this, :meth:`ensure_side_effects_allowed` raises inside that thread, so a
+        collection write, a ``ctx.exec`` spawn or a ``ctx.llm`` round-trip
+        attempted past the deadline is refused instead of landing with no caller
+        and no ledger row. A side effect already IN FLIGHT past its guard still
+        completes — the bound is on what STARTS after the stop, not on what is
+        mid-call.
+        """
+        self._stop_reason = reason
+        self._stopped.set()
+
+    def ensure_side_effects_allowed(self) -> None:
+        """Raise unless this run is still permitted to cause side effects."""
+        if self._stopped.is_set():
+            raise PipelineExecutionError(
+                "stopped",
+                self._stop_reason or "this pipeline run was stopped; no further side effects",
+            )
 
     def glob(self, pattern: str) -> list[str]:
         """Workspace-relative file paths matching *pattern* (empty if no workspace)."""
@@ -820,6 +929,7 @@ class PipelineContext:
         asked it to touch. The ``dry_run`` code is one the verifier classifies
         as an artifact, so a pipeline that shells out still verifies cleanly.
         """
+        self.ensure_side_effects_allowed()
         if self._workspace_root is None:
             raise PipelineExecutionError("workspace", "no workspace is bound to this app")
         if self._dry_run:
@@ -859,6 +969,7 @@ class PipelineContext:
         policy lives in the runner's ``_llm_step`` callback; this surface delegates,
         passing ``self`` so the runner reads/increments this run's budget + salt.
         """
+        self.ensure_side_effects_allowed()
         if self._llm_step is None:
             raise PipelineExecutionError(
                 "llm", "llm step not configured (no model backend wired for this deployment)"
@@ -881,6 +992,7 @@ class PipelineContext:
             max_docs=self._app.policies.max_docs_per_collection,
             dry_run=self._dry_run,
             record=self._record_write,
+            ensure_side_effects_allowed=self.ensure_side_effects_allowed,
         )
 
     def _resolve_under_root(self, rel_path: str) -> Path:
@@ -1116,9 +1228,25 @@ class AppPipelineRunner:
 
         # The watchdog bound: the pipeline's DECLARED ceiling, unless a global
         # override is set on the runner (a deployment cap / a test's sub-second wall).
-        timeout = (
-            pipeline.timeout_seconds if self._timeout_seconds is None else self._timeout_seconds
-        )
+        #
+        # The declared value is CLAMPED to PIPELINE_TIMEOUT_CEILING_SECONDS first —
+        # ``PipelineSpec.timeout_seconds`` parses up to 600 (deliberately, so an
+        # already-stored manifest keeps parsing; see that field's comment), so a
+        # pipeline stored before the ceiling existed, or before it was lowered, can
+        # still declare more than the platform now allows. Honouring it uncapped
+        # would let a synchronous REST invoke outlive the single gunicorn worker.
+        # Logged once per run at WARNING — a silently narrowed bound is the
+        # fail-open shape this repo forbids, so the clamp announces itself naming
+        # the app and pipeline.
+        declared_timeout = min(pipeline.timeout_seconds, PIPELINE_TIMEOUT_CEILING_SECONDS)
+        if declared_timeout != pipeline.timeout_seconds:
+            logging.warning(
+                "app {} pipeline {}: declared timeout_seconds={} exceeds the {}s ceiling; "
+                "clamping this run to {}s",
+                app.app_id, pipeline.name, pipeline.timeout_seconds,
+                PIPELINE_TIMEOUT_CEILING_SECONDS, declared_timeout,
+            )
+        timeout = declared_timeout if self._timeout_seconds is None else self._timeout_seconds
         ctx = PipelineContext(
             app=app,
             pipeline=pipeline,
@@ -1130,8 +1258,19 @@ class AppPipelineRunner:
             llm_step=partial(self._run_llm, app, pipeline, now),
             llm_cache_salt=source_salt,
         )
-        output = self._run_entrypoint(source, pipeline.entrypoint or "<pipeline>", ctx, timeout)
-        output = self._enforce_output(output)
+        try:
+            output = self._run_entrypoint(source, pipeline.entrypoint or "<pipeline>", ctx, timeout)
+            output = self._enforce_output(output)
+        except PipelineExecutionError as exc:
+            # A failure is not a promise that nothing landed: a pipeline that
+            # wrote three docs and then raised (or timed out) really did write
+            # them. Carry the partial count out on the error so the ``failed``
+            # ledger row records what happened instead of an empty ``docs_written``
+            # — the ONE place this is attached, since it is the only one holding
+            # both the ctx and every failure the run can raise.
+            if not exc.docs_written:
+                exc.docs_written = dict(ctx.docs_written)
+            raise
 
         if use_ttl_cache:
             self._cache_put(app, pipeline, phash, output, now)
@@ -1215,6 +1354,13 @@ class AppPipelineRunner:
         worker.start()
         worker.join(timeout_seconds)
         if worker.is_alive():
+            # The thread survives the join; the STOP is what bounds it. Set it
+            # BEFORE raising, so the window in which an abandoned worker can still
+            # write durably is the raise itself rather than the rest of its life.
+            ctx.stop(
+                f"the pipeline exceeded its {timeout_seconds:g}s time limit and was stopped; "
+                "no further writes are accepted from this run"
+            )
             raise PipelineExecutionError(
                 "timeout", f"pipeline exceeded the {timeout_seconds:g}s time limit"
             )

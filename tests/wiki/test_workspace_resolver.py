@@ -227,10 +227,10 @@ def test_grounded_structured_search_resolves_workspace_e2e(tmp_path: Path) -> No
 
 
 def test_grounded_structured_search_without_workspace_is_ungrounded(tmp_path: Path) -> None:
-    """The regression guard: NO workspace event AND no project → still ungrounded.
+    """NO workspace event AND no project → still ungrounded.
 
     It proves the workspace fallback is gated on the workspace event rather than
-    blanket-applied. It now also guards the project tier: a wiki IS seeded here,
+    blanket-applied. It also guards the project tier: a wiki IS seeded here,
     and a session carrying no project identity at all must NOT be grounded into
     it. Grounding an answer in an arbitrary repository's wiki is worse than
     grounding it in none.

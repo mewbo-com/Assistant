@@ -7,6 +7,7 @@ import { BookOpen, ChevronDown, GitBranch, Globe, Network, Zap } from "lucide-re
 
 import { ModelFallbackChain } from "@/components/ModelFallbackChain";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
 import { ModelPicker } from "../ModelPicker";
@@ -113,6 +114,7 @@ export function StepGeneration({
         <div className="flex items-center gap-2 h-11 px-3 rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--muted))] focus-within:border-[hsl(var(--border-strong))] focus-within:ring-2 focus-within:ring-[hsl(var(--primary))] relative">
           <GitBranch className="h-3.5 w-3.5 text-[hsl(var(--muted-foreground))]" />
           <select
+            aria-label="Branch"
             value={state.ref}
             onChange={(e) => set({ ref: e.target.value })}
             disabled={branchesLoading}
@@ -135,6 +137,41 @@ export function StepGeneration({
           </select>
           <ChevronDown className="h-3.5 w-3.5 text-[hsl(var(--muted-foreground))] pointer-events-none absolute right-3" />
         </div>
+      </Field>
+
+      {/* Both fields are OPTIONAL and inert when blank — an untouched wizard
+          submits neither key, leaving the submission byte-identical to one made
+          before they existed (`wizardState.ts`'s omit-when-inert rule). */}
+      <Field
+        label="Indexing instructions"
+        hint="optional · standing guidance for every page"
+      >
+        <Textarea
+          value={state.customInstructions}
+          onChange={(e) => set({ customInstructions: e.target.value })}
+          rows={4}
+          maxLength={4000}
+          placeholder={
+            "This is a Kotlin Android client. Describe the Compose layer in UI terms, and name the config key each page reads."
+          }
+          className="w-full bg-[hsl(var(--muted))] border-[hsl(var(--border))] rounded-lg p-2.5 resize-none"
+        />
+      </Field>
+
+      <Field
+        label="External MCP servers"
+        hint="optional · .mcp.json shape · only add servers you trust"
+      >
+        <Textarea
+          value={state.mcpServers}
+          onChange={(e) => set({ mcpServers: e.target.value })}
+          rows={5}
+          spellCheck={false}
+          placeholder={
+            '{\n  "schema-registry": {\n    "url": "https://registry.example.com/mcp"\n  }\n}'
+          }
+          className="w-full font-mono text-field md:text-sm bg-[hsl(var(--muted))] border-[hsl(var(--border))] rounded-lg p-2.5 resize-none"
+        />
       </Field>
 
       {/* Developer-mode opt-in: graph-only indexing. Hidden entirely unless

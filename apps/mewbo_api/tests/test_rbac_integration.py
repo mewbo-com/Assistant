@@ -11,7 +11,7 @@ closures read ``self._settings`` and ``self._role_records()` off that live
 instance at REQUEST time, so enabling auth means mutating the one kit rather
 than constructing a second one — binding a replacement would only half-work
 (``requires`` hoists its permission guards at decoration time, so a rebind swaps
-the api-key check but leaves the permission checks pointing at the old kit).
+the api-key check but leaves the permission checks pointing at a stale kit).
 Every store is redirected to ``tmp_path``; nothing here touches the real
 ``~/.mewbo``.
 
@@ -26,7 +26,7 @@ from typing import Any
 
 import pytest
 from mewbo_api import backend
-from mewbo_core.key_store import KeyStore
+from mewbo_core.secrets.key_store import KeyStore
 from mewbo_iam import PermissionCatalog
 from mewbo_iam.roles import RoleRecord
 from mewbo_iam.settings import AuthSettings
@@ -488,7 +488,7 @@ def test_a_legacy_unrestricted_key_is_unaffected_by_scope_enforcement(auth):
     """``None`` keys predate scopes and must behave exactly as they always did.
 
     This is the compatibility half of the law: enforcement may not narrow a key
-    that never carried scopes, or every key issued before this feature breaks.
+    that never carried scopes, or every key record with no ``scopes`` field breaks.
     """
     secret = auth.key_for("viewer")  # scopes omitted ⇒ None
 
@@ -500,7 +500,7 @@ def test_the_service_role_grants_nothing_so_its_scopes_cannot_compensate(auth):
 
     Its description says permissions "come from the key's signed scopes" — but
     nothing resolves a scope into a permission, so a service-role key is refused
-    everywhere regardless of what it was scoped for.
+    everywhere regardless of its scopes.
     """
     assert _permissions_of("service") == frozenset()
 

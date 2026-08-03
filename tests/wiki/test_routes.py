@@ -101,7 +101,7 @@ def wiki_app(tmp_path: Path, monkeypatch, store, runtime_stub):
     # backend reads MASTER_API_TOKEN at import time; if another test imported it
     # earlier in the run, setenv is too late. Force the resolved attribute so
     # auth works regardless of collection/import order.
-    monkeypatch.setenv("MASTER_API_TOKEN", API_KEY)
+    monkeypatch.setenv("MEWBO_MASTER_API_TOKEN", API_KEY)
     monkeypatch.setattr("mewbo_api.backend.MASTER_API_TOKEN", API_KEY, raising=False)
 
     import mewbo_api.wiki.routes as routes_mod
@@ -240,6 +240,64 @@ def test_delete_project_idempotent(client):
     assert resp2.get_json()["deleted"] is False
 
 
+def test_delete_project_reaps_every_family_it_wrote(client):
+    """Deleting a project must leave nothing of it behind in ANY family.
+
+    Removing only the project row, its settings and its credential stranded
+    everything the index actually produced. Those rows are reachable only
+    through a slug whose project no longer exists, and the sole bulk reaper
+    (``supersede_graph_artifacts``) fires only from a COMPLETED index for that
+    slug — which a deleted project can never run again. So they were not merely
+    leaked, they were unreachable by construction.
+
+    Asserted per family rather than as a total, because a total passes while one
+    family quietly survives — and the families are exactly what drifts when a
+    new one is added to the store without being added to the reaper.
+    """
+    from mewbo_graph.wiki.memory_types import FileManifest, MemoryNode, MemoryProvenance
+    from mewbo_graph.wiki.types import CommitScope, Embedding, GraphEdge, make_graph_node
+
+    c, store = client
+    slug = "org/repo"
+    _seed_project(store)
+    store.upsert_nodes(
+        slug,
+        [make_graph_node(slug=slug, node_id="n1", type="File", name="a.py",
+                         file="a.py", range=(0, 9))],
+        commit_sha="c1",
+    )
+    store.upsert_edges(
+        slug, [GraphEdge(slug=slug, source="n1", target="n2", type="CONTAINS")],
+        commit_sha="c1",
+    )
+    store.upsert_embeddings(
+        slug, [Embedding(slug=slug, node_id="n1", vector=[1.0], model="m", dim=1)],
+        commit_sha="c1",
+    )
+    store.upsert_file_manifest(
+        slug, [FileManifest(slug=slug, path="a.py", content_hash="h", entity_keys=["a.py"])]
+    )
+    store.upsert_memory_nodes(
+        slug,
+        [MemoryNode(slug=slug, content="a claim",
+                    provenance=MemoryProvenance(author_agent="a", source="indexer",
+                                                created_at="t0"))],
+    )
+
+    resp = c.delete("/v1/wiki/projects/org%2Frepo", headers={"X-Api-Key": API_KEY})
+    assert resp.status_code == 200
+
+    # ``every()`` on both graph reads: the claim is that the delete left NOTHING
+    # behind, so a commit-scoped read would return the empty list whether or not
+    # the reaper ran — the assertion has to see every generation to mean anything.
+    assert store.query_graph(slug, scope=CommitScope.every()) == []
+    assert store.list_edges(slug, scope=CommitScope.every()) == []
+    assert store.vector_search(slug, [1.0], k=10) == []
+    assert store.list_file_manifest(slug) == []
+    assert store.query_memory(slug) == []
+    assert store.list_pages(slug) == []
+
+
 # ── Catalogues ─────────────────────────────────────────────────────────────────
 
 
@@ -310,6 +368,28 @@ def test_get_indexing_job_snapshot(client):
     assert resp404.get_json()["code"] == "not_found"
 
 
+def test_job_snapshot_carries_backing_session_id(client):
+    """The snapshot stamps ``sessionId`` from the job→session binding.
+
+    Backs the indexing screen's "Watch the indexing session" jump. The binding
+    lives on its own store surface (``attach_job_session``), NOT on the job
+    schema, so the wire field is stamped at read time — a job with no session
+    attached (a graph-only, sessionless index) must omit the key entirely
+    rather than report an empty one, since the FE reads its absence as
+    "nothing to watch".
+    """
+    c, store = client
+    _seed_job(store, job_id="job-sess")
+    _seed_job(store, job_id="job-nosess")
+    store.attach_job_session("job-sess", "sess-indexer-1")
+
+    linked = c.get("/v1/wiki/index/job-sess", headers={"X-Api-Key": API_KEY}).get_json()
+    assert linked["sessionId"] == "sess-indexer-1"
+
+    bare = c.get("/v1/wiki/index/job-nosess", headers={"X-Api-Key": API_KEY}).get_json()
+    assert "sessionId" not in bare
+
+
 def test_get_qa_snapshot(client):
     """Seed a QaAnswer → GET returns 200; 404 for unknown id."""
     c, store = client
@@ -325,6 +405,26 @@ def test_get_qa_snapshot(client):
     assert resp404.get_json()["code"] == "not_found"
 
 
+def test_get_qa_snapshot_stamps_session_id_when_attached(client):
+    """``sessionId`` is stamped at read time, and ABSENT when there is none.
+
+    Same contract (and same reason) as the indexing job's, asserted above: the
+    binding lives on its own store surface, never on ``QaAnswer``, so a replayed
+    answer with no session must omit the key rather than send an empty string —
+    the console reads absence as "nothing to watch".
+    """
+    c, store = client
+    _seed_qa(store, answer_id="ans-sess")
+    _seed_qa(store, answer_id="ans-nosess")
+    store.attach_qa_session("ans-sess", "sess-qa-1")
+
+    linked = c.get("/v1/wiki/qa/ans-sess", headers={"X-Api-Key": API_KEY}).get_json()
+    assert linked["sessionId"] == "sess-qa-1"
+
+    bare = c.get("/v1/wiki/qa/ans-nosess", headers={"X-Api-Key": API_KEY}).get_json()
+    assert "sessionId" not in bare
+
+
 # ── Session linkage ─────────────────────────────────────────────────────────────
 
 
@@ -336,17 +436,29 @@ def test_get_session_link_resolves_indexing_session(client):
 
     resp = c.get("/v1/wiki/sessions/sess-idx", headers={"X-Api-Key": API_KEY})
     assert resp.status_code == 200
-    assert resp.get_json() == {"slug": "org/repo", "kind": "indexing"}
+    body = resp.get_json()
+    assert body["slug"] == "org/repo"
+    assert body["kind"] == "indexing"
+    # `jobId` is what lets the console deep-link a LIVE index to its progress
+    # bar; without it the only reachable destination is the project front door.
+    assert body["jobId"] == "job-001"
+    assert "active" in body
 
 
 def test_get_session_link_resolves_qa_session(client):
-    """A session attached to a QA answer → {slug, kind: 'qa'}."""
+    """A QA session resolves to the ANSWER's own coordinates, not just its project.
+
+    The answer id is what makes the console's jump land on the question the user
+    is waiting on; without it the only reachable destination is the project's
+    landing page, which is where a Q&A session used to be sent.
+    """
     c, store = client
     from mewbo_graph.wiki.types import QaAnswer
 
     store.save_qa(QaAnswer(
         answer_id="ans-001",
         from_page_id="overview",
+        question="how does indexing resume?",
         summary_sources=[],
         model="anthropic/claude-sonnet-4-5",
         blocks=[],
@@ -356,7 +468,13 @@ def test_get_session_link_resolves_qa_session(client):
 
     resp = c.get("/v1/wiki/sessions/sess-qa", headers={"X-Api-Key": API_KEY})
     assert resp.status_code == 200
-    assert resp.get_json() == {"slug": "org/repo", "kind": "qa"}
+    assert resp.get_json() == {
+        "slug": "org/repo",
+        "kind": "qa",
+        "answerId": "ans-001",
+        "fromPageId": "overview",
+        "question": "how does indexing resume?",
+    }
 
 
 def test_get_session_link_indexing_checked_before_qa(client):
@@ -479,7 +597,14 @@ def test_refresh_creates_new_job(client, store, runtime_stub, valid_submission):
     )
     assert resp.status_code == 200
     body = resp.get_json()
-    assert body == {"queued": True}
+    # ``queued`` is the key every pre-existing caller reads; the response gained
+    # ``jobId``/``refresh`` additively, so assert the contract rather than the
+    # whole object (an equality check here would fail on any future addition).
+    assert body["queued"] is True
+    assert body["jobId"]
+    # A seeded project carries no ``commitSha``, so there is no prior index to
+    # compute a delta against — a full rebuild, on the agent path.
+    assert body["refresh"] == {"path": "full", "reason": "no_prior_index", "mismatches": []}
     # A new job should have been created (start_async called)
     runtime_stub.start_async.assert_called()
 
@@ -596,8 +721,12 @@ def _seed_resumable_job(store, *, job_id="rj1", slug="org/repo", status="interru
         ),
     ], commit_sha="deadbeef")
     store.save_job_plan(job_id, [{"id": p, "title": p} for p in ("a", "b", "c")])
-    _seed_page(store, slug=slug, page_id="a")
-    _seed_page(store, slug=slug, page_id="b")
+    for page_id in ("a", "b"):
+        _seed_page(store, slug=slug, page_id=page_id)
+        # Claim it for THIS job, as ``wiki_submit_page`` does: a page in the
+        # store proves some index wrote it, the claim proves which one, and only
+        # the claim makes it work this resume may skip.
+        store.claim_job_page(slug, job_id, page_id)
     return job_id
 
 
@@ -901,7 +1030,7 @@ def test_post_branches_chain_falls_through_rejected_stored_credential(client, mo
 def test_post_branches_explicit_token_is_exclusive_and_fails_fast(client, monkeypatch):
     """[B2] An explicit body token is EXCLUSIVE: a rejected typed token returns a
     400 'token rejected' error and NEVER falls through to a valid stored/ambient
-    credential (that masking is what let onboarding persist an untested-bad token
+    credential (that masking is what let the first index persist an untested-bad token
     after a 'successful' branch list)."""
     from mewbo_graph.plugins.wiki.branches import BranchListError, RemoteBranches
     from mewbo_graph.wiki.credentials import CredentialScope, CredentialStore

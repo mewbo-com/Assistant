@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -431,7 +432,7 @@ def test_ssh_command_quotes_key_path_with_spaces(tmp_path: Path) -> None:
             key_path.unlink(missing_ok=True)
 
 
-# ── Test 9: THE regression — rejected stored token, ambient credential rescues ─
+# ── Test 9: rejected stored token, ambient credential rescues ─────────────────
 
 
 def test_stored_token_rejected_falls_back_to_ambient(
@@ -585,3 +586,176 @@ def test_non_auth_failure_does_not_iterate_chain(
     errors = [e for e in store.load_job_events("job-net") if e["type"] == "error"]
     assert len(errors) == 1
     assert "resolve host" in errors[0]["error"]["message"]
+
+
+# ---------------------------------------------------------------------------
+# clone_working_checkout — the PERSISTENT checkout, against a REAL local git
+# ---------------------------------------------------------------------------
+#
+# Driven against a real bare origin rather than a patched ``subprocess.run``,
+# because all three properties under test are properties of what git DID: that a
+# non-empty target does not defeat the clone, that history and every branch
+# survive, and that the token the executor injected is gone from the resulting
+# ``.git/config``. A stubbed subprocess can only re-assert the argv this module
+# already builds, which is the shape of test that would still pass if the
+# behaviour regressed.
+
+
+def _git_local(repo: Path, *args: str) -> None:
+    """Run a local git command in *repo*, failing the test on a non-zero exit."""
+    subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True
+    )
+
+
+@pytest.fixture
+def bare_origin(tmp_path: Path) -> Path:
+    """A bare repo with two commits on ``main`` and a second branch."""
+    if shutil.which("git") is None:  # pragma: no cover — CI always has git
+        pytest.skip("git not installed")
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    _git_local(seed, "init", "-b", "main")
+    _git_local(seed, "config", "user.email", "t@e.com")
+    _git_local(seed, "config", "user.name", "t")
+    (seed / "README.md").write_text("first\n")
+    _git_local(seed, "add", "-A")
+    _git_local(seed, "commit", "-m", "first")
+    (seed / "README.md").write_text("second\n")
+    _git_local(seed, "add", "-A")
+    _git_local(seed, "commit", "-m", "second")
+    _git_local(seed, "branch", "release")
+
+    origin = tmp_path / "origin.git"
+    subprocess.run(
+        ["git", "clone", "--bare", str(seed), str(origin)],
+        capture_output=True, text=True, check=True,
+    )
+    return origin
+
+
+def test_working_checkout_clones_over_the_seeded_project_folder(
+    tmp_path: Path, bare_origin: Path
+) -> None:
+    """A target holding a CLAUDE.md still clones — and the file does not survive.
+
+    This is the exact shape ``create_project`` hands the checkout route: the
+    folder exists and already contains a Mewbo ``CLAUDE.md``, which plain
+    ``git clone`` refuses outright. The executor's ``reset_dir`` empties it
+    first, which is what makes cloning straight into the allocated path viable.
+    """
+    from mewbo_graph.plugins.wiki.clone import clone_working_checkout
+
+    target = tmp_path / "project"
+    target.mkdir()
+    (target / "CLAUDE.md").write_text("# seeded by create_project\n")
+
+    outcome = clone_working_checkout(
+        str(bare_origin), target, store=None, slug="git.example.com/acme/beacon", timeout=60
+    )
+
+    assert outcome.ok, outcome.stderr
+    assert (target / ".git").is_dir()
+    assert (target / "README.md").read_text() == "second\n"
+    # The seeded placeholder is gone: the checkout IS the repository, and this
+    # origin ships no CLAUDE.md of its own.
+    assert not (target / "CLAUDE.md").exists()
+
+
+def test_working_checkout_keeps_a_repository_s_own_claude_md(
+    tmp_path: Path, bare_origin: Path
+) -> None:
+    """A CLAUDE.md tracked BY the repository arrives with the clone and wins."""
+    from mewbo_graph.plugins.wiki.clone import clone_working_checkout
+
+    # Add a tracked CLAUDE.md to the origin.
+    contributor = tmp_path / "contributor"
+    subprocess.run(
+        ["git", "clone", str(bare_origin), str(contributor)],
+        capture_output=True, text=True, check=True,
+    )
+    _git_local(contributor, "config", "user.email", "t@e.com")
+    _git_local(contributor, "config", "user.name", "t")
+    (contributor / "CLAUDE.md").write_text("# the repository's own guide\n")
+    _git_local(contributor, "add", "-A")
+    _git_local(contributor, "commit", "-m", "add guide")
+    _git_local(contributor, "push", "origin", "main")
+
+    target = tmp_path / "project"
+    target.mkdir()
+    (target / "CLAUDE.md").write_text("# seeded by create_project\n")
+
+    outcome = clone_working_checkout(
+        str(bare_origin), target, store=None, slug="git.example.com/acme/beacon", timeout=60
+    )
+
+    assert outcome.ok, outcome.stderr
+    assert (target / "CLAUDE.md").read_text() == "# the repository's own guide\n"
+
+
+def test_working_checkout_keeps_history_and_every_branch(
+    tmp_path: Path, bare_origin: Path
+) -> None:
+    """Not shallow and not single-branch — a task diffs and branches off main."""
+    from mewbo_graph.plugins.wiki.clone import clone_working_checkout
+
+    target = tmp_path / "project"
+    outcome = clone_working_checkout(
+        str(bare_origin), target, store=None, slug="git.example.com/acme/beacon", timeout=60
+    )
+
+    assert outcome.ok, outcome.stderr
+    log = subprocess.run(
+        ["git", "-C", str(target), "log", "--oneline"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip().splitlines()
+    assert len(log) == 2, "a --depth=1 clone would leave exactly one commit"
+    assert not (target / ".git" / "shallow").exists()
+
+    remote_branches = subprocess.run(
+        ["git", "-C", str(target), "branch", "-r"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert "origin/release" in remote_branches, "--single-branch would have dropped it"
+
+
+def test_working_checkout_scrubs_the_credential_out_of_the_origin_url(
+    tmp_path: Path, bare_origin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The winning token must not persist in .git/config for an agent to read.
+
+    The executor authenticates by injecting the credential into the URL, and
+    ``git clone`` records exactly that string as ``remote.origin.url``. An
+    ephemeral index clone is deleted with the token still in it; this checkout
+    is handed to an agent, so the token would otherwise ride into a transcript
+    via ``git remote -v``.
+    """
+    from mewbo_graph.plugins.wiki import clone as clone_mod
+    from mewbo_graph.plugins.wiki.clone import clone_working_checkout
+    from mewbo_graph.wiki.credentials import CredentialCandidate, CredentialSource, RepoCredential
+
+    secret = "ghp_never_in_git_config"
+    url = f"file://{bare_origin}"
+
+    def _chain(store, slug, *, arg_token=None):
+        yield CredentialCandidate(
+            source=CredentialSource.STORE_REPO,
+            credential=RepoCredential(kind="token", value=secret),
+        )
+
+    monkeypatch.setattr(clone_mod, "resolve_chain", _chain)
+
+    target = tmp_path / "project"
+    outcome = clone_working_checkout(
+        url, target, store=None, slug="git.example.com/acme/beacon", timeout=60
+    )
+
+    assert outcome.ok, outcome.stderr
+    config = (target / ".git" / "config").read_text()
+    assert secret not in config
+    remotes = subprocess.run(
+        ["git", "-C", str(target), "remote", "-v"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert secret not in remotes
+    assert url in remotes

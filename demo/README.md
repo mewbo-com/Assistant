@@ -61,7 +61,7 @@ isolated `mewbo-demo` bridge network.
    to a committed fixture, and the wiki branches `ls-remote` + freshness calls to
    deterministic responses — so no shot depends on the network.
 6. **Acceptance = zero diff.** Running seed + capture twice in a row must produce
-   no `git diff` in `docs/assets/img/` — all 20 shots are byte-identical. If any
+   no `git diff` in `docs/assets/img/` — all 21 shots are byte-identical. If any
    drifts, something nondeterministic crept in — fix the cause, never hand-edit an
    artifact. (The two force-directed graph screenshots were removed; the sparse
    WebGL capability graph was the one shot that could not be made byte-stable.)

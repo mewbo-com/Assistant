@@ -83,7 +83,7 @@ def store() -> JsonAgenticSearchStore:
 def _stub_merged_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stub the merged MCP config read so resolve_servers sees our catalog."""
     monkeypatch.setattr(
-        mcp_config_mod, "get_merged_mcp_config", lambda project=None: _MERGED
+        mcp_config_mod, "get_merged_mcp_config", lambda project=None, **_kw: _MERGED
     )
 
 
@@ -474,7 +474,7 @@ def test_no_nl_context_when_workspace_has_no_prose(
     store: JsonAgenticSearchStore,
     _scg_on: None,
 ) -> None:
-    """A prose-less workspace carries no nl_context (byte-identical legacy contract)."""
+    """A prose-less workspace carries no nl_context at all."""
     import mewbo_api.agentic_search.scg.descriptors as desc_mod
     import mewbo_api.agentic_search.scg.map_job as map_job_mod
     from mewbo_api.agentic_search.schemas import MapJobRecord, WorkspaceInput

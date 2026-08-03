@@ -108,7 +108,7 @@ def test_empty_attached_config_falls_back_to_sources(
     """An empty attached list is falsy → falls back to raw sources (``or``).
 
     (An explicitly-empty selection at the GRANT layer is indistinguishable from
-    "no tools"; the run-grant `or` fallback keeps the historical behavior of
+    "no tools"; the run-grant `or` fallback keeps the behavior of
     granting the workspace's own sources when the config resolved nothing.)
     """
     ws = _workspace(store, ["gitea"])

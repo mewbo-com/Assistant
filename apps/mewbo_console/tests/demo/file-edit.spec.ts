@@ -23,5 +23,19 @@ test("file-edit — expanded diff card", async ({ demo }) => {
 
   await demo.expandDiff(card);
 
+  // expandDiff proves the "Click to expand" footer went away, not that the
+  // diff BODY it was hiding actually rendered — a truncated/empty body would
+  // satisfy that alone. Assert content from the FIRST hunk and — since the
+  // seeded diff spans two hunks with a `@@ -15,5 +26,11 @@` second header —
+  // content near the END of the second hunk too, so a diff that expanded but
+  // stopped rendering partway through still fails this. The bare substring
+  // `apiKeyUser` is a strict-mode trap: it appears in BOTH the hunk-1
+  // function declaration and the hunk-2 call site (`const service =
+  // apiKeyUser(apiKey);`) — verified against a live render, not assumed —
+  // so anchor on the full hunk-1 declaration line, which only that line
+  // matches.
+  await expect(card.getByText("function apiKeyUser(apiKey: string)")).toBeVisible();
+  await expect(card.getByText("req.user = service")).toBeVisible();
+
   await demo.captureElement("fileEdit", card);
 });

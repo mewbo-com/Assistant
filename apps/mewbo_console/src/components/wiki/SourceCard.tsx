@@ -35,7 +35,7 @@ import { useSourceExcerpt, useWikiPage } from "./api/hooks";
 
 interface SourceCardProps {
   /**
-   * Accepts the legacy flat {@link Citation} or the kind-tagged
+   * Accepts either the flat {@link Citation} shape or the kind-tagged
    * {@link ParsedCitation} (`parseCitations`, what QAScreen actually feeds
    * this component) — both render.
    */

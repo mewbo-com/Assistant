@@ -94,7 +94,7 @@ import com.mewbo.aura.ui.theme.AuraType
  *   to [AuraShape.radiusBubble] the same way a wrapped multi-line draft does
  *   ([ComposerTextField]'s own `onTextLayout` drives that second trigger). Chips are disabled (not
  *   hidden) while [state] is [ComposerState.Streaming] - a steer can't carry them (RunRepository).
- * @param showDragHandle [R4 2026-07-10] the assist overlay's ONLY caller advertises its existing
+ * @param showDragHandle [R4] the assist overlay's ONLY caller advertises its existing
  *   pill-pull-up-to-app gesture ([ui/overlay/CLAUDE.md] "Pill pull-up") with a small top-edge notch,
  *   reusing the response card's own handle tokens verbatim - one handle vocabulary, not a second
  *   size. Hidden while [expanded] (a grown pill has no stable top-center resting spot). Defaults
@@ -202,7 +202,7 @@ fun AuraComposer(
                 }
             }
 
-            // [R4 2026-07-10] expansion hint: advertises the overlay pill's existing swipe-up
+            // [R4] expansion hint: advertises the overlay pill's existing swipe-up
             // pull-to-app gesture (ui/overlay/CLAUDE.md "Pill pull-up"). Reuses the response
             // card's handle vocabulary/tokens verbatim - one handle language, not a second size.
             if (showDragHandle && !expanded) {
@@ -280,21 +280,21 @@ private val ComposerStyle.pillColor: Color
         ComposerStyle.FloatingOverlay -> AuraColors.surfaceOverlayPill
     }
 
-/** [R4 2026-07-10] style-forked pill height — see AuraSpacing.Composer.overlayHeight's KDoc. */
+/** [R4] style-forked pill height — see AuraSpacing.Composer.overlayHeight's KDoc. */
 private val ComposerStyle.pillHeight: Dp
     get() = when (this) {
         ComposerStyle.Docked -> AuraSpacing.Composer.height
         ComposerStyle.FloatingOverlay -> AuraSpacing.Composer.overlayHeight
     }
 
-/** [R4 2026-07-10] style-forked trailing circle/tile size. */
+/** [R4] style-forked trailing circle/tile size. */
 private val ComposerStyle.actionCircleSize: Dp
     get() = when (this) {
         ComposerStyle.Docked -> AuraSpacing.Composer.actionCircleSize
         ComposerStyle.FloatingOverlay -> AuraSpacing.Composer.overlayActionCircleSize
     }
 
-/** [R4 2026-07-10] style-forked field/invitation type scale. */
+/** [R4] style-forked field/invitation type scale. */
 private val ComposerStyle.fieldTextStyle: TextStyle
     get() = when (this) {
         ComposerStyle.Docked -> AuraType.bodyMessage
@@ -345,7 +345,7 @@ private fun ComposerBareIconButton(
  * glyph, not the docked composer's bare icon - also the eventual orb-dock position (D-1), though
  * that dock is the caller's `trailingAccessory`, not this composable. Internal (not private): the
  * Done-state trailing cluster in `ui/overlay/AssistOverlayScreen.kt` reuses this exact same circle
- * for the post-turn voice-follow-up mic (fix-round-3 Important #2) rather than hand-rolling a
+ * for the post-turn voice-follow-up mic rather than hand-rolling a
  * second one - `trailingAccessory` replaces the WHOLE cluster there, so it can't reach
  * [ComposerTrailingCluster]'s own copy of this composable. */
 @Composable

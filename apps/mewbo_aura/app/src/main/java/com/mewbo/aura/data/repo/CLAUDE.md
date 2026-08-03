@@ -8,23 +8,22 @@ streams; the UI sees only domain objects and `Flow<SessionEvent>`.
 
 ## `RunRepository` — the one run-following seam
 
-- **`@Singleton` (since the turn-completion notification feature, 2026-07-14).** `live()` hands out a
-  per-session multicast (`liveStreams`, self-evicting session-keyed cache) so chat, the overlay, AND
-  the notification watcher share ONE SSE connection — that only holds if they share the repo instance.
-  It was safe to be unscoped before ONLY because the `@Singleton DeviceToolExecutor`'s ledger deduped
-  device answers across per-injector repos; a third follower that wants to SHARE the connection forces
-  a true singleton. Its only state is that cache (no per-injector state → safe).
-- **`live()` builds `DeviceToolDispatch` INTO the pipeline** (`onEach`, UPSTREAM of `shareIn`) — the law
-  that advertise-the-tools and answer-them live at the SAME seam, so every follower services
-  `device_tool_call`s by construction. Wiring answers into a ViewModel instead cost a 66.8s overlay
-  turn (two 30s timeouts) once. Dispatch is a pipeline step, NOT a second subscriber: a subscriber
-  would have to terminate on the `stream_end` VALUE, which `SessionStreamClient` may DROP under buffer
-  pressure (`trySend` + `terminated = true` regardless of landing — [`data/sse/CLAUDE.md`](../sse/CLAUDE.md)),
-  so the collector would never end and `WhileSubscribed` could never stop a dead session's reconnect.
+- **`@Singleton`.** `live()` hands out a per-session multicast (`liveStreams`, a self-evicting
+  session-keyed cache) so chat, the overlay, AND the notification watcher share ONE SSE connection —
+  which only holds if they share the repo instance. An unscoped repo was survivable only while the
+  `@Singleton DeviceToolExecutor`'s ledger deduped device answers across per-injector instances; a
+  follower that wants to SHARE the connection forces a true singleton. Its only state is that cache
+  (no per-injector state → safe).
+- **`live()` builds `DeviceToolDispatch` INTO the pipeline** (`onEach`, UPSTREAM of `shareIn`) — the
+  advertise-and-answer-at-the-same-seam law ([`data/CLAUDE.md`](../CLAUDE.md)), so every follower
+  services `device_tool_call`s by construction. **Dispatch is a pipeline step, NOT a second
+  subscriber:** a subscriber would have to terminate on the `stream_end` VALUE, which
+  `SessionStreamClient` may DROP under buffer pressure ([`data/sse/CLAUDE.md`](../sse/CLAUDE.md)), so
+  the collector would never end and `WhileSubscribed` could never stop a dead session's reconnect.
   Correctness comes from backlog-replay + `DeviceToolCallLedger.recordIfNew`, never a frame we hope
   arrives. `LIVE_STREAM_STOP_TIMEOUT_MS = 5_000` is not a tuning knob — it closes the `1→0→1`
   subscriber-transit window `subscribeLive`'s cancel-then-collect opens (a zero timeout tears down +
-  re-opens the real SSE mid-run). Full story: [`data/device/CLAUDE.md`](../device/CLAUDE.md).
+  re-opens the real SSE mid-run).
 - **`errorFor` is the ONE send seam** (pulled top-level for JVM-testability like `buildMulticastLiveFlow`).
   It reads the `410` body `{"error":{"code":"session_terminated",…,"retryable":false}}` and raises a typed
   `SessionTerminatedException` instead of a bare `HttpException`, so envelope parsing lives HERE, never

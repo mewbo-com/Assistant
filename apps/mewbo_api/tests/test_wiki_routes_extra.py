@@ -111,7 +111,7 @@ def runtime_stub(store):
 
 @pytest.fixture()
 def wiki_app(tmp_path: Path, monkeypatch, store, runtime_stub):
-    monkeypatch.setenv("MASTER_API_TOKEN", API_KEY)
+    monkeypatch.setenv("MEWBO_MASTER_API_TOKEN", API_KEY)
     monkeypatch.setattr("mewbo_api.backend.MASTER_API_TOKEN", API_KEY, raising=False)
 
     import mewbo_api.wiki.routes as routes_mod
@@ -383,6 +383,23 @@ class TestActiveJobs:
         assert j.get("platform") == "github"
         assert j.get("model") == "anthropic/claude-sonnet-4-6"
 
+    def test_active_jobs_carry_backing_session_id(self, client) -> None:
+        """The list serves the SAME shape as the per-job snapshot.
+
+        Both endpoints go through the one ``_job_wire`` seam, and the console
+        types both with a single ``IndexingJob`` interface — a field stamped by
+        only one of them would make that type lie.
+        """
+        c, store, _ = client
+        _seed_job(store, "j-live", "org/repo", "scanning")
+        store.attach_job_session("j-live", "sess-indexer-2")
+
+        listed = c.get("/v1/wiki/jobs/active", headers=_h()).get_json()
+        row = next(x for x in listed if x["jobId"] == "j-live")
+        snapshot = c.get("/v1/wiki/index/j-live", headers=_h()).get_json()
+        assert row["sessionId"] == "sess-indexer-2"
+        assert row == snapshot
+
 
 # ---------------------------------------------------------------------------
 # /v1/wiki/index/<id>/stream
@@ -444,7 +461,7 @@ class TestQaPost:
         assert resp.status_code == 400
         data = resp.get_json()
         assert data["code"] == "validation"
-        # Fields map populated with missing keys — model is NO LONGER required
+        # Fields map populated with missing keys — model is NOT required
         # (server defaults it), and the public param name is ``project``.
         assert "question" in data.get("fields", {})
         assert "model" not in data.get("fields", {})

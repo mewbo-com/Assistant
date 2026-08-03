@@ -4,9 +4,15 @@
 // MUST stay behaviorally in sync; a parity test
 // (apps/mewbo_mcp/tests/test_timeline.py) checks shared fixtures. When you
 // change turn-boundary or token-usage logic here, update the Python port too.
-import { AttachmentPayload, CompactionMeta, DiffFile, EventRecord, SessionContext, TimelineEntry, TodoItem, TodoItemStatus, TodoMeta, TriggerTranscriptMeta, TurnMeta, TurnTokenUsage, UserQuestionAnsweredPayload, UserQuestionPayload, WidgetReadyPayload } from "../types";
+import { AttachmentPayload, CompactionMeta, DiffFile, EventRecord, GenerativeUIPayload, GenerativeUISpecPayload, SessionContext, TimelineEntry, TodoItem, TodoItemStatus, TodoMeta, TriggerTranscriptMeta, TurnMeta, TurnTokenUsage, UserQuestionAnsweredPayload, UserQuestionPayload, WidgetReadyPayload } from "../types";
 import { extractUnifiedDiffs, mergeDiffFiles } from "./diff";
-import { parseOutcomeAssertion, parseRunFailure, parseStructuredResult } from "./logs";
+import {
+  SWITCH_PROJECT_TOOL_ID,
+  parseOutcomeAssertion,
+  parseProjectSwitch,
+  parseRunFailure,
+  parseStructuredResult,
+} from "./logs";
 import { formatDuration } from "./time";
 import { readNumber, readString } from "./payload";
 
@@ -124,6 +130,39 @@ function parseTodos(payload: Record<string, unknown> | undefined): TodoMeta | nu
     items,
     source: src === "agent" ? "agent" : src === "plan" ? "plan" : undefined,
     agentId: typeof agentId === "string" ? agentId : undefined,
+  };
+}
+
+/**
+ * Narrow a `generative_ui` event payload into {@link GenerativeUIPayload}.
+ *
+ * This is a trust boundary: the tree inside `spec.root` is model-authored and
+ * arrives unvalidated as far as the console is concerned. Only the envelope is
+ * checked here — an id to upsert on and a root ARRAY to walk. The tree itself
+ * is deliberately passed through untouched: the allowlist registry rejects
+ * unknown component names and each adapter coerces its own props, so
+ * duplicating that here would give two places to keep in sync and neither
+ * would be the one that renders.
+ *
+ * `alt_text` is normalized to a string so downstream consumers never have to
+ * re-check it; a payload missing one degrades to an empty label rather than
+ * dropping an otherwise-renderable card.
+ */
+function parseGenerativeUi(
+  payload: Record<string, unknown> | undefined,
+): GenerativeUIPayload | null {
+  const p = payload ?? {};
+  const uiId = readString(p, "ui_id");
+  if (!uiId) return null;
+  const spec = p.spec as Record<string, unknown> | undefined;
+  const root = spec?.root;
+  if (!Array.isArray(root)) return null;
+  return {
+    ui_id: uiId,
+    session_id: readString(p, "session_id") ?? "",
+    spec: { root: root as GenerativeUISpecPayload["root"] },
+    alt_text: readString(p, "alt_text") ?? "",
+    summary: readString(p, "summary") || undefined,
   };
 }
 
@@ -299,6 +338,53 @@ export function buildTimeline(events: EventRecord[]): TimelineEntry[] {
     // them. Only the two user-driven actions are conversation markers; the
     // tool-use loop's own `halt_no_progress` recovery falls through to the
     // turn's events, where the trace panel already renders it.
+    // Disclosure fires once, before the plane evaluates anything, and a deny
+    // fires whenever a rule stops a call — neither is tied to an open turn
+    // (disclosure precedes the first turn's tool calls entirely), so both are
+    // handled here, above the gate, same fix class as `trigger_armed`/`recovery`.
+    if (event.type === "safety_plane") {
+      const payload = event.payload ?? {};
+      const phase = readString(payload, "phase");
+      if (phase === "disclosed") {
+        const rawRules = (payload as Record<string, unknown>).rules;
+        const rules = Array.isArray(rawRules)
+          ? rawRules
+              .filter((r): r is Record<string, unknown> => typeof r === "object" && r !== null)
+              .map((r) => ({
+                name: readString(r, "name") ?? "",
+                kind: readString(r, "kind") ?? "",
+                decision: readString(r, "decision") ?? "",
+                inspects: readString(r, "inspects") ?? "",
+              }))
+          : [];
+        if (rules.length > 0) {
+          entries.push({
+            id: `safety-plane-disclosed-${event.ts}`,
+            role: "safety_plane",
+            content: "",
+            turnId: currentTurnId ?? "safety-plane",
+            ts: event.ts,
+            safetyPlane: { phase: "disclosed", rules },
+          });
+        }
+        continue;
+      }
+      if (phase === "deny") {
+        entries.push({
+          id: `safety-plane-deny-${event.ts}`,
+          role: "safety_plane",
+          content: "",
+          turnId: currentTurnId ?? "safety-plane",
+          ts: event.ts,
+          safetyPlane: {
+            phase: "deny",
+            rule: readString(payload, "rule") ?? "unknown",
+            reason: readString(payload, "reason") ?? "",
+          },
+        });
+        continue;
+      }
+    }
     if (event.type === "recovery") {
       const action = readString(event.payload ?? {}, "action");
       if (action === "retry" || action === "continue") {
@@ -487,6 +573,33 @@ export function buildTimeline(events: EventRecord[]): TimelineEntry[] {
       }
       continue;
     }
+    if (
+      event.type === "tool_result" &&
+      readString(event.payload ?? {}, "tool_id") === SWITCH_PROJECT_TOOL_ID
+    ) {
+      // The agent moved the session to a different working directory. Sits
+      // BELOW the open-turn gate alongside `widget_ready` and `todos`: a tool
+      // only ever calls it mid-run, so an instance arriving with no turn open
+      // is an orphan rather than a between-turns event.
+      //
+      // Deliberately NOT `continue`-ing past the shared bookkeeping above —
+      // `turnEvents.push` has already run, so the trace panel still receives
+      // the raw event and renders its own row from it. This entry is a SECOND
+      // placement of one parse, not a diversion of the event away from the
+      // panel. A refused switch parses to null and produces nothing here.
+      const projectSwitch = parseProjectSwitch(event.payload);
+      if (projectSwitch) {
+        entries.push({
+          id: `project-switch-${event.ts}`,
+          role: "project_switch",
+          content: "",
+          turnId: currentTurnId,
+          ts: event.ts,
+          projectSwitch,
+        });
+      }
+      continue;
+    }
     if (event.type === "widget_ready") {
       const payload = event.payload as unknown as WidgetReadyPayload | undefined;
       if (payload) {
@@ -498,6 +611,34 @@ export function buildTimeline(events: EventRecord[]): TimelineEntry[] {
           ts: event.ts,
           widget: payload,
         });
+      }
+      continue;
+    }
+    if (event.type === "generative_ui") {
+      // A model-authored UI tree. Sits BELOW the open-turn gate alongside
+      // `widget_ready`: it is emitted mid-run by a tool, so an instance
+      // arriving with no turn open is an orphan, not a between-turns event.
+      //
+      // Upsert on `ui_id` (the todos idiom) rather than push-per-event — the
+      // id is the wire's declared upsert key, so a run that refines a card it
+      // already showed replaces it in place instead of stacking a near-copy.
+      const payload = parseGenerativeUi(event.payload);
+      if (payload) {
+        const existing = entries.find(
+          (e) => e.role === "generative_ui" && e.generativeUi?.ui_id === payload.ui_id,
+        );
+        if (existing) {
+          existing.generativeUi = payload;
+        } else {
+          entries.push({
+            id: `genui-${payload.ui_id}`,
+            role: "generative_ui",
+            content: "",
+            turnId: currentTurnId,
+            ts: event.ts,
+            generativeUi: payload,
+          });
+        }
       }
       continue;
     }
@@ -533,14 +674,26 @@ export function buildTimeline(events: EventRecord[]): TimelineEntry[] {
               typeof payload.call_token === "string" ? payload.call_token : "",
             questions: Array.isArray(payload.questions) ? payload.questions : [],
             status: "pending",
+            timeoutSeconds:
+              typeof payload.timeout_seconds === "number"
+                ? payload.timeout_seconds
+                : undefined,
+            notesPlaceholder:
+              typeof payload.notes_placeholder === "string"
+                ? payload.notes_placeholder
+                : undefined,
           },
         });
       }
       continue;
     }
     if (event.type === "user_question_answered") {
-      // Settle the pending question card in place (status + answers +
-      // answered_via), whatever the outcome — mirrors the plan_approved fold.
+      // Fold the resolution onto the pending card in place, whatever the
+      // outcome — mirrors the plan_approved fold. A run-stopped outcome
+      // (timed_out/declined/interrupted/cancelled) can later be followed by a
+      // second event with `answered`, when the user answers after the run moved
+      // on; the card re-folds to answered because the spread keeps the
+      // announce-time fields (questions, token, placeholder) intact.
       const payload = event.payload as unknown as
         | UserQuestionAnsweredPayload
         | undefined;
@@ -558,6 +711,14 @@ export function buildTimeline(events: EventRecord[]): TimelineEntry[] {
               answeredVia:
                 typeof payload.answered_via === "string"
                   ? payload.answered_via
+                  : undefined,
+              notes:
+                payload.outcome === "answered" && typeof payload.notes === "string"
+                  ? payload.notes
+                  : undefined,
+              delivery:
+                payload.delivery === "run" || payload.delivery === "message"
+                  ? payload.delivery
                   : undefined,
             };
             break;
@@ -589,12 +750,11 @@ export function buildTimeline(events: EventRecord[]): TimelineEntry[] {
       diffFiles = [];
       turnStart = undefined;
     }
-    // Defensive fallback: materialise the turn on completion when no
-    // prior assistant event has closed it. Handles legacy sessions (and
-    // any race where a run terminates without writing a final assistant
-    // event) — without this the failed turn's tool_results/agent_messages
-    // stay orphaned in turnEvents and are silently discarded when the
-    // next user turn resets state.
+    // Defensive fallback: materialise the turn on completion when no prior
+    // assistant event has closed it — a run can terminate without writing a
+    // final assistant event, and without this the failed turn's
+    // tool_results/agent_messages stay orphaned in turnEvents and are
+    // silently discarded when the next user turn resets state.
     if (event.type === "completion" && currentTurnId) {
       const duration = formatTurnDuration(turnStart, event.ts);
       const payload = event.payload as
@@ -643,6 +803,40 @@ export function buildTimeline(events: EventRecord[]): TimelineEntry[] {
     }
   }
   return entries;
+}
+
+/**
+ * True while the newest run has been ACCEPTED but has not opened its turn yet.
+ *
+ * The engine emits `run_accepted` the instant it takes a run, BEFORE the
+ * orchestrator's synchronous setup (tool-registry build, instruction
+ * discovery). For that whole window the transcript holds no `user` event, so
+ * {@link buildTimeline} produces no rows and {@link getActiveTurn} finds no
+ * open turn — the conversation pane has nothing to paint. This marker is the
+ * only signal available there, and it is what the session view's "starting"
+ * beat renders off.
+ *
+ * Deliberately NOT part of `buildTimeline`: the starting state is transient
+ * lifecycle, not a transcript row (it must vanish once the run produces one),
+ * and `buildTimeline` is parity-gated against the Python assembler. It sits
+ * beside `getActiveTurn`/`getActiveStreamText` — the other event derivations
+ * the session view threads in as props.
+ *
+ * Goes false as soon as the run reaches a turn boundary: a `user` event means
+ * the turn is open (the pending beat owns the readout from there — status in
+ * exactly one place), and an `assistant`/`completion` means it already
+ * settled. Every other event kind (`context`, `llm_call_start`, `sub_agent`, …)
+ * leaves it true, because none of them gives the pane a row either.
+ */
+export function isRunAccepted(events: EventRecord[]): boolean {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const type = events[i].type;
+    if (type === "run_accepted") return true;
+    if (type === "user" || type === "assistant" || type === "completion") {
+      return false;
+    }
+  }
+  return false;
 }
 
 export function getActiveTurn(events: EventRecord[]): TurnMeta | null {
@@ -707,7 +901,7 @@ export function getActiveTurn(events: EventRecord[]): TurnMeta | null {
  *
  * Returns "" when there is no open turn or no streamed text — so callers render
  * a graceful no-op (the existing "Working…" beat) for non-streaming models or
- * legacy transcripts. The turn-closing `assistant` bubble (built by
+ * transcripts with no delta events. The turn-closing `assistant` bubble (built by
  * {@link buildTimeline}) supersedes this entirely once the turn settles, so the
  * final text is authoritative and never duplicated.
  */

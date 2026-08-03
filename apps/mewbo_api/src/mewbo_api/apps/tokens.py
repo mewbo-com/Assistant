@@ -1,6 +1,6 @@
 """Short-lived, render-scoped read/write tokens for a served app.
 
-Spec §2.7 / §7; write scope + pipeline invocation added in Phase 2.
+Spec §2.7 / §7; the write scope covers pipeline invocation.
 
 When the console/Aura opens an app, the platform mints a token carrying ONLY
 the ``app_id`` and a scope, with a near-term expiry. The served frontend's
@@ -27,13 +27,12 @@ header, and :meth:`verify` re-derives ``app_id`` + expiry (+ scope) from it. So
 there is no separate opaque token string — ``AppReadToken`` is fully
 self-describing on the wire.
 
-**Wire format (Phase 2 — additive, backward compatible).** A freshly
+**Wire format (additive, backward compatible).** A freshly
 minted token is always 5 colon-separated parts:
-``<app_id>:<exp_epoch>:<scope>:<nonce>:<sig>``. A token minted by the legacy
-signer is 4 parts (no ``scope`` segment): ``<app_id>:<exp_epoch>:<nonce>:<sig>``
-— :meth:`verify` still accepts it and treats it as ``scope="read"`` (the only
-scope that ever existed before write tokens), so an outstanding token survives
-a mid-flight deploy without a hard cutover. Both shapes stay unambiguous under
+``<app_id>:<exp_epoch>:<scope>:<nonce>:<sig>``. A 4-part blob with no ``scope``
+segment (``<app_id>:<exp_epoch>:<nonce>:<sig>``) is also accepted and treated as
+``scope="read"``, so an outstanding token survives a mid-flight deploy without a
+hard cutover. Both shapes stay unambiguous under
 a plain ``split(":")`` because ``app_id`` is a colon-free slug, ``scope`` is
 one of the fixed literals, and ``nonce``/``sig`` are colon-free (hex / urlsafe
 base64).
@@ -72,7 +71,7 @@ class AppReadTokenSigner:
     ``<app_id>:<exp_epoch>:<scope>:<nonce>``. ``app_id`` is a colon-free slug,
     ``scope`` one of the fixed literals, and ``nonce`` is hex, so a plain
     ``split(":")`` recovers the five parts unambiguously. :meth:`verify` also
-    accepts the legacy 4-part (no ``scope``) blob — see the module docstring.
+    accepts the 4-part (no ``scope``) blob — see the module docstring.
     """
 
     def __init__(self, *, secret: str | bytes, ttl: timedelta = _DEFAULT_TTL) -> None:
@@ -115,8 +114,8 @@ class AppReadTokenSigner:
         """Return the token's :class:`AppReadToken` if authentic + unexpired, else ``None``.
 
         *token_id* is the presented credential (the signed blob) — either the
-        current 5-part ``scope``-carrying format or a legacy 4-part blob (no
-        ``scope`` segment, treated as ``"read"`` — see the module docstring).
+        5-part ``scope``-carrying format or a 4-part blob (no ``scope``
+        segment, treated as ``"read"`` — see the module docstring).
         Authenticity is a constant-time HMAC compare over the exact message that
         was signed; expiry is delegated to :meth:`AppReadToken.is_valid` (``now``
         as an argument, never the wall clock). A malformed, forged, or expired
@@ -131,7 +130,7 @@ class AppReadTokenSigner:
             message = f"{app_id}:{exp_s}:{scope}:{nonce}"
         elif len(parts) == 4:
             app_id, exp_s, nonce, sig = parts
-            scope = "read"  # legacy blob, minted before write scope existed
+            scope = "read"  # a scope-less blob can only ever have been read
             message = f"{app_id}:{exp_s}:{nonce}"
         else:
             return None

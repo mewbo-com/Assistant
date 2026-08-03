@@ -27,9 +27,9 @@ from mewbo_cli.tui.seams import MessageRendererRegistry, PermissionGateway, Tran
 from mewbo_cli.tui.transcript_render import register_transcript_renderers
 from mewbo_cli.tui.turn_engine import TurnEngine
 from mewbo_core.classes import ActionStep, TaskQueue
-from mewbo_core.session_runtime import SessionRuntime
-from mewbo_core.session_store import SessionStore
-from mewbo_core.tool_registry import ToolRegistry
+from mewbo_core.loop.session_runtime import SessionRuntime
+from mewbo_core.session.session_store import SessionStore
+from mewbo_core.tooling.tool_registry import ToolRegistry
 from rich.console import Console
 
 # --- helpers -------------------------------------------------------------
@@ -179,7 +179,7 @@ def test_plan_card_emitted_and_raw_tool_json_suppressed(
     plan_path = str(tmp_path / "plan.md")
     (tmp_path / "plan.md").write_text("# Plan\n\n1. Do the thing")
     monkeypatch.setattr(
-        "mewbo_core.session_runtime.orchestrate_session",
+        "mewbo_core.loop.session_runtime.orchestrate_session",
         _plan_run(store, session_id, plan_path),
     )
 
@@ -208,7 +208,7 @@ def test_modal_approve_transitions_plan_to_act_and_runs(
     plan_path = str(tmp_path / "plan.md")
     (tmp_path / "plan.md").write_text("# Plan\n\n1. Do the thing")
     monkeypatch.setattr(
-        "mewbo_core.session_runtime.orchestrate_session",
+        "mewbo_core.loop.session_runtime.orchestrate_session",
         _plan_run(store, session_id, plan_path),
     )
 
@@ -233,7 +233,7 @@ def test_modal_reject_emits_plan_rejected(
     plan_path = str(tmp_path / "plan.md")
     (tmp_path / "plan.md").write_text("# Plan")
     monkeypatch.setattr(
-        "mewbo_core.session_runtime.orchestrate_session",
+        "mewbo_core.loop.session_runtime.orchestrate_session",
         _plan_run(store, session_id, plan_path),
     )
 
@@ -254,7 +254,7 @@ def test_modal_refine_leaves_plan_pending(
     plan_path = str(tmp_path / "plan.md")
     (tmp_path / "plan.md").write_text("# Plan")
     monkeypatch.setattr(
-        "mewbo_core.session_runtime.orchestrate_session",
+        "mewbo_core.loop.session_runtime.orchestrate_session",
         _plan_run(store, session_id, plan_path),
     )
 
@@ -298,7 +298,7 @@ def test_continue_approves_when_a_plan_is_pending(
         captured.update(kwargs)
         return TaskQueue(action_steps=[])
 
-    monkeypatch.setattr("mewbo_core.session_runtime.orchestrate_session", fake_orchestrate)
+    monkeypatch.setattr("mewbo_core.loop.session_runtime.orchestrate_session", fake_orchestrate)
 
     assert get_registry().execute("/continue", ctx, []) is True
 

@@ -4,8 +4,13 @@ import threading
 import time
 
 import pytest
-from mewbo_core.session_runtime import SessionRuntime, parse_core_command
-from mewbo_core.session_store import SessionStore
+from mewbo_core.loop.session_runtime import (
+    GoalRetryGate,
+    SessionRuntime,
+    parse_core_command,
+)
+from mewbo_core.session.session_query import SessionQuery
+from mewbo_core.session.session_store import SessionStore
 
 
 def test_parse_core_command():
@@ -70,10 +75,15 @@ def test_runtime_start_async_and_cancel(tmp_path):
     store = SessionStore(root_dir=str(tmp_path))
     runtime = SessionRuntime(session_store=store)
 
-    def fake_run_sync(*, session_id, user_query, should_cancel=None, **_kwargs):
-        runtime.session_store.append_event(
-            session_id, {"type": "user", "payload": {"text": user_query}}
-        )
+    def fake_run_sync(
+        *, session_id, user_query, should_cancel=None, user_turn_persisted=False, **_kwargs
+    ):
+        # Mirror the executor's contract: it appends the user event only when the
+        # acceptance seam did not already persist the turn.
+        if not user_turn_persisted:
+            runtime.session_store.append_event(
+                session_id, {"type": "user", "payload": {"text": user_query}}
+            )
         while should_cancel and not should_cancel():
             time.sleep(0.01)
         runtime.session_store.append_event(
@@ -106,11 +116,16 @@ def test_runtime_start_async_runid_increments_per_turn(tmp_path):
     store = SessionStore(root_dir=str(tmp_path))
     runtime = SessionRuntime(session_store=store)
 
-    def fake_run_sync(*, session_id, user_query, should_cancel=None, **_kwargs):
-        # Mirror production: the run appends its own user event.
-        runtime.session_store.append_event(
-            session_id, {"type": "user", "payload": {"text": user_query}}
-        )
+    def fake_run_sync(
+        *, session_id, user_query, should_cancel=None, user_turn_persisted=False, **_kwargs
+    ):
+        # Mirror production: the executor appends the user event ONLY when the
+        # acceptance seam did not. ``start_async`` persists the turn itself, so
+        # this stub must stay silent or the run-id sequence double-counts.
+        if not user_turn_persisted:
+            runtime.session_store.append_event(
+                session_id, {"type": "user", "payload": {"text": user_query}}
+            )
 
     runtime.run_sync = fake_run_sync
     session_id = runtime.resolve_session()
@@ -190,7 +205,7 @@ def test_start_async_emits_run_accepted_before_registry_build(tmp_path, monkeypa
     instantly. We patch ``orchestrate_session`` (not ``run_sync``) so the real
     ``run_sync`` path threads the marker.
     """
-    import mewbo_core.session_runtime as sr
+    import mewbo_core.loop.session_runtime as sr
     from mewbo_core.classes import TaskQueue
 
     store = SessionStore(root_dir=str(tmp_path))
@@ -232,7 +247,7 @@ def test_start_async_threads_attachments_to_orchestrate_session(tmp_path, monkey
     ``orchestrate_session`` (not ``run_sync``) so the REAL ``run_sync`` threading
     is exercised without paying for a real ``Orchestrator`` build.
     """
-    import mewbo_core.session_runtime as sr
+    import mewbo_core.loop.session_runtime as sr
     from mewbo_core.classes import TaskQueue
 
     store = SessionStore(root_dir=str(tmp_path))
@@ -256,7 +271,7 @@ def test_start_async_threads_attachments_to_orchestrate_session(tmp_path, monkey
 
 def test_start_async_without_attachments_passes_none(tmp_path, monkeypatch):
     """Backward-compatible default: omitting ``attachments`` forwards ``None``."""
-    import mewbo_core.session_runtime as sr
+    import mewbo_core.loop.session_runtime as sr
     from mewbo_core.classes import TaskQueue
 
     store = SessionStore(root_dir=str(tmp_path))
@@ -399,7 +414,7 @@ def test_runtime_list_sessions_filters_archived(tmp_path):
     assert active_session in session_ids
     assert archived_session not in session_ids
 
-    sessions_with_archived = runtime.list_sessions(include_archived=True)
+    sessions_with_archived = runtime.list_sessions(SessionQuery(include_archived=True))
     all_ids = {session["session_id"] for session in sessions_with_archived}
     assert archived_session in all_ids
 
@@ -1082,3 +1097,143 @@ def test_summarize_terminated_beats_running(tmp_path, monkeypatch):
     summary = runtime.summarize_session(session_id)
     assert summary["status"] == "terminated"
     assert summary["recoverable"] is False
+
+
+# ---------------------------------------------------------------------------
+# GoalRetryGate — the ONE automatic re-invocation of a goal-unmet session
+# ---------------------------------------------------------------------------
+
+
+class TestGoalRetryGate:
+    """Drives the real gate against a real store-backed runtime.
+
+    The only stub is *relaunch* — the seam that would start a second run — so
+    every check the gate makes (status derivation, the exclusion table, the
+    transcript marker scan) runs as production code.
+    """
+
+    @staticmethod
+    def _unmet(tmp_path, *, tag=None, done_reason="halted_no_progress"):
+        """A terminated session whose goal went unmet, optionally tagged."""
+        store = SessionStore(root_dir=str(tmp_path))
+        runtime = SessionRuntime(session_store=store)
+        session_id = runtime.resolve_session(session_tag=tag)
+        store.append_event(session_id, {"type": "user", "payload": {"text": "do it"}})
+        _append_completion(store, session_id, done=True, done_reason=done_reason)
+        # The premise every test below rests on — assert it rather than assume it.
+        summary = runtime.summarize_session(session_id)
+        assert summary["status"] == "unmet_goal"
+        assert summary["recoverable"] is True
+        return runtime, session_id
+
+    @staticmethod
+    def _markers(runtime, session_id):
+        """Every automatic-retry marker in the transcript."""
+        return [
+            e
+            for e in runtime.load_events(session_id)
+            if e.get("type") == "recovery"
+            and (e.get("payload") or {}).get("trigger") == GoalRetryGate.TRIGGER
+        ]
+
+    def test_retries_once_and_refuses_on_the_next_terminal(self, tmp_path):
+        """The one-shot guard: a SECOND unmet terminal must not retry again."""
+        runtime, session_id = self._unmet(tmp_path)
+        gate = GoalRetryGate(runtime=runtime)
+        queries: list[str] = []
+
+        def _relaunch(query: str) -> str:
+            queries.append(query)
+            return "run-2"
+
+        assert gate.maybe_retry(session_id, _relaunch) is True
+        assert len(queries) == 1
+        # The re-prompt names the goal that went unmet, not a generic resume.
+        assert "halted_no_progress" in queries[0]
+        assert len(self._markers(runtime, session_id)) == 1
+
+        # The retry itself ends unmet as well — the gate reaches this terminal too.
+        _append_completion(
+            runtime.session_store, session_id, done=True, done_reason="unmet_goal"
+        )
+        assert runtime.summarize_session(session_id)["status"] == "unmet_goal"
+        assert gate.maybe_retry(session_id, _relaunch) is False
+        assert len(queries) == 1  # no second re-drive
+        assert len(self._markers(runtime, session_id)) == 1  # no second marker
+
+    def test_the_guard_is_the_transcript_not_the_instance(self, tmp_path):
+        """A restart mints a new gate — the ledger has to be the durable one."""
+        runtime, session_id = self._unmet(tmp_path)
+        assert GoalRetryGate(runtime=runtime).maybe_retry(session_id, lambda _q: "r") is True
+        # A brand-new gate (and a brand-new runtime over the same store) refuses.
+        fresh = SessionRuntime(session_store=SessionStore(root_dir=str(tmp_path)))
+        fresh_gate = GoalRetryGate(runtime=fresh)
+        calls: list[str] = []
+        assert fresh_gate.maybe_retry(session_id, _record(calls)) is False
+        assert calls == []
+
+        # Not vacuous: the SAME fresh gate retries an unmarked session over the
+        # same store, so the refusal above is the marker and not a dead gate.
+        other = fresh.resolve_session()
+        fresh.session_store.append_event(other, {"type": "user", "payload": {"text": "go"}})
+        _append_completion(
+            fresh.session_store, other, done=True, done_reason="halted_no_progress"
+        )
+        assert fresh_gate.maybe_retry(other, _record(calls)) is True
+        assert len(calls) == 1
+
+    def test_a_wiki_index_session_is_excluded(self, tmp_path):
+        """A wiki INDEXING job owns its own retry policy — never stack a fourth."""
+        runtime, session_id = self._unmet(tmp_path, tag="wiki:job:job-1")
+        calls: list[str] = []
+
+        assert GoalRetryGate(runtime=runtime).maybe_retry(session_id, calls.append) is False
+        assert calls == []
+        # Refused BEFORE writing anything — no ledger entry, no truncation.
+        assert self._markers(runtime, session_id) == []
+
+    def test_a_wiki_qa_session_is_not_excluded(self, tmp_path):
+        """The positive control: the exclusion keys off session TYPE, not origin.
+
+        ``wiki:qa:`` shares the wiki origin with ``wiki:job:`` and is precisely
+        the uncovered case this gate exists for, so an origin-level exclusion
+        would silently take it out too.
+        """
+        runtime, session_id = self._unmet(tmp_path, tag="wiki:qa:answer-1")
+        calls: list[str] = []
+
+        assert GoalRetryGate(runtime=runtime).maybe_retry(session_id, _record(calls)) is True
+        assert len(calls) == 1
+
+    def test_a_completed_session_is_never_retried(self, tmp_path):
+        """The gate fires on an unmet goal, not on every terminal."""
+        store = SessionStore(root_dir=str(tmp_path))
+        runtime = SessionRuntime(session_store=store)
+        session_id = runtime.resolve_session()
+        store.append_event(session_id, {"type": "user", "payload": {"text": "do it"}})
+        _append_completion(store, session_id, done=True, done_reason="completed")
+        calls: list[str] = []
+
+        assert GoalRetryGate(runtime=runtime).maybe_retry(session_id, calls.append) is False
+        assert calls == []
+        assert self._markers(runtime, session_id) == []
+
+    def test_a_refused_relaunch_reports_false_and_spends_the_budget(self, tmp_path):
+        """The registry refusing (``""``) is not a retry — and is not retried."""
+        runtime, session_id = self._unmet(tmp_path)
+        gate = GoalRetryGate(runtime=runtime)
+
+        assert gate.maybe_retry(session_id, lambda _q: "") is False
+        # The marker was already written, so the one-shot budget is spent.
+        assert len(self._markers(runtime, session_id)) == 1
+        assert gate.maybe_retry(session_id, lambda _q: "run-2") is False
+
+
+def _record(sink: list[str]):
+    """A *relaunch* stub that records its query and reports a started run."""
+
+    def _relaunch(query: str) -> str:
+        sink.append(query)
+        return "run-2"
+
+    return _relaunch

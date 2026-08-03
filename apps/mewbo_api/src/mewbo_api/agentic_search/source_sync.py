@@ -45,8 +45,8 @@ logging = get_logger(name="api.agentic_search.source_sync")
 
 # Map-job statuses that mean "a map for this source is already in flight" — don't
 # start a duplicate. The terminal buckets (completed/failed) do NOT block a
-# re-map: a previously-failed source (e.g. it was unreachable) must be re-mappable
-# once its connector URL is fixed, per the deploy-reachability requirement.
+# re-map: a failed source (e.g. an unreachable one) must be re-mappable once its
+# connector URL is fixed.
 _IN_FLIGHT: frozenset[str] = frozenset({"queued", "running"})
 
 # The digest length kept for the NL-context fingerprint — 16 hex chars (64 bits),

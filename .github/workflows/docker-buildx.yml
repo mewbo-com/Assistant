@@ -35,6 +35,12 @@ permissions:
 jobs:
   docker:
     name: Build & push images
+    # GHCR-only publish: the login below authenticates with GITHUB_TOKEN, which
+    # a non-github.com forge issues as an instance-local compatibility token that
+    # ghcr.io will not accept. Guarded the same way the other forge-specific
+    # jobs in this repo are, so a release branch pushed to the other remote
+    # skips this job instead of failing at the registry login.
+    if: github.server_url == 'https://github.com'
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:

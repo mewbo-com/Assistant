@@ -67,7 +67,6 @@ def _bootstrap_cli_logging_env(argv: list[str]) -> None:
 
 _bootstrap_cli_logging_env(sys.argv)
 
-from mewbo_core.ask_user import AskUserQuestionTool, QuestionDispatcher
 from mewbo_core.classes import ActionStep, Plan, PlanStep, TaskQueue
 from mewbo_core.common import MockSpeaker, format_tool_input, get_logger
 from mewbo_core.components import resolve_langfuse_status
@@ -82,13 +81,14 @@ from mewbo_core.config import (
     start_preflight,
 )
 from mewbo_core.hooks import HookManager
+from mewbo_core.loop.session_runtime import SessionRuntime, SessionTerminatedError
+from mewbo_core.loop.task_master import generate_action_plan
 from mewbo_core.permissions import auto_approve
-from mewbo_core.session_event_bus import get_session_event_bus
-from mewbo_core.session_runtime import SessionRuntime, SessionTerminatedError
-from mewbo_core.session_store import SessionStoreBase, create_session_store
-from mewbo_core.session_tools import SessionTool
-from mewbo_core.task_master import generate_action_plan
-from mewbo_core.tool_registry import ToolRegistry, load_registry
+from mewbo_core.session.session_event_bus import get_session_event_bus
+from mewbo_core.session.session_store import SessionStoreBase, create_session_store
+from mewbo_core.tooling.ask_user import AskUserQuestionTool, QuestionDispatcher
+from mewbo_core.tooling.session_tools import SessionTool
+from mewbo_core.tooling.tool_registry import ToolRegistry, load_registry
 from mewbo_tools.integration.mcp import (
     _load_mcp_config,
     mark_tool_auto_approved,
@@ -315,8 +315,8 @@ def run_cli(args: argparse.Namespace) -> int:
     )
     registry = get_registry()
 
-    from mewbo_core.plugins import load_all_plugin_components
-    from mewbo_core.skills import SkillRegistry
+    from mewbo_core.tooling.plugins import load_all_plugin_components
+    from mewbo_core.tooling.skills import SkillRegistry
 
     skill_registry = SkillRegistry()
     skill_registry.load()
@@ -475,6 +475,12 @@ class _TranscriptHubSink:
 
     def spawn(self, item: Any) -> None:
         """Append a sub-agent spawn marker."""
+        app, tv = self._resolve()
+        if tv is not None:
+            app.call_from_thread(tv.write_item, item)
+
+    def append_panel(self, item: Any) -> None:
+        """Append a settled UI panel (a ``generative_ui`` event's alt text)."""
         app, tv = self._resolve()
         if tv is not None:
             app.call_from_thread(tv.write_item, item)
@@ -876,7 +882,7 @@ def _run_plain_repl(
             _skill_name = command.lstrip("/")
             _skill = skill_registry.get(_skill_name)
             if _skill is not None and _skill.user_invocable:
-                from mewbo_core.skills import activate_skill
+                from mewbo_core.tooling.skills import activate_skill
 
                 _skill_args = " ".join(cmd_args)
                 _instructions, _ = activate_skill(_skill, _skill_args)
@@ -926,7 +932,7 @@ def _run_single_query(
 
 # Title + border style for a non-``completed`` Response panel, keyed by the
 # session's derived ``status`` (``summarize_session``). A status this table
-# doesn't name (incl. the clean ``"completed"`` case) keeps the historical
+# doesn't name (incl. the clean ``"completed"`` case) keeps the plain
 # green success chrome — see ``_response_panel_chrome``.
 _OUTCOME_PANEL_CHROME: dict[str, tuple[str, str]] = {
     "blocked": (":warning: Blocked", "yellow"),

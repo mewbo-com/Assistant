@@ -48,18 +48,24 @@ import com.mewbo.aura.ui.theme.AuraType
 
 /**
  * The ask-user question card (ask-user questions) — the human-in-the-loop clarification surface
- * the agent blocks on. Renders 1-4 questions as one group with a single Submit. Two lifetimes, keyed
- * off [ChatItem.Question.resolution]:
+ * the agent blocks on. Renders 1-4 questions as one group with a single Submit, plus an optional
+ * group-level free-text notes field ([ChatItem.Question.notesPlaceholder]) and an understated
+ * [ChatItem.Question.timeoutSeconds] hint while genuinely pending. Three states, keyed off
+ * [ChatItem.Question.resolution]:
  *
  * - **Pending** (`resolution == null`): interactive. Per question a header chip, the question text,
  *   tappable option rows (radio for single-select, checkboxes for multi-select) plus an ever-present
  *   free-text "Other", and ONE Submit for the group. Options and free text are mutually exclusive per
  *   question (the wire is `selected_indexes` XOR `text`), enforced here — tapping an option drops the
  *   Other text, typing Other clears the selection.
- * - **Settled** (`resolution != null`): read-only. [QuestionResolution.Answered] shows the chosen
+ * - **Run moved on** ([QuestionResolution.RunMovedOn] — `timed_out`/`declined`/`interrupted`/
+ *   `cancelled`, or any unknown future outcome): STILL interactive, same group as Pending, with an
+ *   honest banner that the run stopped waiting and an answer sent now arrives as a new message. The
+ *   run merely stopped waiting; the question itself was never resolved.
+ * - **Answered** ([QuestionResolution.Answered]): read-only, the ONLY true settle. Shows the chosen
  *   answers (and "answered on <surface>" when another surface answered — the card settles the same way
- *   regardless of WHO answered); [QuestionResolution.Dismissed] dims to "no longer waiting" with NO
- *   error residue (DESIGN.md §6), which is how declined/interrupted/cancelled land.
+ *   regardless of WHO answered, or "sent as a new message" when [QuestionResolution.Answered.delivery]
+ *   is `"message"`), plus any submitted notes.
  *
  * The AUTHORITATIVE settle is always the `user_question_answered` event flipping `resolution`
  * ([com.mewbo.aura.data.model.TranscriptReducer]); [onSubmit]'s `onResult(false)` (a genuine POST
@@ -71,7 +77,7 @@ import com.mewbo.aura.ui.theme.AuraType
 fun QuestionCard(
     item: ChatItem.Question,
     sessionEnded: Boolean,
-    onSubmit: (callId: String, callToken: String, answers: List<QuestionAnswerItemDto>, onResult: (Boolean) -> Unit) -> Unit,
+    onSubmit: (callId: String, callToken: String, answers: List<QuestionAnswerItemDto>, notes: String?, onResult: (Boolean) -> Unit) -> Unit,
     onNotice: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -89,11 +95,20 @@ fun QuestionCard(
             ),
         ) {
             CardHeader(resolution = item.resolution)
+            // Understated - a static hint, never a live countdown - and only while genuinely pending;
+            // once the run has moved on the original window has already passed.
+            if (item.resolution == null) {
+                item.timeoutSeconds?.let { seconds ->
+                    Spacer(modifier = Modifier.height(AuraSpacing.Composer.gapTight))
+                    Text(text = timeoutCaption(seconds), style = AuraType.caption, color = AuraColors.textTertiary)
+                }
+            }
             Spacer(modifier = Modifier.height(AuraSpacing.ToolCard.headerToContentGap))
             when (val resolution = item.resolution) {
-                null -> PendingQuestionGroup(item = item, sessionEnded = sessionEnded, onSubmit = onSubmit, onNotice = onNotice)
+                null -> PendingQuestionGroup(item = item, sessionEnded = sessionEnded, runMovedOn = false, onSubmit = onSubmit, onNotice = onNotice)
+                is QuestionResolution.RunMovedOn ->
+                    PendingQuestionGroup(item = item, sessionEnded = sessionEnded, runMovedOn = true, onSubmit = onSubmit, onNotice = onNotice)
                 is QuestionResolution.Answered -> AnsweredQuestionGroup(questions = item.questions, resolution = resolution)
-                is QuestionResolution.Dismissed -> Unit // the header already states it's closed
             }
         }
     }
@@ -104,9 +119,8 @@ fun QuestionCard(
 private fun CardHeader(resolution: QuestionResolution?) {
     val (glyph, label) = when (resolution) {
         null -> Icons.AutoMirrored.Filled.HelpOutline to "A question for you"
-        is QuestionResolution.Answered ->
-            Icons.Filled.CheckCircle to (resolution.answeredVia.settledLabel())
-        is QuestionResolution.Dismissed -> Icons.AutoMirrored.Filled.HelpOutline to "No longer waiting for an answer"
+        is QuestionResolution.Answered -> Icons.Filled.CheckCircle to resolution.settledLabel()
+        is QuestionResolution.RunMovedOn -> Icons.AutoMirrored.Filled.HelpOutline to "Still waiting on you"
     }
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -123,17 +137,29 @@ private fun CardHeader(resolution: QuestionResolution?) {
     }
 }
 
-/** "You answered" when this device answered (or the surface is unknown), else "Answered on <surface>". */
-private fun String?.settledLabel(): String = when {
-    this == null || this == "android" -> "You answered"
-    else -> "Answered on $this"
+/** "You answered" / "Answered on <surface>" when the answer resolved the run inline; "Sent as a new
+ * message" when [QuestionResolution.Answered.delivery] is `"message"` — the run had already moved on,
+ * so the honest label wins over naming who answered. */
+private fun QuestionResolution.Answered.settledLabel(): String = when {
+    delivery == "message" -> "Sent as a new message"
+    answeredVia == null || answeredVia == "android" -> "You answered"
+    else -> "Answered on $answeredVia"
+}
+
+/** A short, static hint - never a live countdown - for [ChatItem.Question.timeoutSeconds]. */
+private fun timeoutCaption(seconds: Int): String {
+    val minutes = seconds / 60
+    return if (minutes >= 1) "Answer within ${minutes}m" else "Answer within ${seconds}s"
 }
 
 @Composable
 private fun PendingQuestionGroup(
     item: ChatItem.Question,
     sessionEnded: Boolean,
-    onSubmit: (callId: String, callToken: String, answers: List<QuestionAnswerItemDto>, onResult: (Boolean) -> Unit) -> Unit,
+    // true for QuestionResolution.RunMovedOn - the run stopped waiting, but the group renders exactly
+    // like the genuinely-pending case (same inputs, same Submit) plus an honest banner up top.
+    runMovedOn: Boolean,
+    onSubmit: (callId: String, callToken: String, answers: List<QuestionAnswerItemDto>, notes: String?, onResult: (Boolean) -> Unit) -> Unit,
     onNotice: (String) -> Unit,
 ) {
     // One choice-state per question, keyed on the callId so a fresh question resets its inputs while
@@ -141,6 +167,16 @@ private fun PendingQuestionGroup(
     // state — the reducer's ChatItem carries only the immutable question spec + the settled outcome.
     val choices = remember(item.callId) { item.questions.map { QuestionChoice() } }
     var submitting by remember(item.callId) { mutableStateOf(false) }
+    var notesText by remember(item.callId) { mutableStateOf("") }
+
+    if (runMovedOn) {
+        Text(
+            text = "This chat moved on without an answer — sending one now delivers it as a new message.",
+            style = AuraType.caption,
+            color = AuraColors.textSecondary,
+        )
+        Spacer(modifier = Modifier.height(AuraSpacing.Composer.internalPadding))
+    }
 
     item.questions.forEachIndexed { index, question ->
         if (index > 0) Spacer(modifier = Modifier.height(AuraSpacing.Composer.internalPadding))
@@ -148,6 +184,19 @@ private fun PendingQuestionGroup(
             question = question,
             choice = choices[index],
             enabled = !submitting && !sessionEnded,
+        )
+    }
+
+    // A group-level free-text field, separate from each question's own per-question "Other" - only
+    // rendered when the server offered a placeholder for it.
+    item.notesPlaceholder?.let { placeholder ->
+        Spacer(modifier = Modifier.height(AuraSpacing.Composer.internalPadding))
+        OtherField(
+            value = notesText,
+            active = notesText.isNotBlank(),
+            placeholder = placeholder,
+            enabled = !submitting && !sessionEnded,
+            onValueChange = { notesText = it },
         )
     }
 
@@ -160,7 +209,8 @@ private fun PendingQuestionGroup(
         submitting = submitting,
         onClick = {
             submitting = true
-            onSubmit(item.callId, item.callToken, answers.filterNotNull()) { success ->
+            val notes = notesText.trim().takeIf { it.isNotBlank() }
+            onSubmit(item.callId, item.callToken, answers.filterNotNull(), notes) { success ->
                 // Success (or answered-elsewhere) leaves the spinner up — the user_question_answered
                 // event flips `resolution` and swaps this whole branch out for the settled render.
                 // A genuine failure re-enables the card and toasts.
@@ -344,6 +394,10 @@ private fun AnsweredQuestionGroup(questions: List<UiQuestion>, resolution: Quest
                 color = AuraColors.textPrimary,
             )
         }
+    }
+    resolution.notes?.takeIf(String::isNotBlank)?.let { notes ->
+        Spacer(modifier = Modifier.height(AuraSpacing.Composer.internalPadding))
+        Text(text = notes, style = AuraType.caption, color = AuraColors.textSecondary)
     }
 }
 

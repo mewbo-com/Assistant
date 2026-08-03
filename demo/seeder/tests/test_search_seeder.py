@@ -92,16 +92,16 @@ def _minimal() -> dict:
                 "answer": {"tldr": "Hi.", "bullets": [{"text": "b", "cites": ["r1"]}],
                            "confidence": 0.8, "sources_count": 1},
                 "results": [{"id": "r1", "source": "github", "kind": "code",
-                             "relevance": 0.9, "title": "anthropics/claude-code",
-                             "url": "github.com/anthropics/claude-code", "snippet": "s",
-                             "meta": {"stars": 133000, "language": "Python"}}],
+                             "relevance": 0.9, "title": "acme/runner-pool",
+                             "url": "git.example.com/acme/runner-pool", "snippet": "s",
+                             "meta": {"stars": 24600, "language": "Go"}}],
                 "trace": [{"id": "a1", "agent_id": "a1", "name": "scg-search",
                            "source_id": "github", "slot": 0, "kind": "scg-path-probe",
                            "model": "gpt-oss-120b", "results_count": 1, "returned_count": 2,
                            "steps": 3, "duration_ms": 4200, "input_tokens": 1200,
                            "output_tokens": 300,
                            "lines": [{"t_ms": 100, "glyph": ">", "text": "search"}]}],
-                "related_questions": ["How does it compare to Copilot?"],
+                "related_questions": ["Which runners can share one cache?"],
             }
         ],
         "scg": {
@@ -207,9 +207,9 @@ def test_run_snapshot_is_self_sufficient(search_store):
     payload = search_store.get_run("run-a").payload
     assert payload.status == "completed"
     assert [r.id for r in payload.results] == ["r1"]
-    assert payload.results[0].meta == {"stars": 133000, "language": "Python"}
+    assert payload.results[0].meta == {"stars": 24600, "language": "Go"}
     assert [a.agent_id for a in payload.trace] == ["a1"]
-    assert payload.related_questions == ["How does it compare to Copilot?"]
+    assert payload.related_questions == ["Which runners can share one cache?"]
 
 
 def test_event_log_replays_the_full_normalized_stream(search_store):
@@ -313,7 +313,7 @@ def test_canonical_bundle_shape(canonical):
     assert {r.run_id for r in canonical.runs} >= {
         "run-oss-agents", "run-cc-plugins", "run-bearlike",
     }
-    # The two Claude-Code research runs own OSS Repo Scout's chips.
+    # The two acme fleet-survey runs own OSS Repo Scout's chips.
     oss = next(w for w in canonical.workspaces if w.id == "ws-oss-repo-scout")
     linked = {pq.run_id for pq in oss.past_queries if pq.run_id}
     assert {"run-oss-agents", "run-cc-plugins", "run-bearlike"} <= linked

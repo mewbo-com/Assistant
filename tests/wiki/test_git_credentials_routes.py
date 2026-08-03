@@ -30,7 +30,7 @@ def runtime_stub(store):
 @pytest.fixture()
 def app(tmp_path: Path, monkeypatch, store, runtime_stub):
     """Flask test app with the git-credentials blueprint mounted standalone."""
-    monkeypatch.setenv("MASTER_API_TOKEN", API_KEY)
+    monkeypatch.setenv("MEWBO_MASTER_API_TOKEN", API_KEY)
     monkeypatch.setattr("mewbo_api.backend.MASTER_API_TOKEN", API_KEY, raising=False)
 
     import mewbo_api.wiki.git_credentials_routes as gc_routes

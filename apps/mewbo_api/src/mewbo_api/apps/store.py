@@ -3,16 +3,16 @@
 Three storage families, each the same shape the rest of the codebase uses
 (``agentic_search/store.py``, ``triggers/store*.py``): an abstract base + a
 filesystem driver + a Mongo driver + a config-driven factory (``storage.driver``,
-default ``json`` — read from CONFIG, never a ``MEWBO_*`` env, per spec §8):
+default ``json`` — read from CONFIG, never a ``MEWBO_*`` env):
 
 * :class:`AppStoreBase` — the durable :class:`AppSpec` manifest keyed by
   ``app_id`` plus its append-only :class:`AppVersion` history (rollback repoints;
   history is never rewritten).
 * :class:`PipelineRunStoreBase` — the :class:`PipelineRun` provenance ledger
   (opened at trigger fire, closed at maintainer run end); it is the freshness
-  signal + the ``system`` namespace backing + the repair-loop input (spec §2.8).
+  signal + the ``system`` namespace backing + the repair-loop input.
 * :class:`AppDataStoreBase` — the app-ID-keyed data plane, ONE logical
-  collection compound-keyed ``(app_id, collection, key)`` (spec §2.5). Ingress
+  collection compound-keyed ``(app_id, collection, key)``. Ingress
   is agent-side only (the ``app_data`` SessionTool, workstream B); egress is the
   read-only REST surface. ``upsert`` optionally validates a document against the
   owning :class:`CollectionSpec`'s JSON Schema before writing.
@@ -54,7 +54,7 @@ class CollectionCapExceeded(Exception):
     """A NEW-key insert would push a collection past ``max_docs_per_collection``.
 
     Raised by :meth:`AppDataStoreBase.upsert` only when a ``max_docs`` cap is
-    supplied AND the key is new (spec §2.11 ``max_docs_per_collection``). An
+    supplied AND the key is new (``max_docs_per_collection``). An
     update to an EXISTING key never trips it. The ``app_data`` SessionTool maps it
     to a clean agent-visible error the agent self-corrects on.
     """
@@ -325,7 +325,7 @@ class MongoAppStore(AppStoreBase):
 
 
 class PipelineRunStoreBase(abc.ABC):
-    """Abstract base for the :class:`PipelineRun` provenance ledger (spec §2.8)."""
+    """Abstract base for the :class:`PipelineRun` provenance ledger."""
 
     @abc.abstractmethod
     def open_run(self, run: PipelineRun) -> None:
@@ -522,7 +522,7 @@ class MongoPipelineRunStore(PipelineRunStoreBase):
 
 
 class AppDataStoreBase(abc.ABC):
-    """Abstract base for the per-app data plane (spec §2.5).
+    """Abstract base for the per-app data plane.
 
     Compound key ``(app_id, collection, key)``. Ingress is agent-side only (the
     ``app_data`` SessionTool); the REST egress is read-only. ``upsert`` accepts
@@ -559,7 +559,7 @@ class AppDataStoreBase(abc.ABC):
         document is schema-validated first (see :meth:`_validate`). When
         *max_docs* is given, a NEW key that would push the collection past that
         cap raises :class:`CollectionCapExceeded` — an update to an existing key
-        is always allowed (spec §2.11). Both are additive optional kwargs over the
+        is always allowed. Both are additive optional kwargs over the
         frozen positional signature.
         """
 
@@ -576,15 +576,17 @@ class AppDataStoreBase(abc.ABC):
         filter: dict[str, Any] | None = None,
         limit: int = 100,
         sort: str | None = None,
+        offset: int = 0,
     ) -> list[AppDataDoc]:
         """Return documents in a collection.
 
         *filter* is equality matches on top-level ``doc`` fields. *sort* is a
         ``doc`` field name, optionally ``-``-prefixed for descending; the
-        default order is newest-first by ``updated_at``. *limit* caps the
-        result. (``sort`` is an additive extension over the frozen
-        ``filter``/``limit`` signature — a caller that omits it gets the
-        default order.)
+        default order is newest-first by ``updated_at``. *offset* skips that
+        many documents in sort order before *limit* is applied. (``sort``/
+        ``offset`` are additive extensions over the frozen ``filter``/``limit``
+        signature — a caller that omits them gets the default order and no
+        skip.)
         """
 
     @abc.abstractmethod
@@ -682,14 +684,16 @@ class JsonAppDataStore(AppDataStoreBase):
         filter: dict[str, Any] | None = None,
         limit: int = 100,
         sort: str | None = None,
+        offset: int = 0,
     ) -> list[AppDataDoc]:
-        """Return filtered, sorted, limited documents from a collection."""
+        """Return filtered, sorted, offset, limited documents from a collection."""
         with self._lock:
             rows = self._load(app_id, collection)
         docs = [AppDataDoc.model_validate(r) for r in rows.values()]
         docs = [d for d in docs if self._matches_filter(d.doc, filter)]
         docs = self._sorted_docs(docs, sort)
-        return docs[: max(0, limit)]
+        start = max(0, offset)
+        return docs[start : start + max(0, limit)]
 
     def delete(self, app_id: str, collection: str, key: str) -> bool:
         """Delete one document; ``True`` if it existed."""
@@ -782,8 +786,9 @@ class MongoAppDataStore(AppDataStoreBase):
         filter: dict[str, Any] | None = None,
         limit: int = 100,
         sort: str | None = None,
+        offset: int = 0,
     ) -> list[AppDataDoc]:
-        """Return filtered, sorted, limited documents from a collection."""
+        """Return filtered, sorted, offset, limited documents from a collection."""
         query: dict[str, Any] = {"app_id": app_id, "collection": collection}
         for field, value in (filter or {}).items():
             query[f"doc.{field}"] = value
@@ -794,7 +799,7 @@ class MongoAppDataStore(AppDataStoreBase):
             cursor = cursor.sort(f"doc.{field}", -1 if descending else 1)
         else:
             cursor = cursor.sort("updated_at", -1)
-        cursor = cursor.limit(max(0, limit))
+        cursor = cursor.skip(max(0, offset)).limit(max(0, limit))
         return [AppDataDoc.model_validate(d) for d in cursor]
 
     def delete(self, app_id: str, collection: str, key: str) -> bool:
@@ -815,8 +820,8 @@ class MongoAppDataStore(AppDataStoreBase):
 def _driver() -> str:
     """The configured storage driver (``storage.driver``; default ``json``).
 
-    Read from CONFIG, never a ``MEWBO_*`` env — the divergence spec §8 warns
-    about (the wiki/scg surfaces read config too).
+    Read from CONFIG, never a ``MEWBO_*`` env: the wiki/scg surfaces read
+    config too, so an env override here would diverge from them.
     """
     return get_config_value("storage", "driver", default="json")
 

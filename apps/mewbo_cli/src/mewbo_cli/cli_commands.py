@@ -9,8 +9,13 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from mewbo_core.config import get_config_value, get_mcp_config_path
-from mewbo_core.token_budget import get_token_budget, read_last_input_tokens
-from mewbo_core.tool_registry import ToolRegistry, ToolSpec, classify_tool_scope, load_registry
+from mewbo_core.session.token_budget import get_token_budget, read_last_input_tokens
+from mewbo_core.tooling.tool_registry import (
+    ToolRegistry,
+    ToolSpec,
+    classify_tool_scope,
+    load_registry,
+)
 from rich import box
 from rich.console import Console, Group
 from rich.panel import Panel
@@ -200,6 +205,7 @@ def _run_recovery(context: CommandContext, action: str) -> bool:
         tool_registry=context.tool_registry,
         mode=context.state.mode,
         source_platform="cli",
+        extra_session_tools=context.extra_session_tools(),
     )
     if task_queue.task_result:
         context.console.print(Panel(task_queue.task_result, title="Response"))
@@ -252,6 +258,7 @@ def _approve_pending_plan(context: CommandContext) -> bool:
         mode="act",
         session_step_budget=budget,
         source_platform="cli",
+        extra_session_tools=context.extra_session_tools(),
     )
     if task_queue.task_result:
         context.console.print(
@@ -387,6 +394,7 @@ def _cmd_edit(context: CommandContext, args: list[str]) -> bool:
         tool_registry=context.tool_registry,
         mode=context.state.mode,
         source_platform="cli",
+        extra_session_tools=context.extra_session_tools(),
     )
     if task_queue.task_result:
         context.console.print(Panel(task_queue.task_result, title="Response"))
@@ -426,8 +434,8 @@ def _cmd_mode(context: CommandContext, args: list[str]) -> bool:
 
 @REGISTRY.command("/skills", "List available skills (/skills [name])")
 def _cmd_skills(context: CommandContext, args: list[str]) -> bool:
-    from mewbo_core.plugins import load_all_plugin_components
-    from mewbo_core.skills import SkillRegistry
+    from mewbo_core.tooling.plugins import load_all_plugin_components
+    from mewbo_core.tooling.skills import SkillRegistry
 
     skill_registry = SkillRegistry()
     skill_registry.load()
@@ -487,7 +495,7 @@ def _cmd_skills(context: CommandContext, args: list[str]) -> bool:
 @REGISTRY.command("/plugins", "Manage plugins (/plugins marketplace|install|uninstall)")
 def _cmd_plugins(context: CommandContext, args: list[str]) -> bool:
     from mewbo_core.config import get_config
-    from mewbo_core.plugins import (
+    from mewbo_core.tooling.plugins import (
         discover_installed_plugins,
         discover_marketplace_plugins,
         install_plugin,
@@ -678,7 +686,7 @@ def _refresh_mcp_registry(context: CommandContext) -> None:
     # server that has since recovered isn't held in its backoff/quarantine
     # state. This is the explicit "I edited/fixed my server, reconnect now" path.
     try:
-        from mewbo_core.tool_registry import _default_manifest_cache_path
+        from mewbo_core.tooling.tool_registry import _default_manifest_cache_path
 
         manifest_path = _default_manifest_cache_path()
         if os.path.exists(manifest_path):
@@ -919,7 +927,7 @@ def _render_mcp(
     all_specs: list[ToolSpec] | None = None,
 ) -> None:
     config_path = get_mcp_config_path()
-    # Tool-scope classification (Phase 2): mirrors the API's
+    # Tool-scope classification mirrors the API's
     # `/api/tools` computation so `/mcp` shows the same builtin/project/
     # system/plugin taxonomy Console/Aura display, via the shared
     # `classify_tool_scope` classifier — never re-derived locally.
@@ -929,7 +937,7 @@ def _render_mcp(
     global_servers: set[str] = set()
     plugin_servers: set[str] = set()
     try:
-        from mewbo_core.plugins import load_all_plugin_components
+        from mewbo_core.tooling.plugins import load_all_plugin_components
 
         plugin_servers = set(load_all_plugin_components().mcp_servers.keys())
     except Exception:
@@ -958,6 +966,11 @@ def _render_mcp(
                     "quarantined": "red",
                     "failed": "red",
                     "pending": "dim",
+                    # Distinct from ``pending``, which shares the dim fallback:
+                    # one is "not connected yet", the other is "switched off on
+                    # purpose". Rendering them identically is what sends someone
+                    # hunting a server that was never going to load.
+                    "disabled": "dim italic",
                 }
                 server_lines: list[Text] = []
                 for name, info in servers.items():

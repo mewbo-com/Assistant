@@ -11,12 +11,16 @@
 # export an env var (SSL_CERT_FILE, PATH additions) that the app inherits.
 # A failing script logs a warning but does NOT prevent startup.
 #
-# Extend by mounting additional scripts into the init.d directory:
+# The images bake NO init scripts. docker-compose.yml bind-mounts the whole
+# docker/init.d directory read-only, which is what makes runtime setup editable
+# without a rebuild. Add one by dropping a file in that directory; a numeric
+# prefix places it in the order (00 toolbox helpers, 1x identity, then yours).
+# A single extra script can also be mounted on its own:
 #   volumes:
 #     - ./my-init.sh:/app/docker/init.d/20-my-init.sh:ro
 #
-# The image bakes the tracked scripts, so a deployment with no override still
-# gets git/toolbox setup; mounting the directory shadows the baked copies.
+# A missing INIT_DIR is therefore normal, not a fault — an image run with no
+# mount (the demo stack, a bare `docker run`) simply performs no init.
 
 set -u
 
@@ -28,9 +32,10 @@ set -u
 # Image-specific, because the mcp image has none of the api's scratch volumes:
 # each Dockerfile sets INIT_CHOWN_DIRS to the paths it actually mounts, so mcp
 # does not warn about api-only directories that will never exist there.
-# /tmp/mewbo-ide holds per-session deadline files written by the Web IDE
-# feature; it is bind-mounted from the host so docker can expose the same paths
-# to sibling code-server containers.
+# Web IDE deadline files are NOT in this list any more: the directory holding
+# them moved to the mewbo-ide broker, which is a plain Node image and does not
+# run this entrypoint at all. Neither image that does run it touches the docker
+# socket now.
 for _dir in ${INIT_CHOWN_DIRS:-}; do
     if [ -d "$_dir" ] && [ ! -w "$_dir" ]; then
         printf '[entrypoint] Fixing ownership on %s\n' "$_dir"

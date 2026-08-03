@@ -62,6 +62,31 @@ class WikiEmitAnswerArgs(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _qa_diagram_text(blocks: list[dict[str, Any]]) -> str:
+    """Concatenate every block's string-typed text for Mermaid-fence scanning.
+
+    A QA answer has no page-body markdown blob to hand the validator — the
+    fence lives inside a block's own text field. Only plain-string content is
+    scanned; a fence would never be authored inside a nested inline-citation
+    node, so skipping non-string ``text``/list/dict shapes is deliberate, not
+    a gap.
+    """
+    parts: list[str] = []
+    for block in blocks:
+        text = block.get("text")
+        if isinstance(text, str):
+            parts.append(text)
+        items = block.get("items")
+        if isinstance(items, list):
+            parts.extend(item for item in items if isinstance(item, str))
+        rows = block.get("rows")
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, list):
+                    parts.extend(cell for cell in row if isinstance(cell, str))
+    return "\n".join(parts)
+
+
 class WikiEmitAnswerTool(WikiSessionTool):
     """SessionTool: validate the full answer and persist its block events atomically."""
 
@@ -70,9 +95,26 @@ class WikiEmitAnswerTool(WikiSessionTool):
     schema: dict[str, object] = pydantic_to_openai_tool(
         WikiEmitAnswerArgs, name="wiki_emit_answer"
     )
+    # The completion seam's required-terminal gate (SessionTool declaration
+    # law, see tooling/CLAUDE.md): a QA run may not reach a clean natural
+    # completion without a call to THIS tool — a composed answer delivered as
+    # plain text instead is discarded, and the backing QaAnswer would
+    # otherwise strand at status "running" forever.
+    required_terminal = True
 
     def should_terminate_run(self) -> bool:
         """A valid call IS the answer's accept state — the loop stops cleanly here."""
+        return getattr(self, "_terminate", False)
+
+    def terminal_satisfied(self) -> bool:
+        """The required-terminal gate's attestation — off the SAME success flag.
+
+        ``_terminate`` is only ever set True at the tail of a successful
+        ``handle()`` (step 8, after the answer is fully validated and
+        persisted), so reusing it here rather than a second flag keeps the two
+        questions ("should the run stop" / "was the obligation met") from ever
+        answering differently for the same call.
+        """
         return getattr(self, "_terminate", False)
 
     async def handle(self, action_step: ActionStep) -> MockSpeaker:
@@ -114,16 +156,41 @@ class WikiEmitAnswerTool(WikiSessionTool):
                 "sources block appended last",
             )
 
-        # 5. Atomicity guard — the answer is delivered once.
-        existing_events = ctx.store.load_qa_events(ctx.answer_id)
-        if any(ev.get("type") == "block_open" for ev in existing_events):
+        # 4.5. Mermaid gate — refuse the emit, never terminate, so the model repairs
+        # in-band via the same tool-result feedback loop the block-validation errors
+        # above already use. Nothing has been persisted yet (events are appended in
+        # step 7 below), so a rejection here discards no prior work — unlike the
+        # wiki-finalize gate (finalize.py), which refuses AFTER pages are already
+        # saved; here there is nothing to preserve because there is nothing yet.
+        from mewbo_graph.plugins.wiki.mermaid import MermaidValidator  # noqa: PLC0415
+
+        repairs = MermaidValidator().inspect(f"qa:{ctx.answer_id}", _qa_diagram_text(validated))
+        if repairs:
+            instructions = "; ".join(r.instruction for r in repairs)
+            return _err_result(
+                "validation",
+                f"{len(repairs)} invalid Mermaid diagram(s) in this answer would "
+                f"render as an error. Repair and re-send the full blocks array: "
+                f"{instructions}",
+            )
+
+        # 5. Atomicity guard — the answer is delivered once PER TURN. The turn
+        #    boundary is asked of ``QaFinalizer.current_turn_events``, the ONE
+        #    place that rule lives, rather than re-derived here: this guard and
+        #    the reconciliation that follows must agree on what a turn is, and
+        #    scanning the whole cumulative log made them disagree in both
+        #    directions — a follow-up turn was refused because the PRIOR turn
+        #    had emitted, while a re-drive of a failed turn was admitted and then
+        #    discarded by a close that still saw the failed turn's verdict.
+        from mewbo_graph.wiki.qa import QaFinalizer  # noqa: PLC0415
+
+        turn_events = QaFinalizer.current_turn_events(ctx.store.load_qa_events(ctx.answer_id))
+        if any(ev.get("type") == "block_open" for ev in turn_events):
             return _err_result("validation", "the answer was already emitted")
 
         # 6. Re-scheme bare wiki-page citations on the sources block BEFORE it
         #    lands on the log — one seam fixes both the live stream and the
         #    reconciled snapshot.
-        from mewbo_graph.wiki.qa import QaFinalizer  # noqa: PLC0415
-
         validated[-1] = QaFinalizer.tag_page_citations(validated[-1], ctx.store, ctx.slug)
 
         # 7. Fan the array into the existing per-block event contract, in order —

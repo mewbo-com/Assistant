@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """TodoPanel — the pinned Plan/Todo dock (sidebar facet).
 
-Extracted from the old combined ``AgentPanel`` so the sidebar splits into clear
-sections (Fleet · Plan · Context). This widget owns ONLY the plan surface: an
+One of the sidebar's three sections (Fleet · Plan · Context). This widget
+owns ONLY the plan surface: an
 ``N/M`` count header, a compact tri-state checklist (``✓`` done · ``→``
 in-progress · ``•`` pending) when the producer supplies per-item state, and a
 queue pill (``▸ k queued``) for messages queued while a turn runs.

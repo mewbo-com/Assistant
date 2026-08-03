@@ -707,3 +707,40 @@ def test_source_tool_shim_bug_isinstance_check_documented(tmp_path: Path) -> Non
     # _SourceToolShim.handle() will be False, allowing a crash.
     assert isinstance(err, MockSpeaker)
     assert not isinstance(err, dict)
+
+
+# ── for_session threads the session through to the clone-dir resolution ──────
+
+
+def test_for_session_binds_a_live_job_to_its_own_clone(tmp_path: Path, monkeypatch) -> None:
+    """A session bound to an in-flight job reads THAT job's checkout.
+
+    Drives the real ``for_session`` → ``resolve_qa_ctx`` → ``resolve_qa_clone_dir``
+    chain over a real store, stubbing only the runtime seam, so a session id
+    dropped at the caller shows up here as the PREVIOUS index's clone —
+    pre-change source, read with no error at all.
+    """
+    from mewbo_graph.plugins.wiki.source_tools import WikiSourceAccess
+    from mewbo_graph.wiki.types import IndexingJob
+
+    monkeypatch.setenv("MEWBO_WIKI_CLONE_ROOT", str(tmp_path / "clones"))
+    store = _store(tmp_path)
+    for job_id, status in [("j-prev", "complete"), ("j-now", "scanning")]:
+        store.create_job(
+            IndexingJob(
+                job_id=job_id,
+                slug=SLUG,
+                status=status,
+                scanned_count=0,
+                total_count=0,
+                current_file=None,
+            )
+        )
+        (tmp_path / "clones" / job_id).mkdir(parents=True)
+    store.attach_job_session("j-now", "sess-live-job")
+
+    with patch.object(WikiSourceAccess, "_resolve_runtime", return_value=_fake_runtime(store)):
+        access = WikiSourceAccess.for_session("sess-live-job")
+
+    assert isinstance(access, WikiSourceAccess)
+    assert access.clone_dir == tmp_path / "clones" / "j-now"

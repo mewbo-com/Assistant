@@ -1,4 +1,4 @@
-"""Contract + Flask-level tests for the pipeline endpoint surface (Phase 2).
+"""Contract + Flask-level tests for the pipeline endpoint surface.
 
 Covers ``GET /apps/<id>/pipelines`` (declared surface), ``GET``/``POST
 /apps/<id>/pipelines/<name>`` (invoke a ``mode="code"`` pipeline), and the
@@ -9,9 +9,8 @@ through the shared backend, the ONLY way to catch the dual-registration /
 missing-``resource_class_kwargs`` class of bug (mirrors
 ``test_apps_routes_flask.py``).
 
-The runner is a fake (contract tests from the caller site; the real
-materialized-pipeline runner lands separately in Phase 2 — this suite
-never runs one).
+The runner is a fake — these are contract tests from the caller site and this
+suite never runs a real materialized pipeline.
 """
 
 from __future__ import annotations
@@ -463,9 +462,9 @@ class _SpyFailureHandler:
 
 
 class TestInvokePipelineLedger:
-    """Phase 2 REVISED ruling: ledger an on-request invoke IFF it had a real
-    effect (wrote data) or genuinely failed — never a cache hit or a read-only
-    render (the anti-spam line for a polling client)."""
+    """Ledger an on-request invoke IFF it had a real effect (wrote data) or
+    genuinely failed — never a cache hit or a read-only render. That line is
+    what keeps a polling client from spamming the ledger."""
 
     @staticmethod
     def _wire_tracker(controller, runner, *, failure_handler=None):
@@ -742,8 +741,8 @@ def client_and_key(tmp_path):
     ``invoke_pipeline`` prefers the tracker over ``ctrl.runner`` when one is
     wired. Left un-swapped, every invoke in this file would silently execute
     against the real production runner instead of ``_EchoRunner``. The
-    ledger/tracker-specific behavior (Phase 2 revised ruling) is exercised
-    separately via controller-direct tests with a purpose-built fake tracker —
+    ledger/tracker-specific behavior is exercised separately via
+    controller-direct tests with a purpose-built fake tracker —
     see ``TestInvokePipelineLedger`` below.
     """
     ctrl = apps_routes._controller

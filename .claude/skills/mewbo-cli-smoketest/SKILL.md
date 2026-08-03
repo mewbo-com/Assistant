@@ -1,6 +1,6 @@
 ---
 name: mewbo-cli-smoketest
-description: End-to-end smoke testing of the Mewbo CLI via tmux. Use this skill when asked to test the CLI, verify CLI behavior after changes, smoke-test the agent loop, check for regressions, or validate MCP/plugin/session features work correctly through the terminal interface. Also use when validating the live-streaming transcript ("glide"), the activity footer/spinner, or the fleet sidebar + per-agent drill-in (epic #161), and when debugging CLI crashes, MCP connection issues, or session lifecycle problems that need live reproduction.
+description: End-to-end smoke testing of the Mewbo CLI via tmux. Use this skill when asked to test the CLI, verify CLI behavior after changes, smoke-test the agent loop, check for regressions, or validate MCP/plugin/session features work correctly through the terminal interface. Also use when validating the live-streaming transcript ("glide"), the activity footer/spinner, or the fleet sidebar + per-agent drill-in, and when debugging CLI crashes, MCP connection issues, or session lifecycle problems that need live reproduction.
 ---
 
 # Mewbo CLI Smoke Test via Tmux
@@ -9,7 +9,7 @@ Automate end-to-end CLI testing by running `mewbo` inside a tmux pane, driving i
 
 ## Why tmux
 
-Since epic #149 the CLI is **one full-screen Textual `App`** (not the old Rich `Live` + prompt stack), and #161 layered live streaming + a per-agent fleet sidebar on top. You cannot run it via the Bash tool because it requires a PTY and renders interactive widgets on the **alternate screen**. Tmux gives you a real terminal to drive the app while capturing output programmatically.
+The CLI is **one full-screen Textual `App`**, with live streaming + a per-agent fleet sidebar layered on top. You cannot run it via the Bash tool because it requires a PTY and renders interactive widgets on the **alternate screen**. Tmux gives you a real terminal to drive the app while capturing output programmatically.
 
 ## Two capture channels (read this first)
 
@@ -92,9 +92,9 @@ In `/tmp/mewbo-test.log` look for `WARNING`/`ERROR` during plugin/skill load: `F
 
 `/mcp` and `/models` open modals. Capture to confirm the modal renders, then **dismiss with `Escape`** before the next input or it goes to the modal, not the prompt.
 
-## Layer 3 — The streaming transcript ("glide") — #152/#161
+## Layer 3 — The streaming transcript ("glide")
 
-This is the headline #161 surface: assistant text must **glide in incrementally**, tool cards must **mutate in place**, and everything must appear in **exact emission order**. Send a tool-using query and capture **mid-turn**:
+This is the headline streaming surface: assistant text must **glide in incrementally**, tool cards must **mutate in place**, and everything must appear in **exact emission order**. Send a tool-using query and capture **mid-turn**:
 
 ```bash
 tmux send-keys -t ... "List the files in the current directory, then summarize what this project is" Enter
@@ -115,7 +115,7 @@ sleep 12 && tmux capture-pane -p -t ...   # settled frame
 | turn ends | spinner collapses into a settled summary line `done · N.Ns` (muted); the next turn mounts a fresh spinner below it | — |
 
 **Nuance to actually catch regressions:**
-- **Incrementality**: compare frame #1 vs #2 — the assistant text tail must be *longer* in #2. If text only appears in the settled frame, streaming is unwired (the #1 bug this epic fixed).
+- **Incrementality**: compare frame #1 vs #2 — the assistant text tail must be *longer* in #2. If text only appears in the settled frame, streaming is unwired.
 - **Order/provenance invariant**: text, tool cards, and spawn markers must be interleaved in **arrival order**, never bucketed by type (all-text-then-all-tools = regression).
 - **Mutate-in-place**: a tool that runs then finishes is **one** card that changes state, not two stacked cards.
 - **Settled vs running styling**: running content is full-weight; completed/failed content is dimmed/muted. A finished turn whose spinner keeps animating, or whose old cards stay full-bright, is a lifecycle bug.
@@ -126,7 +126,7 @@ The foot-of-transcript **activity spinner** is distinct from the bottom **status
 - **Activity spinner** (in `#transcript`): live step label — `Working` → `thinking` → `running <tool>` → settles to `done · N.Ns`. It must always end settled (never spin forever after the response renders).
 - **Status line** (`#statusline`): `user@host · model · cwd(~) · branch · stash · ↑<in> ↓<out>` session tokens. After queries, `↑/↓` token counts must be **non-zero** and grow across turns. Cross-check with `/tokens` and `/budget`.
 
-## Layer 5 — Fleet sidebar + per-agent drill-in — #161 Phase 2+4
+## Layer 5 — Fleet sidebar + per-agent drill-in
 
 Trigger sub-agents so the **FLEET** section populates, then drill in. Use a query that fans out:
 
@@ -136,16 +136,16 @@ sleep 8  && tmux capture-pane -p -t ...   # fleet populating
 sleep 25 && tmux capture-pane -p -t ...   # agents running/completing
 ```
 
-**Faceted sidebar (Phase 4):** the right column shows uppercase `$accent` section headers **FLEET**, **PLAN**, **CONTEXT**, each a titled block (`SidebarSection`). PLAN is the todo dock; CONTEXT is the context/cost gauge.
+**Faceted sidebar:** the right column shows uppercase `$accent` section headers **FLEET**, **PLAN**, **CONTEXT**, each a titled block (`SidebarSection`). PLAN is the todo dock; CONTEXT is the context/cost gauge.
 
-**Fleet rows (Phase 2):** the FLEET section is a selectable `OptionList` with **one row per agent** in the hypervisor tree (root + every sub-agent + parallel agents), tree-ordered and indented. Each row is a **one-glance summary**, never a tool-name dump:
+**Fleet rows:** the FLEET section is a selectable `OptionList` with **one row per agent** in the hypervisor tree (root + every sub-agent + parallel agents), tree-ordered and indented. Each row is a **one-glance summary**, never a tool-name dump:
 
 ```
 <glyph> <label/type> · <model> · <N tools> · <elapsed> · <in→out>
 ```
 
 - **Glyph** (`ICONS.agent_state`): `⏳` submitted · `●` running · `✓` completed · `✗` failed · `⊘` cancelled/rejected. Root label is bold-accent.
-- **`<N tools>` is a COUNT only.** The single most important assertion of this phase: **no tool *names* appear in a row** (the old `AgentPanel` dumped names; the whole point of #161 was to kill that). If you see tool names in the sidebar, that's a regression.
+- **`<N tools>` is a COUNT only.** The single most important assertion here: **no tool *names* appear in a row.** If you see tool names in the sidebar, that's a regression.
 - Rows refresh live — `elapsed` ticks and token facets update while agents run; a finished agent's glyph flips to `✓`/`✗` and its row may bell once.
 
 **Drill-in:** select a fleet row (move highlight with arrows, `Enter` to select):
@@ -166,7 +166,7 @@ Expect: the `#transcript` region **swaps in place** to that agent's transcript (
 - child → child (select a *different* row while drilled in — re-targets in place; an EXCLUSIVE worker serializes rapid re-targets so you never see a half-stale view),
 - child → root (`esc`/`backspace` returns to the live root).
 
-## Layer 6 — Orchestration cards — #161 Phase 3
+## Layer 6 — Orchestration cards
 
 The hypervisor tools render as **dedicated cards**, not JSON dumps (registered *after* base renderers so they win). Force each:
 
@@ -233,7 +233,7 @@ tmux kill-window -t <session>:mewbo-test
 - **Alt-screen has no scrollback.** `capture-pane -S -100` won't give history for the live TUI — it returns the visible grid. Use the `--log-file` channel for anything that scrolled off, and capture **mid-turn** to observe transient states (spinner label, partial text, running cards).
 - **Verbose goes to the log, not the pane.** With the full-Textual app, `-vv` output is only useful via `--log-file`; never `--log-console` (it paints over the widgets).
 - **Width gates the sidebar.** Too narrow a window and FLEET/PLAN/CONTEXT collapse or clip — resize to ≥ ~200 cols before asserting on the sidebar.
-- **Streaming proof needs ≥ 2 mid-turn frames.** A single settled capture cannot distinguish "streamed" from "dumped at end" — the whole point of #161. Always diff two mid-turn frames.
+- **Streaming proof needs ≥ 2 mid-turn frames.** A single settled capture cannot distinguish "streamed" from "dumped at end" — the whole point of this layer. Always diff two mid-turn frames.
 - **Fleet rows are summaries, by design.** Seeing only counts/metadata (no tool names) is *correct*, not missing detail — the detail lives in the **drill-in**, reached by selecting the row.
 - **Model-choice provenance is name-only.** Rows show the model *name*; how it was chosen (auto/tier vs override) is intentionally absent — core doesn't surface it. Don't file that as a bug.
 - **Plugin warnings repeat every turn.** Plugin/skill loading runs each tool-use iteration, so identical warnings recur — focus on *unique* messages, not counts.

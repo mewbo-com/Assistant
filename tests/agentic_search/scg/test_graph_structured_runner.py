@@ -18,7 +18,7 @@ from mewbo_api.agentic_search.scg.graph_structured_runner import GraphStructured
 from mewbo_api.agentic_search.scg.workspace_binding import SCG_CAPABILITY
 from mewbo_api.agentic_search.schemas import Workspace, WorkspaceInput
 from mewbo_api.agentic_search.store import JsonAgenticSearchStore
-from mewbo_core.structured_response import StructuredResponseError
+from mewbo_core.loop.structured_response import StructuredResponseError
 from mewbo_graph.scg import store as scg_store_mod
 from mewbo_graph.scg.types import SourceDescriptor
 

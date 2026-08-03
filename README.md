@@ -19,88 +19,147 @@
 <p align="center"><em>Agentic task automation, memory-graph documentation and Q&amp;A, and search across every tool you connect. Any model, open source.</em></p>
 
 
+## 🧭 Overview
 
-https://github.com/user-attachments/assets/78754e8f-828a-4c54-9e97-29cbeacbc3bc
+Mewbo is an open, model agnostic stack for putting long-running agents to work across your code, your tools and your data, under a harness that keeps each one bounded and auditable.
 
-<table align="center">
-    <tr>
-        <td align="center"><img src="docs/assets/img/mewbo-wiki-02-overview.jpg" alt="MewboWiki overview page with a runtime flow diagram and inline Ask MewboWiki Q&A" height="280px"></td>
-        <td align="center"><img src="docs/assets/img/mewbo-console-07-widgets.png" alt="Stock ticker and GitHub repo card widgets rendered inline in the Mewbo Console" height="280px"></td>
-    </tr>
-    <tr>
-        <td colspan="2" align="center"><img src="docs/assets/img/mewbo-search-02-results.jpg" alt="Agentic Search: one ranked list of results across connected sources, topped by a synthesised overview" height="280px"></td>
-    </tr>
+Every run is bounded before it starts. It gets a fixed tool surface and a spend ceiling. Permissions decide what it can reach. A failed call retries or falls back to another model. Every step lands on one trace. Work is split across sub-agents. The context that has to hold it is not.
+
+That harness is the reusable part. Generating a wiki is a Mewbo session. A search fans out probe agents on the same hypervisor. An app comes from a builder agent under the same rules. Four products, one engine. An improvement to the loop reaches all of them.
+
+An agent acts as a principal in the identity model you already enforce. It holds the same grants and leaves the same audit trail as any other actor. Bringing in a new system therefore creates no second place where access is decided. Swapping the model underneath changes none of it. A team can keep widening what it automates while auditing the same set of rules.
+
+## ✨ Features
+
+<table>
+<tr>
+<td width="50%" valign="middle">
+
+### Agentic tasks
+
+A long run is a fleet, not a chat. Approve the plan, then watch the tree and steer or stop any branch. Authority only narrows going down. Retries and model fallback absorb the failures, and one trace makes the result reviewable rather than merely finished.
+
+[Docs →](https://docs.mewbo.com/latest/web/sessions/)
+
+</td>
+<td width="50%">
+  <a href="https://docs.mewbo.com/latest/web/sessions/"><img src="docs/assets/img/mewbo-tasks-demo.gif" alt="A Mewbo task in the web console. The request asks for trending repositories in an organisation to be visualised as a widget ranked by 30 day star growth, and an inline widget renders a ranked card grid of six repositories with language, star count and star delta" width="100%" /></a>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### Agentic Wiki and Q&A
+
+Indexing lifts a repository's ASTs into a three layer memory graph, so pages are generated from structure rather than from a file by file read. Probe agents traverse the same graph at question time, and a cross module answer arrives cited to a path and line range.
+
+[Docs →](https://docs.mewbo.com/latest/features-wiki-qa/)
+
+</td>
+<td width="50%">
+  <a href="https://docs.mewbo.com/latest/features-wiki-qa/"><img src="docs/assets/img/mewbo-wiki-qna-demo.gif" alt="A generated MewboWiki page titled Mewbo Architecture Overview, showing a layered package architecture diagram, an on this page outline rail, an index freshness card reporting that the newest index attempt did not finish, and the Ask MewboWiki composer with a model picker and a Fast mode toggle" width="100%" /></a>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### Agentic Search
+
+No single index spans the systems that hold your answer. Attach them as APIs, databases or MCP servers, and probe agents route by a graph of reachability rather than content, each writing its route back.
+
+[Docs →](https://docs.mewbo.com/latest/features-search/)
+
+</td>
+<td width="50%">
+  <a href="https://docs.mewbo.com/latest/features-search/"><img src="docs/assets/img/mewbo-search-05-synthesis.png" alt="Agentic Search results for a question about how a self hosted CI fleet splits between runners and control plane. A synthesis card cites three sources with a confidence score, twelve ranked results follow across Code and Web filters, and a right rail shows the agent trace with a coordinator and two probe sub-agents reporting steps, duration and tokens" width="100%" /></a>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### Agentic Apps
+
+The same harness builds an app against a structured playbook, then verifies it. Its frontend ships as WASM and runs in the browser sandbox, so you operate no new service. Triggers and schedules come out of the same build, so upkeep ships with the app.
+
+[Docs →](https://docs.mewbo.com/latest/apps/)
+
+</td>
+<td width="50%">
+  <a href="https://docs.mewbo.com/latest/apps/"><img src="docs/assets/img/mewbo-apps-01-detail.png" alt="A live Mewbo App called LLM Model Compare. A filter rail on the left narrows by provider, release year, capabilities, intelligence index, throughput and blended cost. The centre shows stat tiles and a bar chart ranked by coding score. A right rail reports health, recent runs, daily pipelines, cron schedules and versions" width="100%" /></a>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### Plugins and automation
+
+Plugins add skills, agent definitions, hooks, session tools and MCP servers to a session. Triggers start one with nobody watching, on a schedule, on CI, on a pull request or on a webhook.
+
+[Plugins →](https://docs.mewbo.com/latest/features-plugins/) · [Triggers →](https://docs.mewbo.com/latest/api/triggers/)
+
+</td>
+<td width="50%">
+  <a href="https://docs.mewbo.com/latest/api/triggers/"><img src="docs/assets/img/mewbo-triggers-01-plugins.png" alt="Two Mewbo settings panes side by side. The left lists installed plugins with the skills, agents, commands, hooks and MCP servers each one contributes. The right lists reverse invocation triggers filtered by kind and status, each with its cron expression, fire count and next fire time" width="100%" /></a>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### Mewbo Assistant on Android
+
+The Android client runs the same sessions you have at your desk, registered as the device assistant so its orb answers over whatever app is in front of you. Voice goes in, and device tools act on the phone itself.
+
+[Docs →](https://docs.mewbo.com/latest/android/)
+
+</td>
+<td width="50%">
+  <a href="https://docs.mewbo.com/latest/android/"><img src="docs/assets/img/mewbo-aura-banner.gif" alt="Two Android phones running the Mewbo Assistant side by side, each showing the chat composer as a request is typed and sent" width="100%" /></a>
+</td>
+</tr>
 </table>
 
-<details>
-<summary><b>More screenshots</b>: console, wiki, search, and integrations</summary>
+**Also in the box:**
 
-<br>
+- **[Open agent standards](https://docs.mewbo.com/latest/features-skills/).** Agent Skills, agent definitions and MCP servers load exactly as written, so what you already run elsewhere works here unchanged. Marketplaces ship all three.
+- **[Identity and access](https://docs.mewbo.com/latest/authentication/).** Principals, roles, teams, grants and an audit trail, with OIDC, LDAP and SAML behind their own extras. Every agent action lands against a real identity, so an audit can answer who ran what.
+- **[Sandboxed execution](https://docs.mewbo.com/latest/features-builtin-tools/).** A shell command is an opaque string, so Landlock confines the subprocess itself rather than trusting its arguments. On by default.
+- **[Plan mode and permissions](https://docs.mewbo.com/latest/features-plan-mode/).** Approve the plan before anything runs. After that every write and every shell call clears a permission rule or a hook.
+- **[Agent hypervisor](https://docs.mewbo.com/latest/features-agents/).** A spawn past the concurrency ceiling comes back rejected rather than queued, so a saturated fleet is visible instead of silent.
+- **[Long-horizon context](https://docs.mewbo.com/latest/features-compaction/).** Compaction summarises older turns as the budget fills and restores the working set afterwards. Fork any message to replay that branch on a different model.
+- **[Tracing and token accounting](https://docs.mewbo.com/latest/features-token-usage/).** Every model call writes a paired event onto the transcript and the session groups into one trace, with token counts split between the root agent and its children.
+- **[Code intelligence](https://docs.mewbo.com/latest/features-lsp/).** Language servers are discovered automatically and rerun diagnostics after every edit, so a run sees the same errors your editor would.
+- **[Web IDE](https://docs.mewbo.com/latest/web/ide/).** Each session can open its own code-server container, started on demand and reaped when its time to live runs out. Take the files over mid-run without leaving the browser.
+- **[Any provider, every surface](https://docs.mewbo.com/latest/llm-setup/).** Bring the models you already pay for. The terminal, the console, Android, the REST API, an MCP server, Home Assistant, Nextcloud Talk and email all drive the same session.
 
-<table align="center">
-    <tr><td colspan="2" align="center"><sub><b>A SESSION, END TO END</b></sub></td></tr>
-    <tr>
-        <td align="center" width="50%"><img src="docs/assets/img/mewbo-console-01-front.png" alt="Mewbo console landing page listing recent sessions" height="260px"><br><sub>Your sessions at a glance</sub></td>
-        <td align="center" width="50%"><img src="docs/assets/img/mewbo-console-02-tasks.png" alt="Mewbo task detail page" height="260px"><br><sub>Inside a task, step by step</sub></td>
-    </tr>
-    <tr>
-        <td align="center" width="50%"><img src="docs/assets/img/mewbo-console-03-plan-approval.jpg" alt="Plan approval in the Mewbo console" height="260px"><br><sub>Plan mode: approve before anything runs</sub></td>
-        <td align="center" width="50%"><img src="docs/assets/img/mewbo-console-04-file-edit.jpg" alt="File-edit diff card in the Mewbo console" height="260px"><br><sub>Every edit lands as a reviewable diff</sub></td>
-    </tr>
-    <tr><td colspan="2" align="center"><sub><b>THE KNOWLEDGE PRODUCTS</b></sub></td></tr>
-    <tr>
-        <td align="center" width="50%"><img src="docs/assets/img/mewbo-wiki-01-landing.jpg" alt="Agentic Wiki landing page that generates source-grounded documentation from a repository URL" height="260px"><br><sub>Agentic Wiki: documentation from a repo URL</sub></td>
-        <td align="center" width="50%"><img src="docs/assets/img/mewbo-search-01-landing.jpg" alt="Agentic Search landing page with workspaces scoped to connected sources" height="260px"><br><sub>Agentic Search: workspaces over your connected tools</sub></td>
-    </tr>
-    <tr><td colspan="2" align="center"><sub><b>EXTEND IT, ON EVERY SURFACE</b></sub></td></tr>
-    <tr>
-        <td align="center" width="50%"><img src="docs/assets/img/mewbo-console-05-plugins.png" alt="Plugins page with installed plugins and marketplace listings" height="260px"><br><sub>Plugins and a marketplace to extend any session</sub></td>
-        <td align="center" width="50%"><img src="docs/assets/img/screenshot_ha_assist_2.png" alt="Home Assistant device control via Mewbo" height="260px"><br><sub>The same agent, controlling Home Assistant</sub></td>
-    </tr>
-    <tr>
-        <td colspan="2" align="center"><img src="docs/assets/img/mewbo-email-01.jpg" alt="Mewbo email thread in Gmail" height="340px"><br><sub>Or working from your inbox over email</sub></td>
-    </tr>
-</table>
-
-</details>
-
-## Overview
-
-Mewbo is an open, model-agnostic stack for agentic work. At its core, a hypervisor decomposes a goal into parallel sub-agents that each carry only the tools they need and exchange compressed summaries instead of raw transcripts, within resource budgets you tune per deployment. Three products build on that core. The first automates multi-step tasks across your codebase and tools, isolating each change in its own Git worktree. The second generates living documentation and question answering, grounded in a multiplexed memory graph that runs alongside an AST index of your code. The third is a search engine rebuilt around agents and indexes, ranking results across every source you have connected. You approve destructive actions, watch the agent tree as it grows, and can steer any branch mid-flight. Sessions persist with full provenance, compact automatically near the budget, and run on any model across every client.
-
-## Features
-
-- **Agent hypervisor.** Sub-agents spawn in parallel with scoped tools and approval-gated actions. Progress shows as a live tree, and you can steer or cancel any branch mid-flight. The hypervisor enforces resource budgets through natural-language warnings rather than force-kills, and resolves every child into a structured result.
-- **Long-horizon context.** Two-mode compaction summarises older turns near the budget. Post-compact file restoration replays the working set. Conversation fork lets you branch from any message and replay against a different model.
-- **Native skills, plugins, and MCP.** Agent Skills, plugins from any compatible marketplace, and MCP servers load from user or project scope without translation. Plugins also contribute per-session stateful tools, hooks, and agent definitions.
-- **Agentic Wiki.** Turns any repository into living documentation you can interrogate. Indexing pairs a multiplexed memory graph with an AST index of the code, so question answering traverses structure and meaning across many hops for authoritative answers grounded in the source itself.
-- **Agentic Search.** A search engine rebuilt around agents and indexes. One query fans out across every source you've connected, from repos to trackers to chat, and comes back as one ranked list of results spanning them all, topped by a synthesised overview cited to its sources.
-- **Inline interactive widgets.** Sub-agents author Streamlit-in-WASM widgets that mount in a sandboxed Web Worker inside the conversation, with no server round-trip and no CORS.
-- **Provider-agnostic, multi-surface.** Any model behind LiteLLM, accessed from a terminal CLI, web console, Android app, REST API, MCP server, Home Assistant, Nextcloud Talk, or email. Same session, same tools, same transcript.
-
-## Get started
+## 🚀 Get started
 
 See [docs.mewbo.com/latest/getting-started](https://docs.mewbo.com/latest/getting-started/) to install Mewbo and run a first session.
 
-## Documentation
+## 📚 Documentation
 
 Full documentation lives at **[docs.mewbo.com](https://docs.mewbo.com/latest/)**.
 
 | Section | Covers |
 | --- | --- |
-| [Get Started](https://docs.mewbo.com/latest/getting-started/) | Install, configure an LLM, run a first session. |
-| [Configure](https://docs.mewbo.com/latest/configuration/) | LLM setup, project config, configuration reference. |
-| [Clients](https://docs.mewbo.com/latest/clients-cli/) | CLI, web console, REST API, Home Assistant, Nextcloud Talk, email. |
-| [Knowledge & Discovery](https://docs.mewbo.com/latest/features-wiki/) | Agentic Wiki and Agentic Search, the source-grounded docs and cross-tool search products. |
-| [Capabilities](https://docs.mewbo.com/latest/features-builtin-tools/) | Built-in tools, sub-agents, skills, plugins, widgets, plan mode, permissions, compaction. |
-| [Deploy](https://docs.mewbo.com/latest/deployment-docker/) | Docker Compose, storage backends, production setup. |
-| [Develop](https://docs.mewbo.com/latest/core-orchestration/) | Architecture, session runtime, building a client, API reference. |
+| [Get Started](https://docs.mewbo.com/latest/getting-started/) | Install, configure a model, run a first session. |
+| [Terminal](https://docs.mewbo.com/latest/terminal/) | The terminal client, its interface, the agent fleet view, remote sync. |
+| [Web](https://docs.mewbo.com/latest/web/) | Console sessions, search and wiki, the Web IDE, panels, widgets. |
+| [Android](https://docs.mewbo.com/latest/android/) | Install, voice, chat and sessions, device tools. |
+| [Agentic Apps](https://docs.mewbo.com/latest/apps/) | Building an app, and living with one once it runs. |
+| [API](https://docs.mewbo.com/latest/api/) | Building a client, structured outputs, automation, triggers, REST reference. |
+| [Client Integrations](https://docs.mewbo.com/latest/clients-mcp/) | MCP server, Home Assistant, email, Nextcloud Talk. |
+| [Knowledge & Discovery](https://docs.mewbo.com/latest/features-wiki/) | Agentic Wiki and Agentic Search. |
+| [Capabilities](https://docs.mewbo.com/latest/features-builtin-tools/) | Built-in tools, worktrees, code intelligence, sub-agents, skills, plugins, plan mode, permissions, compaction. |
+| [Deploy](https://docs.mewbo.com/latest/deployment-docker/) | Docker Compose, storage backends, production setup, observability. |
+| [Configure](https://docs.mewbo.com/latest/configuration/) | Model setup, project setup, identity providers, configuration reference. |
+| [Develop](https://docs.mewbo.com/latest/core-orchestration/) | Architecture, session runtime, Python reference. |
+| [Troubleshooting](https://docs.mewbo.com/latest/troubleshooting/) | Symptom to cause to fix for common failures. |
 | [Releases](https://github.com/bearlike/Assistant/releases) | Release notes and upgrade history. |
 
-## Contributing
+## 🤝 Contributing
 
-Bugs and feature requests on the [issue tracker](https://github.com/bearlike/Assistant/issues). For development setup, see the [developer guide](https://docs.mewbo.com/latest/developer-guide/).
+Bugs and feature requests on the [issue tracker](https://github.com/bearlike/Assistant/issues). For the architecture and the engineering rules a change is held to, see the [architecture overview](https://docs.mewbo.com/latest/core-orchestration/) and [`CLAUDE.md`](./CLAUDE.md).
 
-## License
+## 📄 License
 
 [MIT](LICENSE) © Krishnakanth Alagiri.

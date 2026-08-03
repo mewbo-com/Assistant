@@ -92,9 +92,9 @@ def _create_live_app(controller) -> str:
 def _create_live_app_with_pipeline(controller, *, pipeline_name: str = "p", armed: bool) -> str:
     """Create+submit a live app with one pipeline: a declared schedule vs on-demand.
 
-    ``armed=True`` declares a ``time.cron`` schedule the PLATFORM arms at submit
-    (Phase 1 — the primary path); ``armed=False`` is an ``on_demand`` pipeline
-    (no armed wake, so it lands in ``unscheduled_pipelines``).
+    ``armed=True`` declares a ``time.cron`` schedule the PLATFORM arms at submit;
+    ``armed=False`` is an ``on_demand`` pipeline (no armed wake, so it lands in
+    ``unscheduled_pipelines``).
     """
     body, status = controller.create_app({"intent": "Digest my email"})
     assert status == 201
@@ -185,10 +185,10 @@ class TestCrud:
         assert [v["version"] for v in body["versions"]] == [1]  # AppDetail carries history
 
     def test_get_survives_a_pre_phase1_version_snapshot(self, tmp_path):
-        # Regression for the live 500 on app-a2a5f299e0ad: the append-only
-        # version history holds pre-existing snapshots whose pipelines declare no
-        # schedule/on_demand/trigger_ref. The wakeability floor lives at the
-        # SUBMIT boundary, so this history must parse and the detail must 200.
+        # The append-only version history holds snapshots whose pipelines
+        # declare no schedule/on_demand/trigger_ref. The wakeability floor lives
+        # at the SUBMIT boundary, so this history must parse and the detail must
+        # 200 — enforcing the floor on a read 500s.
         from mewbo_api.apps.models import AppVersion
 
         controller = _make(tmp_path)
@@ -371,8 +371,8 @@ class TestWriteAuthorization:
         assert status == 401
 
     def test_legacy_four_part_token_verifies_as_read_so_write_auth_403s(self, tmp_path):
-        # A token minted before Phase 2 (4-part blob, no scope segment) must
-        # still verify — but only ever as "read", so it 403s a write-gated call.
+        # A 4-part blob carries no scope segment. It must still verify — but
+        # only ever as "read", so it 403s a write-gated call.
         controller = _make(tmp_path)
         signer = controller.token_signer
         exp = int(NOW.timestamp()) + 1800
@@ -408,6 +408,83 @@ class TestDataAndSystem:
         controller = _make(tmp_path)
         _, status = controller.read_data("nope", "tasks", filter=None, sort=None, limit=100)
         assert status == 404
+
+    def test_read_data_reports_truncation_and_pages_recover_everything(self, tmp_path):
+        """A capped page must SAY it was capped, and ``offset`` must reach the rest.
+
+        The live defect this guards: a caller asking for more than the page cap
+        got a short list and a 200 with nothing to distinguish it from a
+        collection that genuinely held that many. Whole creators disappeared
+        from a served app and every signal stayed green.
+        """
+        controller = _make(tmp_path)
+        app_id = _create_live_app(controller)
+        total = 520
+        for i in range(total):
+            controller.data_store.upsert(app_id, "models", f"k{i:04d}", {"n": i})
+
+        page_size = 200
+        seen: list[int] = []
+        offset = 0
+        while True:
+            body, status = controller.read_data(
+                app_id, "models", filter=None, sort=None, limit=page_size, offset=offset
+            )
+            assert status == 200
+            assert body["offset"] == offset
+            seen.extend(d["doc"]["n"] for d in body["documents"])
+            if not body["truncated"]:
+                break
+            offset += len(body["documents"])
+
+        # Every seeded document is recovered exactly once — no gap, no duplicate.
+        assert sorted(seen) == list(range(total))
+
+    def test_read_data_not_truncated_when_the_page_holds_everything(self, tmp_path):
+        """The over-fetch that sets ``truncated`` must not make it always true."""
+        controller = _make(tmp_path)
+        app_id = _create_live_app(controller)
+        for i in range(3):
+            controller.data_store.upsert(app_id, "models", f"k{i}", {"n": i})
+        body, status = controller.read_data(
+            app_id, "models", filter=None, sort=None, limit=100
+        )
+        assert status == 200
+        assert body["truncated"] is False
+        assert len(body["documents"]) == 3
+
+    def test_read_data_offset_reaches_the_oldest_written_rows(self, tmp_path):
+        """The tail is what a silent clamp eats.
+
+        The default sort is newest-written-first, so the documents a truncated
+        read drops are the OLDEST — which for an alphabetically-ordered ingest
+        means its alphabetically-earliest keys vanish first.
+        """
+        controller = _make(tmp_path)
+        app_id = _create_live_app(controller)
+        for i in range(5):
+            controller.data_store.upsert(app_id, "models", f"k{i}", {"n": i})
+
+        head, _ = controller.read_data(app_id, "models", filter=None, sort=None, limit=2)
+        assert head["truncated"] is True
+        tail, _ = controller.read_data(
+            app_id, "models", filter=None, sort=None, limit=2, offset=3
+        )
+        assert tail["truncated"] is False
+        # Oldest-written (n=0) is last under the default updated_at-DESC order.
+        assert tail["documents"][-1]["doc"]["n"] == 0
+
+    def test_read_data_without_offset_is_unchanged(self, tmp_path):
+        """``offset`` is additive — omitting it must behave exactly as before."""
+        controller = _make(tmp_path)
+        app_id = _create_live_app(controller)
+        controller.data_store.upsert(app_id, "tasks", "a", {"title": "A", "done": False})
+        body, status = controller.read_data(
+            app_id, "tasks", filter={"done": False}, sort=None, limit=100
+        )
+        assert status == 200
+        assert body["offset"] == 0
+        assert [d["key"] for d in body["documents"]] == ["a"]
 
     def test_system_health_consolidated_shape(self, tmp_path):
         controller = _make(tmp_path)
@@ -453,8 +530,8 @@ class TestDataAndSystem:
         assert body["unscheduled_pipelines"] == []
 
     def test_system_health_pipeline_row_carries_declared_scheduled_tier(self, tmp_path):
-        # Phase 1: each pipeline row carries the declared schedule union +
-        # on_demand + trigger_ref + armed, so a client renders "refreshes hourly".
+        # Each pipeline row carries the declared schedule union + on_demand +
+        # trigger_ref + armed, so a client can render "refreshes hourly".
         controller = _make(tmp_path)
         app_id = _create_live_app_with_pipeline(controller, pipeline_name="ingest", armed=True)
         body, _ = controller.system_health(app_id)
@@ -463,7 +540,7 @@ class TestDataAndSystem:
         assert row["on_demand"] is False
         assert row["trigger_ref"] is not None  # platform-stamped
         assert row["armed"] is True
-        assert row["mode"] == "agentic" # Phase 2: additive, default unchanged
+        assert row["mode"] == "agentic"  # the default
 
     def test_system_health_pipeline_row_marks_on_demand(self, tmp_path):
         controller = _make(tmp_path)
@@ -477,7 +554,7 @@ class TestDataAndSystem:
         assert row["mode"] == "agentic"
 
     def test_system_health_pipeline_row_carries_code_mode(self, tmp_path):
-        # Phase 2: a mode="code" pipeline's row says so (additive field).
+        # A mode="code" pipeline's row says so.
         controller = _make(tmp_path)
         body, status = controller.create_app({"intent": "Weekly report"})
         assert status == 201

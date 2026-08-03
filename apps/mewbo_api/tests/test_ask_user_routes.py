@@ -10,7 +10,10 @@ shape as ``test_device_tools_routes.py``). Covers:
    answer validation against the stored questions, withdraw-vs-resolve race.
 3. A full dispatch round trip through ``ApiQuestionDispatcher`` and the
    ``POST .../questions/<call_id>/answer`` route, without any LLM — plus the
-   steer-supersede / interrupt / cancel wake paths.
+   steer-supersede / interrupt / cancel / timeout wake paths.
+4. ``QuestionAnswerRouter``: a question stays answerable after its waiter
+   departed, and the late answer reaches the model as a new user turn (steered
+   into a live run, or starting one on an idle session).
 """
 
 from __future__ import annotations
@@ -21,32 +24,58 @@ import threading
 import time
 
 import pytest
-from mewbo_core.ask_user import AskUserQuestionArgs, QuestionAnswerItem
-from mewbo_core.session_runtime import RunHandle
+from mewbo_core.loop.session_runtime import RunHandle
+from mewbo_core.tooling.ask_user import AskUserQuestionArgs, QuestionAnswerItem
 
 API_KEY = "test-master-token-ask-user"
 
 _QUESTIONS_CONTEXT = {"client_capabilities": ["ask_user"]}
 
-_ARGS = AskUserQuestionArgs.model_validate(
+_QUESTIONS = [
     {
-        "questions": [
-            {
-                "header": "Scope",
-                "question": "Which scope?",
-                "options": [{"label": "Root only"}, {"label": "All agents"}],
-            },
-            {"header": "Notes", "question": "Anything else?"},
-        ]
+        "header": "Scope",
+        "question": "Which scope?",
+        "options": [{"label": "Root only"}, {"label": "All agents"}],
+    },
+    {"header": "Rollout", "question": "Anything else?"},
+]
+
+_ARGS = AskUserQuestionArgs.model_validate({"questions": _QUESTIONS})
+
+_TIMED_ARGS = AskUserQuestionArgs.model_validate(
+    {
+        "questions": _QUESTIONS,
+        "timeout_seconds": 5,
+        "notes_placeholder": "Anything else about the deploy?",
     }
 )
 
 
+class _StepClock:
+    """Monotonic stub that jumps *step* seconds on every read.
+
+    An injected clock is what lets a deadline test assert expiry without a
+    single ``sleep`` — ``reads`` is the proof: two reads means the loop set its
+    deadline, found it spent, and never polled.
+    """
+
+    def __init__(self, step: float = 1000.0) -> None:
+        self.reads = 0
+        self._now = 0.0
+        self._step = step
+
+    def __call__(self) -> float:
+        self.reads += 1
+        now = self._now
+        self._now += self._step
+        return now
+
+
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
-    from mewbo_core.session_event_bus import reset_session_event_bus_for_tests
-    from mewbo_core.session_runtime import SessionRuntime
-    from mewbo_core.session_store import SessionStore
+    from mewbo_core.loop.session_runtime import SessionRuntime
+    from mewbo_core.session.session_event_bus import reset_session_event_bus_for_tests
+    from mewbo_core.session.session_store import SessionStore
 
     reset_session_event_bus_for_tests()
 
@@ -76,6 +105,20 @@ def _wait_for_event(rt, session_id: str, kind: str, timeout: float = 2.0) -> dic
     raise AssertionError(f"{kind} event never appeared")
 
 
+def _expire_question(rt, session_id: str, args: AskUserQuestionArgs = _TIMED_ARGS) -> dict:
+    """Drive a bounded question to expiry; return its durable `user_question` payload.
+
+    The realistic way to reach the late-answer path: the waiter is gone, the
+    event is not.
+    """
+    from mewbo_api.ask_user import ApiQuestionDispatcher
+
+    dispatcher = ApiQuestionDispatcher(runtime=rt, monotonic=_StepClock())
+    result = asyncio.run(dispatcher.dispatch(session_id, args))
+    assert result.outcome == "timed_out"
+    return _wait_for_event(rt, session_id, "user_question")
+
+
 def _idle_handle(**overrides) -> RunHandle:
     fields = {
         "cancel_event": threading.Event(),
@@ -93,14 +136,14 @@ def _idle_handle(**overrides) -> RunHandle:
 
 
 def test_question_dispatcher_registered_at_api_startup():
-    from mewbo_core.ask_user import QuestionDispatcher
+    from mewbo_core.tooling.ask_user import QuestionDispatcher
 
     assert QuestionDispatcher.available() is True
 
 
 def test_query_with_ask_user_capability_binds_tool(client, monkeypatch):
     c, rt, backend = client
-    from mewbo_core.ask_user import AskUserQuestionTool
+    from mewbo_core.tooling.ask_user import AskUserQuestionTool
 
     captured: dict = {}
     monkeypatch.setattr(
@@ -138,7 +181,7 @@ def test_query_without_capability_binds_nothing(client, monkeypatch):
 
 def test_message_reengage_rebuilds_tool_from_persisted_context(client, monkeypatch):
     c, rt, backend = client
-    from mewbo_core.ask_user import AskUserQuestionTool
+    from mewbo_core.tooling.ask_user import AskUserQuestionTool
 
     captured: dict = {}
     monkeypatch.setattr(
@@ -316,7 +359,7 @@ def test_full_answer_round_trip_via_route(client):
             headers=_headers(**{"X-Mewbo-Surface": "console"}),
         )
         assert resp.status_code == 200
-        assert resp.get_json() == {"resolved": True}
+        assert resp.get_json() == {"resolved": True, "delivery": "run"}
 
         thread.join(timeout=5)
         assert not thread.is_alive()
@@ -335,13 +378,15 @@ def test_full_answer_round_trip_via_route(client):
             {"selected_indexes": None, "text": "ship it"},
         ]
 
-        # The entry is gone once the dispatcher read it → a late POST 404s.
+        # The entry is gone once the dispatcher read it, but the ANSWER is
+        # durable — so a duplicate POST reads 409 rather than 404, on
+        # this path and after a restart alike.
         resp = c.post(
             url,
             json={"call_token": token, "answers": [{"text": "x"}, {"text": "y"}]},
             headers=_headers(),
         )
-        assert resp.status_code == 404
+        assert resp.status_code == 409
     finally:
         thread.join(timeout=5)
 
@@ -373,18 +418,22 @@ def test_steering_signals_supersede_a_pending_question(
     answered = _wait_for_event(rt, session_id, "user_question_answered")
     assert answered["outcome"] == expected_outcome
     assert answered["answers"] is None
+    assert answered["delivery"] is None
 
-    # Superseded ⇒ withdrawn: a late answer POST finds nothing pending.
+    # A supersede stops the RUN waiting; it does NOT close the question. The
+    # late answer is still accepted and lands as a new user turn.
+    monkeypatch.setattr(rt, "start_async", lambda **kw: f"{kw['session_id']}:r9")
     question = _wait_for_event(rt, session_id, "user_question")
     resp = c.post(
         f"/api/sessions/{session_id}/questions/{question['call_id']}/answer",
         json={
             "call_token": question["call_token"],
-            "answers": [{"text": "late"}, {"text": "late"}],
+            "answers": [{"selected_indexes": [0]}, {"text": "late"}],
         },
         headers=_headers(),
     )
-    assert resp.status_code == 404
+    assert resp.status_code == 200
+    assert resp.get_json() == {"resolved": True, "delivery": "message"}
 
 
 def test_steer_message_stays_queued_for_the_loop(client, monkeypatch):
@@ -402,3 +451,385 @@ def test_steer_message_stays_queued_for_the_loop(client, monkeypatch):
     result = asyncio.run(ApiQuestionDispatcher(runtime=rt).dispatch(session_id, _ARGS))
     assert result.outcome == "declined"
     assert handle.message_queue.get_nowait() == "typed instead"
+
+
+def test_notes_round_trip_to_the_waiter_and_the_event(client):
+    """Notes ride the answer to the blocked call AND onto the settle event."""
+    c, rt, backend = client
+    from mewbo_api.ask_user import ApiQuestionDispatcher
+
+    session_id = rt.resolve_session()
+    dispatcher = ApiQuestionDispatcher(runtime=rt)
+    result_box: dict = {}
+
+    thread = threading.Thread(
+        target=lambda: result_box.update(
+            result=asyncio.run(dispatcher.dispatch(session_id, _TIMED_ARGS))
+        )
+    )
+    thread.start()
+    try:
+        question = _wait_for_event(rt, session_id, "user_question")
+        # The bounded call's knobs reach every surface on the durable event.
+        assert question["timeout_seconds"] == 5
+        assert question["notes_placeholder"] == "Anything else about the deploy?"
+
+        resp = c.post(
+            f"/api/sessions/{session_id}/questions/{question['call_id']}/answer",
+            json={
+                "call_token": question["call_token"],
+                "answers": [{"selected_indexes": [0]}, {"text": "no"}],
+                "notes": "Staging is mid-migration.",
+            },
+            headers=_headers(),
+        )
+        assert resp.status_code == 200
+        assert resp.get_json() == {"resolved": True, "delivery": "run"}
+
+        thread.join(timeout=5)
+        assert result_box["result"].notes == "Staging is mid-migration."
+        answered = _wait_for_event(rt, session_id, "user_question_answered")
+        assert answered["notes"] == "Staging is mid-migration."
+        assert answered["delivery"] == "run"
+    finally:
+        thread.join(timeout=5)
+
+
+def test_oversized_notes_are_refused_at_the_wire(client):
+    c, rt, backend = client
+    from mewbo_core.tooling.ask_user import MAX_QUESTION_NOTES_CHARS
+
+    session_id = rt.resolve_session()
+    question = _expire_question(rt, session_id)
+    resp = c.post(
+        f"/api/sessions/{session_id}/questions/{question['call_id']}/answer",
+        json={
+            "call_token": question["call_token"],
+            "answers": [{"text": "a"}, {"text": "b"}],
+            "notes": "x" * (MAX_QUESTION_NOTES_CHARS + 1),
+        },
+        headers=_headers(),
+    )
+    assert resp.status_code == 400
+
+
+def test_unknown_body_key_is_refused(client):
+    c, rt, backend = client
+
+    session_id = rt.resolve_session()
+    question = _expire_question(rt, session_id)
+    resp = c.post(
+        f"/api/sessions/{session_id}/questions/{question['call_id']}/answer",
+        json={
+            "call_token": question["call_token"],
+            "answers": [{"text": "a"}, {"text": "b"}],
+            "outcome": "answered",
+        },
+        headers=_headers(),
+    )
+    assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Bounded wait — the dispatcher's own deadline
+# ---------------------------------------------------------------------------
+
+
+def test_timeout_expiry_resolves_timed_out_without_sleeping(client):
+    c, rt, backend = client
+    from mewbo_api.ask_user import ApiQuestionDispatcher, get_pending_questions
+
+    session_id = rt.resolve_session()
+    clock = _StepClock()
+    dispatcher = ApiQuestionDispatcher(runtime=rt, monotonic=clock)
+
+    result = asyncio.run(dispatcher.dispatch(session_id, _TIMED_ARGS))
+    assert result.outcome == "timed_out"
+    assert result.answers == ()
+    # One read to set the deadline, one to find it spent — no poll iteration.
+    assert clock.reads == 2
+
+    answered = _wait_for_event(rt, session_id, "user_question_answered")
+    assert answered["outcome"] == "timed_out"
+    assert answered["answers"] is None
+    # The waiter is withdrawn, so the live registry no longer holds the entry.
+    question = _wait_for_event(rt, session_id, "user_question")
+    assert (
+        get_pending_questions().resolve(
+            session_id,
+            question["call_id"],
+            question["call_token"],
+            [QuestionAnswerItem(text="a"), QuestionAnswerItem(text="b")],
+            answered_via=None,
+        )[0]
+        == "not_found"
+    )
+
+
+def test_absent_timeout_never_reads_the_clock(client, monkeypatch):
+    """An unbounded call has no deadline at all."""
+    c, rt, backend = client
+    from mewbo_api.ask_user import ApiQuestionDispatcher
+
+    session_id = rt.resolve_session()
+    clock = _StepClock()
+    handle = _idle_handle()
+    handle.cancel_event.set()
+    monkeypatch.setattr(rt, "active_run_handle", lambda sid: handle)
+
+    result = asyncio.run(
+        ApiQuestionDispatcher(runtime=rt, monotonic=clock).dispatch(session_id, _ARGS)
+    )
+    assert result.outcome == "cancelled"
+    assert clock.reads == 0
+
+    question = _wait_for_event(rt, session_id, "user_question")
+    assert question["timeout_seconds"] is None
+    assert question["notes_placeholder"] is None
+
+
+# ---------------------------------------------------------------------------
+# QuestionAnswerRouter — an answer always reaches the model
+# ---------------------------------------------------------------------------
+
+
+def test_late_answer_on_an_idle_session_starts_a_run(client, monkeypatch):
+    c, rt, backend = client
+
+    session_id = rt.resolve_session()
+    question = _expire_question(rt, session_id)
+    captured: dict = {}
+    monkeypatch.setattr(
+        rt, "start_async", lambda **kw: captured.update(kw) or f"{kw['session_id']}:r4"
+    )
+
+    resp = c.post(
+        f"/api/sessions/{session_id}/questions/{question['call_id']}/answer",
+        json={
+            "call_token": question["call_token"],
+            "answers": [{"selected_indexes": [1]}, {"text": "ship it"}],
+            "notes": "after the migration",
+        },
+        headers=_headers(**{"X-Mewbo-Surface": "console"}),
+    )
+    assert resp.status_code == 200
+    assert resp.get_json() == {"resolved": True, "delivery": "message"}
+
+    # The turn reads as an answer to the earlier question, so the model can act.
+    query = captured["user_query"]
+    assert "answers the question you asked earlier" in query
+    assert "Scope: All agents" in query
+    assert "Rollout: ship it" in query
+    assert "after the migration" in query
+
+    # Every surface settles its card off the answered event, not off the POST.
+    answered = [
+        e["payload"]
+        for e in rt.load_events(session_id)
+        if e.get("type") == "user_question_answered"
+    ]
+    assert answered[-1]["outcome"] == "answered"
+    assert answered[-1]["delivery"] == "message"
+    assert answered[-1]["answered_via"] == "console"
+    assert answered[-1]["notes"] == "after the migration"
+
+
+def test_late_answer_rides_the_steer_queue_of_a_live_run(client, monkeypatch):
+    """The run moved on but is still alive ⇒ the answer steers it, no new run."""
+    c, rt, backend = client
+
+    session_id = rt.resolve_session()
+    question = _expire_question(rt, session_id)
+    steered: list[str] = []
+    monkeypatch.setattr(
+        rt, "enqueue_message", lambda sid, text: bool(steered.append(text)) or True
+    )
+    monkeypatch.setattr(
+        rt,
+        "start_async",
+        lambda **kw: pytest.fail("a live run must not be re-started"),
+    )
+
+    resp = c.post(
+        f"/api/sessions/{session_id}/questions/{question['call_id']}/answer",
+        json={
+            "call_token": question["call_token"],
+            "answers": [{"selected_indexes": [0]}, {"text": "yes"}],
+        },
+        headers=_headers(),
+    )
+    assert resp.status_code == 200
+    assert resp.get_json() == {"resolved": True, "delivery": "message"}
+    assert len(steered) == 1
+    assert "Scope: Root only" in steered[0]
+
+
+def test_late_answer_conflicts_only_after_a_genuine_answer(client, monkeypatch):
+    c, rt, backend = client
+
+    session_id = rt.resolve_session()
+    question = _expire_question(rt, session_id)
+    monkeypatch.setattr(rt, "start_async", lambda **kw: f"{kw['session_id']}:r4")
+    url = f"/api/sessions/{session_id}/questions/{question['call_id']}/answer"
+    body = {
+        "call_token": question["call_token"],
+        "answers": [{"text": "a"}, {"text": "b"}],
+    }
+
+    assert c.post(url, json=body, headers=_headers()).status_code == 200
+    # Second delivery: now there IS a prior answer, so it is refused.
+    second = c.post(url, json=body, headers=_headers())
+    assert second.status_code == 409
+
+
+def test_late_answer_unknown_call_id_and_token_mismatch(client):
+    c, rt, backend = client
+
+    session_id = rt.resolve_session()
+    question = _expire_question(rt, session_id)
+    body = {
+        "call_token": question["call_token"],
+        "answers": [{"text": "a"}, {"text": "b"}],
+    }
+
+    resp = c.post(
+        f"/api/sessions/{session_id}/questions/nosuchcall/answer",
+        json=body,
+        headers=_headers(),
+    )
+    assert resp.status_code == 404
+
+    resp = c.post(
+        f"/api/sessions/{session_id}/questions/{question['call_id']}/answer",
+        json={**body, "call_token": "wrong-token"},
+        headers=_headers(),
+    )
+    assert resp.status_code == 403
+
+
+def test_late_answer_validates_against_the_recovered_questions(client, monkeypatch):
+    """Semantics are re-checked against the RECOVERED args, not re-implemented."""
+    c, rt, backend = client
+
+    session_id = rt.resolve_session()
+    question = _expire_question(rt, session_id)
+    monkeypatch.setattr(
+        rt, "start_async", lambda **kw: pytest.fail("a bad shape must not start a run")
+    )
+    url = f"/api/sessions/{session_id}/questions/{question['call_id']}/answer"
+
+    resp = c.post(
+        url,
+        json={"call_token": question["call_token"], "answers": [{"text": "only one"}]},
+        headers=_headers(),
+    )
+    assert resp.status_code == 422
+    assert "expected 2 answer" in resp.get_json()["message"]
+
+    resp = c.post(
+        url,
+        json={
+            "call_token": question["call_token"],
+            "answers": [{"selected_indexes": [7]}, {"text": "b"}],
+        },
+        headers=_headers(),
+    )
+    assert resp.status_code == 422
+
+
+def test_late_answer_on_a_terminated_session_is_refused(client):
+    c, rt, backend = client
+
+    session_id = rt.resolve_session()
+    question = _expire_question(rt, session_id)
+    rt.terminate_session(session_id)
+
+    resp = c.post(
+        f"/api/sessions/{session_id}/questions/{question['call_id']}/answer",
+        json={
+            "call_token": question["call_token"],
+            "answers": [{"text": "a"}, {"text": "b"}],
+        },
+        headers=_headers(),
+    )
+    assert resp.status_code == 410
+
+
+def test_late_answer_survives_a_lost_registry(client, monkeypatch):
+    """The process-restart case: nothing in memory, everything in the transcript."""
+    c, rt, backend = client
+    from mewbo_api.ask_user import reset_pending_questions_for_tests
+
+    session_id = rt.resolve_session()
+    question = _expire_question(rt, session_id)
+    reset_pending_questions_for_tests()  # a fresh process holds no waiters
+    captured: dict = {}
+    monkeypatch.setattr(
+        rt, "start_async", lambda **kw: captured.update(kw) or f"{kw['session_id']}:r1"
+    )
+
+    resp = c.post(
+        f"/api/sessions/{session_id}/questions/{question['call_id']}/answer",
+        json={
+            "call_token": question["call_token"],
+            "answers": [{"selected_indexes": [0]}, {"text": "still relevant"}],
+        },
+        headers=_headers(),
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["delivery"] == "message"
+    assert "Rollout: still relevant" in captured["user_query"]
+
+
+def test_delivery_refusal_reports_conflict_not_success(client, monkeypatch):
+    """A run that starts between the two attempts must not read as answered."""
+    c, rt, backend = client
+
+    session_id = rt.resolve_session()
+    question = _expire_question(rt, session_id)
+    monkeypatch.setattr(rt, "enqueue_message", lambda sid, text: False)
+    monkeypatch.setattr(rt, "start_async", lambda **kw: "")
+
+    resp = c.post(
+        f"/api/sessions/{session_id}/questions/{question['call_id']}/answer",
+        json={
+            "call_token": question["call_token"],
+            "answers": [{"text": "a"}, {"text": "b"}],
+        },
+        headers=_headers(),
+    )
+    assert resp.status_code == 409
+    # Nothing was recorded as answered, so the card stays answerable.
+    answered = [
+        e["payload"]
+        for e in rt.load_events(session_id)
+        if e.get("type") == "user_question_answered"
+    ]
+    assert all(p["outcome"] != "answered" for p in answered)
+
+
+# ---------------------------------------------------------------------------
+# The shared delivery seam (`/message` behaviour must be unchanged)
+# ---------------------------------------------------------------------------
+
+
+def test_message_steer_and_reengage_still_map_to_202_and_200(client, monkeypatch):
+    c, rt, backend = client
+
+    sid = c.post("/api/sessions", json={}, headers=_headers()).get_json()["session_id"]
+
+    monkeypatch.setattr(rt, "enqueue_message", lambda session_id, text: True)
+    resp = c.post(f"/api/sessions/{sid}/message", json={"text": "steer"}, headers=_headers())
+    assert resp.status_code == 202
+    assert resp.get_json() == {"session_id": sid, "enqueued": True}
+
+    monkeypatch.setattr(rt, "enqueue_message", lambda session_id, text: False)
+    monkeypatch.setattr(rt, "start_async", lambda **kw: f"{kw['session_id']}:r1")
+    resp = c.post(f"/api/sessions/{sid}/message", json={"text": "again"}, headers=_headers())
+    assert resp.status_code == 200
+    assert resp.get_json() == {"session_id": sid, "enqueued": True, "run_id": f"{sid}:r1"}
+
+    monkeypatch.setattr(rt, "start_async", lambda **kw: "")
+    resp = c.post(f"/api/sessions/{sid}/message", json={"text": "busy"}, headers=_headers())
+    assert resp.status_code == 409
+    assert resp.get_json() == {"message": "Session is already running."}

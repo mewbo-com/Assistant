@@ -40,10 +40,9 @@ const KEYS_DESCRIPTION =
 /**
  * A pointer, not a second keys surface.
  *
- * `ApiKeysView` is a Security-facet pane and nothing else — it used to be
- * dual-mounted as both a pane and a standalone route, and that duplication was
- * deliberately removed. Re-mounting it here to save an administrator one click
- * would walk it straight back.
+ * `ApiKeysView` is a Security-facet pane and nothing else. Re-mounting it here
+ * as a second copy to save an administrator one click would recreate a
+ * duplicate keys surface — this pointer card exists so there is exactly one.
  */
 function KeysPointerCard() {
   return (

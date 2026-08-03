@@ -19,6 +19,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
+from mewbo_core.config import get_config_value
 from pydantic import BaseModel, ConfigDict
 
 from mewbo_graph._util import utc_now_iso as _utc_now_iso
@@ -67,7 +68,7 @@ class AnchorResolver(Protocol):
 _CFG = ConfigDict(extra="forbid", populate_by_name=True)
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
 # Keeps a clamped cosine strictly below the merge threshold so cosine alone can
-# only reach the flag (LLM) band — never an auto-merge (legacy dedup invariant).
+# only reach the flag (LLM) band — never an auto-merge (the dedup invariant).
 _CLAMP_EPS = 1e-9
 
 
@@ -212,9 +213,10 @@ class InsightDeduper:
 
         DRY: tiers 2+3 delegate the block→score→decide step to the ONE generic
         ``ResolutionLadder`` shared with entity resolution. The injected
-        strategies reproduce the legacy thresholds EXACTLY — ``fuzzy_jaccard``
+        strategies hold the tier thresholds EXACTLY — ``fuzzy_jaccard``
         ⇒ the merge band, ``dedup_cosine`` ⇒ the LLM (flag) band, NONE-default
-        ⇒ NEW — so this stays behavior-preserving (see ``_build_ladder``).
+        ⇒ NEW — so the ladder's bands and the tiers are one rule (see
+        ``_build_ladder``).
         """
         # Tier 1 — exact: identical normalized content ⇒ identical node_id
         # (indexed point lookup, never a scan). Kept inline — the ladder is for
@@ -225,11 +227,11 @@ class InsightDeduper:
         ladder, by_id = self._build_ladder(slug, candidate, candidate_vec)
         decision = ladder.decide(candidate.node_id)
 
-        # A merge-band verdict ⇒ the legacy tier-2 fuzzy merge (jaccard band).
+        # A merge-band verdict ⇒ tier 2, the fuzzy (jaccard band) merge.
         if decision.action == "merge" and decision.target_id:
             return DedupDecision("merge", decision.target_id, tier="fuzzy")
 
-        # A flag-band verdict ⇒ the legacy tier-3 LLM call over the nearest
+        # A flag-band verdict ⇒ tier 3, the LLM call over the nearest
         # candidate above the cosine floor (only when a vector + LLM exist).
         if (
             decision.action == "flag"
@@ -250,7 +252,7 @@ class InsightDeduper:
     ) -> tuple[ResolutionLadder, dict[str, tuple[MemoryNode, float]]]:
         """Build the shared ``ResolutionLadder`` over the cosine-kNN candidate set.
 
-        The injected strategies reproduce the legacy tiers EXACTLY:
+        The injected strategies encode the three tiers EXACTLY:
 
         - **block**: the kNN set from ``_nearest`` (bounded ANN seam), in cosine
           order — so flag-band ties break to the nearest, matching tier-3's
@@ -273,7 +275,7 @@ class InsightDeduper:
         }
         cand_tokens = _tokens(candidate.content, self._min_token_len)
         # Clamp cosine strictly below the auto-merge threshold so cosine alone
-        # can reach the flag band but NEVER the merge band (legacy invariant).
+        # can reach the flag band but NEVER the merge band (the dedup invariant).
         cosine_cap = self._fuzzy_jaccard - _CLAMP_EPS
 
         def block(_key: str) -> list[tuple[str, str]]:
@@ -381,6 +383,9 @@ class InsightIngestor:
         condenser: InsightCondenser | None = None,
         clock: Any = None,
         provider: AnchorResolver | None = None,
+        deduper: InsightDeduper | None = None,
+        max_anchors: int | None = None,
+        max_chars: int | None = None,
     ) -> InsightIngestor:
         """Build an ingestor with the standard collaborators (DRY across surfaces).
 
@@ -392,6 +397,21 @@ class InsightIngestor:
         ``provider`` overrides the default ``CodeStructureProvider`` so an
         alternate corpus (e.g. the SCG connector graph) can resolve its own
         anchors; ``None`` keeps the code-graph default (backward-compatible).
+
+        The ``wiki.memory.*`` knobs are read HERE, at the one composition root
+        every production caller goes through, and passed down as arguments. The
+        failure mode that made this necessary is invisible: this class and
+        ``InsightDeduper`` take each knob as a keyword argument whose default
+        EQUALS the config default, so an ingestor built with none of them
+        behaves exactly like a correctly configured one on a default
+        deployment — an operator who retunes ``dedup_k`` or ``max_anchors``
+        sees no error and no effect. Reading them here keeps both classes pure
+        DI: a class that read config itself could not be constructed in a test
+        without one, and a directly-constructed one would silently start
+        obeying a deployment setting the test had no way to see.
+
+        Config decides the DEFAULT, never "whether" — an explicitly passed
+        ``deduper``/``max_anchors``/``max_chars`` still wins.
         """
         from .structure_provider import CodeStructureProvider
 
@@ -399,14 +419,50 @@ class InsightIngestor:
             from .embedder import make_embedder_or_none
 
             embedder = make_embedder_or_none() or _NullEmbedder()
+        if deduper is None:
+            deduper = InsightDeduper(
+                store=store,
+                llm=llm,
+                fuzzy_jaccard=float(cls._setting("fuzzy_jaccard", 0.85)),
+                dedup_k=int(cls._setting("dedup_k", 5)),
+                dedup_cosine=float(cls._setting("dedup_cosine", 0.6)),
+            )
         return cls(
             store=store,
             embedder=embedder,
             provider=provider or CodeStructureProvider(store),
-            deduper=InsightDeduper(store=store, llm=llm),
+            deduper=deduper,
             condenser=condenser,
             clock=clock,
+            max_anchors=(
+                max_anchors if max_anchors is not None else int(cls._setting("max_anchors", 8))
+            ),
+            max_chars=max_chars if max_chars is not None else cls._configured_max_chars(),
         )
+
+    @staticmethod
+    def _setting(field: str, default: float) -> float:
+        """Read one ``wiki.memory.*`` knob, falling back to *default*.
+
+        The default at each call site is the constructor's own, so a
+        config-less caller lands on exactly the behaviour it had before these
+        knobs were wired.
+        """
+        value = get_config_value("wiki", "memory", field, default=default)
+        return default if value is None else value
+
+    @staticmethod
+    def _configured_max_chars() -> int:
+        """``wiki.memory.max_insight_chars``, capped by the model's own ceiling.
+
+        ``MemoryNode.content`` is declared ``max_length=MAX_INSIGHT_CHARS``, so
+        200 is a hard ceiling no setting can lift: a larger cap would let a
+        claim past this class's own length check and then raise a
+        ``ValidationError`` out of :meth:`ingest`. Lowering it is the direction
+        that works, and the one operators actually use.
+        """
+        raw = int(InsightIngestor._setting("max_insight_chars", MAX_INSIGHT_CHARS))
+        return min(raw, MAX_INSIGHT_CHARS)
 
     def ingest(
         self,

@@ -111,8 +111,10 @@ sealed interface SessionEvent {
     /**
      * Resolution of a [UserQuestion] group — records the outcome so EVERY surface (not only the one
      * that answered) settles its card. [UserQuestionAnsweredPayload.outcome] is `answered` (carrying
-     * the chosen answers) or `declined`/`interrupted`/`cancelled` (the run moved on without an
-     * answer); an unknown future value is tolerated as a plain dismissal ([TranscriptReducer]).
+     * the chosen answers) or `timed_out`/`declined`/`interrupted`/`cancelled` (the RUN stopped
+     * waiting - NOT that the question is resolved). Only `answered` settles the card read-only; every
+     * other outcome, including an unknown future value, keeps it tappable so a late human answer can
+     * still land ([TranscriptReducer]).
      */
     @Serializable
     data class UserQuestionAnswered(override val ts: String, val payload: UserQuestionAnsweredPayload) : SessionEvent
@@ -163,22 +165,44 @@ sealed interface SessionEvent {
         }
 
         /**
+         * `true` when [event] is a persisted `context` frame. `context` isn't its own
+         * [SessionEvent] variant - the dispatcher has no `"context"` branch (see the class doc's
+         * "there is deliberately no error branch" note for the same pattern) - so every context
+         * frame decodes to [Unknown] with `type == "context"`, and this is the ONE place that
+         * fact is spelled.
+         *
+         * Public because a context event is the durable record of a session's PROJECT, and the
+         * project now moves mid-run: the model can call `switch_project`, which persists a fresh
+         * `context` event naming the project it moved to. A caller folding events one at a time
+         * needs to tell "a context event that names no project" (the session is on a temp-dir cwd)
+         * apart from "not a context event" (nothing to adopt) - a bare `String?` from
+         * [contextProject] collapses the two, so pair it with this.
+         */
+        fun isContextEvent(event: SessionEvent): Boolean = event is Unknown && event.type == "context"
+
+        /** [event]'s own payload object when it is a `context` frame, else `null`. */
+        private fun contextPayload(event: SessionEvent): JsonObject? =
+            if (isContextEvent(event)) ((event as Unknown).raw as? JsonObject)?.get("payload") as? JsonObject else null
+
+        /**
          * The MOST RECENT persisted `context` event's payload object, per the backend's own
          * `_load_last_context` semantics (backend.py): the latest context event wins VERBATIM,
-         * never merged across several. `context` isn't its own [SessionEvent] variant - the
-         * dispatcher has no `"context"` branch (see the class doc's "there is deliberately no error
-         * branch" note for the same pattern) - so every context frame decodes to [Unknown] with
-         * `type == "context"`; this is the ONE reverse-scan the field readers below share. `null`
+         * never merged across several. The ONE reverse-scan the field readers below share; `null`
          * when the session has no context event at all.
          */
         private fun lastContextPayload(events: List<SessionEvent>): JsonObject? {
             for (event in events.asReversed()) {
-                if (event is Unknown && event.type == "context") {
-                    return (event.raw as? JsonObject)?.get("payload") as? JsonObject
-                }
+                if (isContextEvent(event)) return contextPayload(event)
             }
             return null
         }
+
+        /** One context payload's `project`, blank treated as absent. `as? JsonPrimitive`, never the
+         * `jsonPrimitive` accessor: that one THROWS on a nested object/array, and this now runs on
+         * the live per-event path where an exception would take the run's collector down rather
+         * than landing in a history load's own try/catch. */
+        private fun projectOf(payload: JsonObject?): String? =
+            (payload?.get("project") as? JsonPrimitive)?.content?.takeIf { it.isNotBlank() }
 
         /**
          * The model an EXISTING session's next turn would actually run on: the most recent `context`
@@ -187,7 +211,7 @@ sealed interface SessionEvent {
          * absent server-side).
          */
         fun lastContextModel(events: List<SessionEvent>): String? =
-            lastContextPayload(events)?.get("model")?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+            (lastContextPayload(events)?.get("model") as? JsonPrimitive)?.content?.takeIf { it.isNotBlank() }
 
         /**
          * The project ([ProjectSummary.contextKey] - bare name or `managed:<id>`) an EXISTING
@@ -196,9 +220,35 @@ sealed interface SessionEvent {
          * whole context object verbatim into the persisted event). `null` => the session is scoped to
          * Temporary (no project), which is an honest match of what the backend re-resolves - so a
          * revisited session's frozen scope reflects its REAL project, not the app-wide default.
+         *
+         * Since the model can move the session itself (`switch_project` persists a `context` event
+         * naming the project it moved to), "the most recent context event" is no longer only the
+         * app's own last send — it is genuinely where the session ended up. [contextProject] is the
+         * per-event sibling that keeps that live during a running turn.
          */
-        fun lastContextProject(events: List<SessionEvent>): String? =
-            lastContextPayload(events)?.get("project")?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+        fun lastContextProject(events: List<SessionEvent>): String? = projectOf(lastContextPayload(events))
+
+        /**
+         * The project ONE `context` event names — the per-event sibling of [lastContextProject],
+         * for a caller folding events as they stream in rather than reading a settled transcript.
+         * `null` for a context event carrying no `project` (the session is on a temp-dir cwd) AND
+         * for an event that isn't a context frame at all, so gate on [isContextEvent] first;
+         * [adoptContextProject] does exactly that and is what callers should reach for.
+         */
+        fun contextProject(event: SessionEvent): String? = projectOf(contextPayload(event))
+
+        /**
+         * The session's project after [event]: the event's own `project` when it IS a `context`
+         * frame, otherwise [current] unchanged.
+         *
+         * This is the whole mid-run project-switch seam, as a total pure function. A run that
+         * switches project emits a `context` event for it, so folding EVERY event through here
+         * keeps "which project is this session in" live for the length of a turn, instead of a
+         * fact read once at session load. Also correct on history replay: applying each context
+         * event in order lands on exactly what [lastContextProject] would have returned.
+         */
+        fun adoptContextProject(event: SessionEvent?, current: String?): String? =
+            if (event != null && isContextEvent(event)) contextProject(event) else current
 
         /**
          * The tool allowlist an EXISTING session's next turn narrows to: the most recent `context`
@@ -417,13 +467,18 @@ data class AppReadyPayload(
  * Wire shape of a `user_question` event (core `ask_user.py`'s `USER_QUESTION_EVENT`, snake_case).
  * [callToken] is a single-use bearer secret the answer POST presents (403 on mismatch) — proof of
  * stream-read access, NOT of which surface answers. [questions] holds 1-4 questions; an empty
- * [UserQuestionSpec.options] list is a free-text question.
+ * [UserQuestionSpec.options] list is a free-text question. [timeoutSeconds] is surfaced understatedly
+ * on the card, never as a live countdown; [notesPlaceholder], when present, adds ONE group-level
+ * free-text field (separate from each question's own "Other") whose value posts as the answer
+ * request's `notes` — blank input omits the field entirely, never an empty string on the wire.
  */
 @Serializable
 data class UserQuestionPayload(
     @SerialName("call_id") val callId: String,
     @SerialName("call_token") val callToken: String,
     val questions: List<UserQuestionSpec> = emptyList(),
+    @SerialName("timeout_seconds") val timeoutSeconds: Int? = null,
+    @SerialName("notes_placeholder") val notesPlaceholder: String? = null,
 )
 
 /**
@@ -447,10 +502,14 @@ data class UserQuestionOption(
 
 /**
  * Wire shape of a `user_question_answered` event (core's `USER_QUESTION_ANSWERED_EVENT`). [outcome]
- * is `answered`|`declined`|`interrupted`|`cancelled`; [answers] is populated only for `answered` (one
- * item per question, [AnsweredItem.selectedIndexes] XOR [AnsweredItem.text]). [answeredVia] is the
- * `X-Mewbo-Surface` of whoever answered, so a card can read "answered on console". An unknown future
- * [outcome] is tolerated — [TranscriptReducer] treats any non-`answered` value as a plain dismissal.
+ * is `answered`|`timed_out`|`declined`|`interrupted`|`cancelled`; [answers]/[notes] are populated
+ * only for `answered` (one [AnsweredItem] per question, [AnsweredItem.selectedIndexes] XOR
+ * [AnsweredItem.text]). [answeredVia] is the `X-Mewbo-Surface` of whoever answered, so a card can read
+ * "answered on console". [delivery] (`"run"` = the answer resolved the still-blocked tool call,
+ * `"message"` = the run had already moved on, so the answer landed as a new chat message instead) is
+ * only meaningful alongside `answered`. An unknown future [outcome] is tolerated — [TranscriptReducer]
+ * treats any non-`answered` value the same as `timed_out`/`declined`/`interrupted`/`cancelled`: the
+ * run stopped waiting, but the card stays open for a late answer.
  */
 @Serializable
 data class UserQuestionAnsweredPayload(
@@ -458,6 +517,8 @@ data class UserQuestionAnsweredPayload(
     val outcome: String,
     @SerialName("answered_via") val answeredVia: String? = null,
     val answers: List<AnsweredItem>? = null,
+    val notes: String? = null,
+    val delivery: String? = null,
 )
 
 @Serializable

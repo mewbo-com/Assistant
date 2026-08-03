@@ -73,7 +73,7 @@ class AssistTurnMachine(
      * are swallowed - the overlay must never depend on this succeeding.
      */
     private val refreshSessions: suspend () -> Unit = {},
-    /** The pull-up (swipe-up on the composer pill) handoff seam (user directive 2026-07-04), kept
+    /** The pull-up (swipe-up on the composer pill) handoff seam (user directive), kept
      * distinct from [onHandoff] because it carries the routing DECISION's two extra facts: a
      * NULLABLE [sessionId] ([expand]/[onHandoff] always have one, a pull-up before the first turn has
      * none -> land the app on a fresh new chat) and the composer's typed-but-unsent [draft] (null
@@ -313,7 +313,7 @@ class AssistTurnMachine(
         onHandoff(id, turnModality)
     }
 
-    /** Pull-up (swipe-up on the composer pill, user directive 2026-07-04): softly hand the overlay
+    /** Pull-up (swipe-up on the composer pill, user directive): softly hand the overlay
      * into the full app from ANY state. THE ROUTING DECISION (the testable seam this whole feature
      * hangs on): [sessionId] != null - THIS invocation already streamed a first turn, so a session
      * exists - hands off ONTO that session, the SAME target [expand] reaches; otherwise it hands off

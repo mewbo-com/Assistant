@@ -22,7 +22,7 @@ import threading
 from collections.abc import Callable
 
 from mewbo_core.common import get_logger
-from mewbo_core.session_store import SessionStoreBase
+from mewbo_core.session.session_store import SessionStoreBase
 
 logger = get_logger(name="mewbo.cli.autotitle")
 
@@ -73,7 +73,7 @@ class AutoTitler:
     def _run(self, session_id: str) -> None:
         """Worker body: generate, persist, and notify (best-effort)."""
         try:
-            from mewbo_core.title_generator import generate_session_title
+            from mewbo_core.session.title_generator import generate_session_title
 
             # Re-check inside the worker: the orchestrator's own background
             # titler may have won the race between maybe_title and here.

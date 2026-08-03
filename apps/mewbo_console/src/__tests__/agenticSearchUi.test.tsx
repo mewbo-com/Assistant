@@ -71,7 +71,7 @@ function searchResult(snippet: string): SearchResult {
     title: "auth.py",
     url: "github.com/x/auth.py",
     snippet,
-    author: "kk",
+    author: "acme-dev",
     timestamp: "2d",
   }
 }

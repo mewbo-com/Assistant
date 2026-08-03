@@ -140,7 +140,7 @@ DEMO_RESULTS: list[dict] = [
         "title": "RFC-042 · Sub-agent permission scoping",
         "url": "notion.so/eng/rfc-042-subagent-permissions",
         "snippet": "The hypervisor admits child sessions under a concurrency budget and propagates a trimmed permission set — tools marked <mark>concurrent-safe</mark> are batched, exclusive tools serialize. The child inherits read scopes but must re-request any write or shell permission at spawn.",
-        "author": "Krishna A.",
+        "author": "Ada L.",
         "timestamp": "Updated Apr 14",
         "insight": {
             "label": "Agent insight",
@@ -188,7 +188,7 @@ DEMO_RESULTS: list[dict] = [
         "title": "Permission-prompt UI — sub-agent variant",
         "url": "figma.com/file/PeRm/permission-prompts",
         "snippet": "Explores the inline permission-request affordance shown in the tool log when a sub-agent needs to escalate. Uses the blue <code>--permission</code> token and the ChildArrow iconography.",
-        "author": "design · krishna",
+        "author": "design · ada",
         "timestamp": "Updated Apr 08",
         "embed": {"kind": "figma", "title": "Permission prompts · 14 frames · 2 comments"},
     },
@@ -201,7 +201,7 @@ DEMO_RESULTS: list[dict] = [
         "title": "Runbook · How permissions propagate across parallel spans",
         "url": "notion.so/eng/runbooks/permissions-propagation",
         "snippet": "Step-by-step of what happens when the admit path denies a child request. Includes the <mark>permission</mark> prompt → allow/deny → retry loop, with Langfuse trace screenshots.",
-        "author": "Krishna A.",
+        "author": "Ada L.",
         "timestamp": "Updated Mar 30",
         "image": {"alt": "Permission flow diagram", "gradient": "linear-gradient(135deg, #1e3a8a 0%, #3b82f6 60%, #14b8a6 100%)"},
     },
@@ -370,7 +370,7 @@ DEMO_RELATED_QUESTIONS: list[str] = [
 ]
 
 DEMO_RELATED_PEOPLE: list[dict] = [
-    {"name": "Krishna A.", "role": "authored RFC-042", "initials": "KA", "color": 1},
+    {"name": "Ada L.", "role": "authored RFC-042", "initials": "AL", "color": 1},
     {"name": "bearlike", "role": "merged #412", "initials": "BL", "color": 2},
     {"name": "rpl", "role": "reported issue #398", "initials": "RP", "color": 4},
 ]

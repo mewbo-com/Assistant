@@ -13,7 +13,8 @@ It owns three outputs over its input File nodes + the resolved AST edges:
 * ``folder_edges`` — ``CONTAINS`` edges folder→subfolder and folder→file.
 * ``parents`` — a single deterministic ``parentId`` for every node id in the
   graph (folder→parent folder, file→its directory folder, symbol→its container
-  via the inbound ``CONTAINS`` edge, External→null).
+  via the inbound ``CONTAINS`` edge, External→the synthetic external bucket —
+  see ``_EXTERNAL_BUCKET_ID``).
 
 Path decomposition uses ``pathlib.PurePosixPath`` (repo paths are always
 '/'-separated); there is no hand-rolled string splitting.
@@ -32,6 +33,18 @@ if TYPE_CHECKING:
 # Synthetic Folder node ids are namespaced so they never collide with the
 # content-addressed sha1 ids the extractor mints for real symbols.
 _FOLDER_PREFIX = "folder:"
+
+# The synthetic bucket External convergence nodes are parented under, so they
+# obey the same expand/collapse rule the viewer applies to every real folder
+# (see the module docstring's ``External→null`` line — this replaces it with
+# a stable non-null parent). Namespaced under ``_FOLDER_PREFIX`` like any
+# other Folder id, but with a reserved suffix no real repo path can produce
+# (a POSIX path segment never starts with two dots followed by an identifier
+# in this shape), so it cannot collide with a directory actually named
+# ``__external__``. Id and label are STABLE and DETERMINISTIC across builds —
+# the console side keys off both.
+_EXTERNAL_BUCKET_ID = _FOLDER_PREFIX + "__external__"
+_EXTERNAL_BUCKET_LABEL = "External"
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,8 +80,11 @@ class FolderTree:
         the directory tree). ``edges`` are the RESOLVED AST edges — the inbound
         ``CONTAINS`` edge to a symbol names that symbol's container, which is
         its ``parentId``. ``external_nodes`` are the synthesised convergence
-        nodes (always parentless). Symbol nodes are read off the edge targets,
-        so the caller need not pass them separately.
+        nodes; when any are present they are all parented under one synthetic
+        ``_EXTERNAL_BUCKET_ID`` Folder node (minted here, top-level, same as a
+        real depth-1 folder) so they fold under the viewer's expand/collapse
+        rule instead of always rendering regardless of depth. Symbol nodes are
+        read off the edge targets, so the caller need not pass them separately.
         """
         files = [n for n in file_nodes if n.type == "File"]
 
@@ -130,9 +146,37 @@ class FolderTree:
             if e.type == "CONTAINS" and e.target not in parents:
                 parents[e.target] = e.source
 
-        # External convergence nodes are always parentless.
-        for ext in external_nodes:
-            parents.setdefault(ext.node_id, None)
+        # External convergence nodes fold under one synthetic top-level
+        # bucket, minted only when there is at least one to parent — an empty
+        # graph (or one with no unresolved cross-file symbol) never gains a
+        # dangling bucket node. The bucket is a Folder like any other, so it
+        # is subject to the SAME expand/collapse rule the viewer already
+        # applies at depth 1; without this, ``External→null`` exempted every
+        # External node from the fold that governs all real code.
+        # BOTH external populations belong here, and they arrive by different
+        # routes: the resolver PERSISTS an External node per out-of-repo symbol
+        # (so it comes in with ``file_nodes``, carrying no real path), while an
+        # unresolved by-name edge converges on a view-synthesized one passed as
+        # ``external_nodes``. Folding only the second leaves the first
+        # parentless — which is the very exemption this bucket exists to close,
+        # and it stays invisible until symbol resolution actually works and
+        # starts minting the persisted kind.
+        ext_list = [n for n in file_nodes if n.type == "External"]
+        ext_list += [n for n in external_nodes if n.type == "External"]
+        if ext_list:
+            if _EXTERNAL_BUCKET_ID not in folder_nodes:
+                folder_nodes[_EXTERNAL_BUCKET_ID] = FolderNode(
+                    slug=slug,
+                    node_id=_EXTERNAL_BUCKET_ID,
+                    name=_EXTERNAL_BUCKET_LABEL,
+                    file="",
+                    range=(0, 0),
+                    docstring=None,
+                )
+                folder_paths[_EXTERNAL_BUCKET_ID] = ""
+                parents[_EXTERNAL_BUCKET_ID] = None
+            for ext in ext_list:
+                parents.setdefault(ext.node_id, _EXTERNAL_BUCKET_ID)
 
         return cls(
             slug=slug,

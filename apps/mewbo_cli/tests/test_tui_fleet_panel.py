@@ -170,9 +170,8 @@ def test_state_glyphs_reflect_status() -> None:
 def test_blocked_and_unmet_goal_never_render_a_green_checkmark() -> None:
     """A blocked or unmet-goal root row must render its OWN glyph, never ✓.
 
-    Regression for the false-success bug: the fleet row's status used to be a
-    raw ``done_reason`` passthrough, so a ``blocked_code``-carrying completion
-    (whose ``done_reason`` stays ``"completed"``) resolved straight to the
+    A raw ``done_reason`` passthrough resolves a ``blocked_code``-carrying
+    completion (whose ``done_reason`` stays ``"completed"``) straight to the
     ``completed`` glyph — a green ✓ on a run that never got past a wall.
     """
     rows = [

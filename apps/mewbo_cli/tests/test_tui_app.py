@@ -274,8 +274,8 @@ def test_failing_installer_does_not_break_app() -> None:
 def test_busy_gate_closes_before_pre_turn_checkpoint() -> None:
     """The input must be marked busy BEFORE the (blocking) pre-turn checkpoint.
 
-    Regression for the cross-feature window where a second Enter during the git
-    checkpoint could start a concurrent turn (gate vs checkpoint).
+    Otherwise a second Enter lands inside the git-checkpoint window and starts
+    a concurrent turn.
     """
 
     async def _run() -> None:

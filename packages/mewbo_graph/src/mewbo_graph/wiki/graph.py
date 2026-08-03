@@ -16,13 +16,17 @@ from __future__ import annotations
 
 import hashlib
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
+from importlib import resources
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .folder_tree import FolderTree
+from .structure_provider import entity_key_for_node
 from .types import (
     ClassNode,
+    CommitScope,
     ExternalNode,
     FileNode,
     FunctionNode,
@@ -46,9 +50,10 @@ class LanguageSpec:
     """One tree-sitter-backed language the code-graph extractor supports.
 
     ``query_file`` defaults to ``<name>.scm`` — set it only when a language's
-    query file diverges from its language name (none do today; the field
-    keeps that decision out of ``_query_for``'s hot path rather than hardcode
-    the f-string there).
+    query file diverges from its language name, as ``tsx`` does: it is a
+    SEPARATE grammar from ``typescript`` (the two disagree about whether
+    ``<T>`` opens a type assertion or a JSX element) but the node types the
+    graph captures are identical, so one query file serves both.
     """
 
     name: str
@@ -64,10 +69,18 @@ class LanguageSpec:
 # Every tree-sitter-backed language GraphIndex supports. ``.kts`` (Kotlin
 # build/script files) is deliberately excluded — it's build config, not
 # application code the wiki graph should model.
+#
+# ``.tsx`` MUST route to the ``tsx`` grammar, not ``typescript``. The
+# TypeScript grammar reads ``<div>`` as a type assertion, so a file containing
+# JSX parses into a tree studded with ERROR nodes and most of its captures are
+# lost — measured at 320 of 321 ``.tsx`` files in this repository under
+# ``typescript`` versus 19 under ``tsx``. The failure is silent: the file still
+# parses, still yields a File node, and simply reports almost no symbols.
 _LANGUAGES: tuple[LanguageSpec, ...] = (
     LanguageSpec("python", (".py",)),
     LanguageSpec("javascript", (".js", ".jsx")),
-    LanguageSpec("typescript", (".ts", ".tsx")),
+    LanguageSpec("typescript", (".ts",)),
+    LanguageSpec("tsx", (".tsx",), query_file="typescript.scm"),
     LanguageSpec("go", (".go",)),
     LanguageSpec("rust", (".rs",)),
     LanguageSpec("kotlin", (".kt",)),
@@ -80,6 +93,59 @@ _LANG_BY_EXT: dict[str, str] = {
     ext: spec.name for spec in _LANGUAGES for ext in spec.extensions
 }
 _SPEC_BY_NAME: dict[str, LanguageSpec] = {spec.name: spec for spec in _LANGUAGES}
+
+# Directory segments that mark checked-in THIRD-PARTY code — exact match only
+# (never substring: a hypothetical ``distributed/`` must not match ``dist``),
+# mirroring the ``_ALWAYS_EXCLUDE_DIRS`` idiom in ``plugins/wiki/scan.py``.
+# ``vendor``/``vendored`` is this repository's own convention
+# (``packages/mewbo_tools/.../vendor/aider/``, see its ``VENDOR.md``); the rest
+# are the common names other repositories use for the same thing.
+_VENDORED_DIR_SEGMENTS: frozenset[str] = frozenset({
+    "vendor",
+    "vendored",
+    "third_party",
+    "third-party",
+    "dist",
+    "build",
+    ".venv",
+    "site-packages",
+    "external",
+    "generated",
+    "__generated__",
+})
+
+# A minified file collapses onto one (or a handful of) enormous lines.
+# Measured across this repository's own first-party source (1613 files, the
+# 9 extensions GraphIndex parses): the longest legitimate line is 815 chars
+# (an inlined SVG path in a `.tsx` component); `docs/assets/scalar.standalone
+# .min.js` — the one real offender on record — carries a 3.59-million-char
+# line. 1000 clears every measured real file with headroom and sits three
+# orders of magnitude below the measured minified bundle. A bare byte-size
+# threshold was tried and rejected: the tightest cutoff that still caught the
+# bundle also caught real first-party modules (a 364KB `backend.py`, a 213KB
+# `tool_use_loop.py`) — size doesn't distinguish "big" from "minified" the way
+# line shape does.
+_MINIFIED_MAX_LINE_CHARS = 1000
+
+
+def _is_vendored_path(rel_path: Path) -> bool:
+    """True if *rel_path* sits under a checked-in third-party directory."""
+    return any(part in _VENDORED_DIR_SEGMENTS for part in rel_path.parts[:-1])
+
+
+def _is_minified(rel_path: Path, source: bytes) -> bool:
+    """True if *rel_path*/*source* looks minified.
+
+    Two independent signals, either sufficient on its own: the conventional
+    ``*.min.*`` basename marker, and a single line far longer than any real
+    source line this repository contains (minification's actual mechanical
+    signature — see ``_MINIFIED_MAX_LINE_CHARS``).
+    """
+    if ".min." in rel_path.name:
+        return True
+    return max((len(line) for line in source.split(b"\n")), default=0) > (
+        _MINIFIED_MAX_LINE_CHARS
+    )
 
 
 @dataclass(frozen=True)
@@ -110,7 +176,11 @@ class GraphIndex:
         """Initialise caches and verify that the wiki extras are installed."""
         self._lang_cache: dict[str, object] = {}   # name → tree_sitter.Language
         self._query_cache: dict[str, object] = {}  # name → tree_sitter.Query
-        self._queries_dir = Path(__file__).parent / "graph_queries"
+        # Anchored on the PACKAGE, not on this file's depth: ``graph_queries/``
+        # belongs to ``mewbo_graph.wiki``, so a __file__-relative path would
+        # silently follow this module if it ever moves and fail at query-load
+        # time rather than at import.
+        self._queries_dir = resources.files("mewbo_graph.wiki") / "graph_queries"
         # Defensive import so missing extras give a clean error.
         try:
             import tree_sitter  # noqa: F401
@@ -124,19 +194,29 @@ class GraphIndex:
     def parse_file(
         self, slug: str, file_path: Path, *, repo_root: Path
     ) -> GraphParseResult:
-        """Parse a single file. Returns empty result for unsupported extensions."""
+        """Parse a single file.
+
+        Returns an empty result — the path lands in ``skipped``, same as an
+        unsupported extension — for a file with no supported extension, one
+        under a vendored directory, or one that looks minified. This is the
+        ONE seam every caller funnels through (``parse_repo``, the agent-driven
+        ``wiki_build_graph`` tool, and the zero-LLM ``GraphOnlyIndexer`` each
+        build their own file list independently and never share a walk), so
+        gating it here is what makes the exclusion apply everywhere rather
+        than needing to be re-applied at each caller's own file-collection
+        site.
+        """
         ext = file_path.suffix.lower()
         lang_name = _LANG_BY_EXT.get(ext)
-        if lang_name is None:
-            return GraphParseResult(
-                nodes=[],
-                edges=[],
-                skipped=[str(file_path.relative_to(repo_root))],
-            )
+        rel_path = file_path.relative_to(repo_root)
+        if lang_name is None or _is_vendored_path(rel_path):
+            return GraphParseResult(nodes=[], edges=[], skipped=[str(rel_path)])
 
         from tree_sitter import Parser
 
         source = file_path.read_bytes()
+        if _is_minified(rel_path, source):
+            return GraphParseResult(nodes=[], edges=[], skipped=[str(rel_path)])
         lang = self._lang_for(lang_name)
         tree = Parser(lang).parse(source)
         query = self._query_for(lang_name, lang)
@@ -157,11 +237,24 @@ class GraphIndex:
         slug: str,
         repo_root: Path,
         files: list[Path],
+        *,
+        on_progress: Callable[[int, int, str], None] | None = None,
     ) -> GraphParseResult:
-        """Parse every file. Files outside the supported set go to ``skipped``."""
+        """Parse every file. Files outside the supported set go to ``skipped``.
+
+        ``on_progress(done, total, path)`` is called after each file when
+        supplied. It is INJECTED rather than written here because progress is
+        persisted against an indexing job, which this parser knows nothing about
+        — and because the loop is the only place that knows how far along it is.
+        The throttling is the callee's business (see ``PhaseProgress``); this
+        loop reports every file and never decides what is worth writing.
+        """
         result = GraphParseResult(nodes=[], edges=[], skipped=[])
-        for fp in files:
+        total = len(files)
+        for done, fp in enumerate(files, start=1):
             result += self.parse_file(slug, fp, repo_root=repo_root)
+            if on_progress is not None:
+                on_progress(done, total, str(fp.relative_to(repo_root)))
         return result
 
     # ── helpers ───────────────────────────────────────────────────────────────
@@ -221,9 +314,17 @@ def _by_position(nodes: list) -> list:
     run-to-run, so a naive ``zip(captures["x.def"], captures["x.name"])`` can pair
     a def with the WRONG name (silently attaching a node's name to another node's
     byte range, which corrupts the graph and any downstream resolver matching on
-    name). Every captured def here is a disjoint sibling that contains its own
-    name, so document order is a sound join key: sorting BOTH lists by start byte
-    lines up the i-th def with the i-th name regardless of capture order.
+    name). Sorting BOTH lists by start byte lines up the i-th def with the i-th
+    name regardless of capture order.
+
+    Document order is a sound join key even though captured defs NEST (a def
+    inside a class, a class inside a function), because in every grammar here a
+    def's own name token precedes its body: for defs ``d1 < d2`` by start byte,
+    ``name(d1) < d2.start <= name(d2)`` when d2 is nested in d1, and
+    ``name(d1) < d1.end <= d2.start <= name(d2)`` when they are siblings. Both
+    orderings agree, so the zip holds. What would break it is a family whose
+    def can contain NO name at all — that one pairs by containment instead, via
+    ``_pair_defs_with_names``.
     """
     return sorted(nodes, key=lambda n: n.start_byte)
 
@@ -265,6 +366,43 @@ def _pair_defs_with_names(defs: list, names: list) -> list[tuple[Any, Any | None
         if best_idx is not None:
             assigned[best_idx] = name_node
     return [(d, assigned.get(i)) for i, d in enumerate(defs)]
+
+
+def _split_callables_by_scope(defs: list, class_defs: list) -> dict[int, bool]:
+    """Map each callable def's ``start_byte`` → is it a Method (else Function).
+
+    Some grammars cannot express "a def anywhere inside a class". A
+    tree-sitter pattern matches a FIXED ancestor shape and the language has no
+    descendant axis, so Python's three original patterns had to enumerate
+    parent shapes — module, class body — and consequently missed every shape
+    nobody listed: a decorated def (wrapped in ``decorated_definition``), a def
+    nested in another def, a def under an ``if``/``try`` guard. Enumerating
+    harder does not converge; the split has to happen here instead, over byte
+    ranges, where "anywhere inside" is a question that can actually be asked.
+
+    A def's kind follows its NEAREST enclosing definition, which is the rule a
+    reader applies: a def whose closest container is a class is a method, and a
+    def nested inside a method is a plain function again. Hence tightest
+    (smallest-span) containment rather than "is any class an ancestor" — the
+    same trap ``_subkinds_for`` documents, in a different disguise. Callables
+    are compared against each other as well as against classes, since a class
+    only wins when no closer callable stands between it and *d*.
+    """
+    class_spans = {(c.start_byte, c.end_byte) for c in class_defs}
+    is_method: dict[int, bool] = {}
+    for d in defs:
+        best_span: int | None = None
+        best_is_class = False
+        for other in (*defs, *class_defs):
+            if other.start_byte == d.start_byte and other.end_byte == d.end_byte:
+                continue  # itself
+            if other.start_byte <= d.start_byte and d.end_byte <= other.end_byte:
+                span = other.end_byte - other.start_byte
+                if best_span is None or span < best_span:
+                    best_span = span
+                    best_is_class = (other.start_byte, other.end_byte) in class_spans
+        is_method[d.start_byte] = best_is_class
+    return is_method
 
 
 def _subkinds_for(captures: dict[str, list], family: str, defs: list) -> dict[int, str]:
@@ -381,9 +519,15 @@ def _extract(
             GraphEdge(slug=slug, source=file_node.node_id, target=nid, type="CONTAINS")
         )
 
-    # Interfaces (TypeScript, Go, Rust, Kotlin, Java — trait/interface → Interface node)
+    # Interfaces (TypeScript, Go, Rust, Kotlin, Java — trait/interface → Interface
+    # node). Carries subkinds for the same reason Class does: TypeScript's
+    # `type X = …` declares a type the way an interface does and is
+    # interchangeable with one at most call sites, so it maps to this kind with
+    # `subkind="type_alias"` rather than earning a new structural kind.
+    if_defs = _by_position(captures.get("interface.def", []))
+    if_subkinds = _subkinds_for(captures, "interface", if_defs)
     for if_def_node, if_name_node in zip(
-        _by_position(captures.get("interface.def", [])),
+        if_defs,
         _by_position(captures.get("interface.name", [])),
     ):
         name = if_name_node.text.decode()
@@ -396,6 +540,7 @@ def _extract(
                 file=rel_path,
                 range=(if_def_node.start_byte, if_def_node.end_byte),
                 docstring=None,
+                subkind=if_subkinds.get(if_def_node.start_byte),
             )
         )
         edges.append(
@@ -429,10 +574,33 @@ def _extract(
             GraphEdge(slug=slug, source=file_node.node_id, target=nid, type="CONTAINS")
         )
 
-    # Top-level functions
-    fn_defs = _by_position(captures.get("function.def", []))
-    fn_names = _by_position(captures.get("function.name", []))
-    for fn_def_node, fn_name_node in zip(fn_defs, fn_names):
+    # Functions and methods. A language whose grammar CAN separate the two by
+    # ancestor shape captures them as distinct families; one whose grammar
+    # cannot (Python — see python.scm) emits a single unclassified `callable.*`
+    # family instead, which `_split_callables_by_scope` divides here by byte
+    # containment. Both routes converge on the same two node kinds, so nothing
+    # downstream — including a node_id already minted for a symbol the old
+    # patterns did reach — can tell which route produced a given node.
+    fn_pairs = list(
+        zip(
+            _by_position(captures.get("function.def", [])),
+            _by_position(captures.get("function.name", [])),
+        )
+    )
+    m_pairs = list(
+        zip(
+            _by_position(captures.get("method.def", [])),
+            _by_position(captures.get("method.name", [])),
+        )
+    )
+    call_defs = _by_position(captures.get("callable.def", []))
+    call_names = _by_position(captures.get("callable.name", []))
+    call_is_method = _split_callables_by_scope(call_defs, cls_defs)
+    for call_def_node, call_name_node in zip(call_defs, call_names):
+        target = m_pairs if call_is_method[call_def_node.start_byte] else fn_pairs
+        target.append((call_def_node, call_name_node))
+
+    for fn_def_node, fn_name_node in fn_pairs:
         name = fn_name_node.text.decode()
         nid = _stable_id(slug, "Function", name, rel_path, fn_def_node.start_byte)
         nodes.append(
@@ -450,9 +618,7 @@ def _extract(
         )
 
     # Methods
-    m_defs = _by_position(captures.get("method.def", []))
-    m_names = _by_position(captures.get("method.name", []))
-    for m_def_node, m_name_node in zip(m_defs, m_names):
+    for m_def_node, m_name_node in m_pairs:
         name = m_name_node.text.decode()
         nid = _stable_id(slug, "Method", name, rel_path, m_def_node.start_byte)
         nodes.append(
@@ -483,6 +649,7 @@ def _extract(
     # family ever does produce a name-less def.
     prop_defs = captures.get("property.def", [])
     prop_names = captures.get("property.name", [])
+    prop_subkinds = _subkinds_for(captures, "property", _by_position(prop_defs))
     for prop_def_node, prop_name_node in _pair_defs_with_names(prop_defs, prop_names):
         if prop_name_node is None:
             continue
@@ -496,6 +663,7 @@ def _extract(
                 file=rel_path,
                 range=(prop_def_node.start_byte, prop_def_node.end_byte),
                 docstring=None,
+                subkind=prop_subkinds.get(prop_def_node.start_byte),
             )
         )
         edges.append(
@@ -633,11 +801,70 @@ class KnowledgeGraphView:
     cross_edges: tuple[tuple[str, str], ...]
     total_nodes: int  # full AST node count (pre-cap), for the "showing N of M" banner
     total_edges: int  # full AST edge count (pre-cap)
+    # Externals the payload COULD have carried, before the cap took its share.
+    # Distinct from ``total_nodes`` because externals are synthesized at read
+    # time rather than stored, and the cap can drop them while leaving every
+    # real AST node in place — without this the banner reports "showing N of N"
+    # for a payload that silently lost nodes.
+    total_externals: int = 0
     # Directory scaffold for the "hierarchy" wire mode — ``None`` in the default
     # mode, so ``to_wire`` stays byte-identical when hierarchy is off.
     folder_tree: FolderTree | None = None
 
     # ── Construction ────────────────────────────────────────────────────
+
+    @classmethod
+    def _reanchor_entity_edges(
+        cls,
+        store: WikiStoreBase,
+        slug: str,
+        stranded: list[EntityRelation],
+        live_nodes: list[GraphNode],
+        payload_ast_ids: set[str],
+    ) -> list[tuple[str, str]]:
+        """Re-point entity ANCHORS that address a superseded generation's nodes.
+
+        An entity anchors to a code node by RAW ``node_id``, and a node id
+        embeds the symbol's ``start_byte`` (``_stable_id``). So every edit that
+        shifts a symbol within its file re-keys it, and an anchor minted
+        against an earlier index addresses an id the current generation does
+        not contain. Unscoped that never showed, because the superseded node
+        was still in the payload to point at — which is exactly the bug commit
+        scoping fixes, and exactly why scoping alone would silently sever most
+        of the entity→code bridge.
+
+        The repair is by ``entity_key`` (``file#name``), which carries NO byte
+        offset and so survives the edit that broke the id. Cost is bounded by
+        the number of stranded anchors, not by the graph: the superseded nodes
+        are fetched by explicit id rather than by reading the union.
+
+        The memory layer needs none of this — a memory ANCHORS edge already
+        stores an ``entity_key`` as its target rather than a node id, so it
+        re-resolves against whatever generation is loaded.
+
+        An anchor whose symbol genuinely no longer exists resolves to nothing
+        and stays dropped. That is the correct outcome, not a loss: an entity
+        pointing at deleted code is what this phase set out to stop rendering.
+        """
+        wanted = {rel.target_id for rel in stranded}
+        if not wanted:
+            return []
+        live_by_key: dict[str, str] = {}
+        for n in live_nodes:
+            live_by_key.setdefault(entity_key_for_node(n), n.node_id)
+        superseded = store.query_graph(
+            slug, scope=CommitScope.every(), node_ids=wanted
+        )
+        repointed: dict[str, str] = {}
+        for n in superseded:
+            live_id = live_by_key.get(entity_key_for_node(n))
+            if live_id is not None and live_id in payload_ast_ids:
+                repointed[n.node_id] = live_id
+        return [
+            (rel.source_id, repointed[rel.target_id])
+            for rel in stranded
+            if rel.target_id in repointed
+        ]
 
     @classmethod
     def for_slug(
@@ -647,8 +874,20 @@ class KnowledgeGraphView:
         *,
         node_limit: int | None = None,
         hierarchy: bool = False,
+        scope: CommitScope | None = None,
     ) -> KnowledgeGraphView:
         """Load the full multiplex (ast + entity + memory layers) for *slug*.
+
+        **Commit-scoped.** *scope* defaults to ``store.live_scope(slug)`` — the
+        project's own commit — so the viewer shows the code as it is now. Before
+        this the AST layer was read unscoped, which is why the payload was the
+        union of every generation ever indexed: deleted code rendered alongside
+        live code with nothing distinguishing them, and the node count grew
+        monotonically with re-indexes rather than with the repository.
+
+        Pass an explicit scope to read a specific generation; pass
+        ``CommitScope.every()`` to restore the pre-scoping union (which the
+        entity-anchor repair below relies on, and nothing else should).
 
         AST connectivity: a cross-file IMPORTS/CALLS/EXTENDS edge carries the
         raw ``target_name``; if that name resolves to a real in-repo node it is
@@ -656,12 +895,19 @@ class KnowledgeGraphView:
         symbols), otherwise every reference to the same external name converges
         on ONE synthesized ``External`` view-node.
 
-        ``node_limit`` (when set and exceeded) degree-prunes the **AST layer
-        only** — entity + memory layers are always fully included (they're
-        small). Pruning keeps the highest-degree AST nodes (degree computed
-        against the FULL ast edge set); ties break on ``node_id`` for stable
-        output. ``total_nodes``/``total_edges`` always reflect the full AST
-        graph so the wire response can honestly say "showing N of M".
+        ``node_limit`` (when set and exceeded) degree-prunes the **whole AST
+        payload** — real nodes AND the view-synthesized ``External`` nodes
+        together, not the persisted layer alone. The AST nodes are pruned
+        first (unchanged from before: highest-degree kept, ties on
+        ``node_id``); External nodes then get whatever budget is left,
+        pruned by the same degree-then-``node_id`` rule over their surviving
+        edges. A ``node_limit`` that the AST layer alone does not exceed can
+        still cap externals down, and an AST layer that exhausts the whole
+        budget leaves externals at zero — both are the cap "governing the
+        whole payload" rather than only the persisted one. Entity + memory
+        layers are always fully included (they're small) and never counted
+        against this cap. ``total_nodes``/``total_edges`` always reflect the
+        full AST graph so the wire response can honestly say "showing N of M".
 
         Cross-layer ANCHORS are reconciled to real node ids in O(nodes+edges):
         memory ANCHORS targets (``EntityKey`` / ``entity:<id>``) batch-resolve
@@ -679,8 +925,9 @@ class KnowledgeGraphView:
         from .structure_provider import CodeStructureProvider  # noqa: PLC0415
 
         # ── AST layer ────────────────────────────────────────────────────
-        all_nodes = store.query_graph(slug)
-        all_edges = list(store.list_edges(slug))
+        scope = store.live_scope(slug) if scope is None else scope
+        all_nodes = store.query_graph(slug, scope=scope)
+        all_edges = list(store.list_edges(slug, scope=scope))
         total_nodes = len(all_nodes)
 
         # Resolve cross-file edge targets by name → real in-repo node. Build the
@@ -699,14 +946,23 @@ class KnowledgeGraphView:
         # cross-file edges, so this count is cap-independent.)
         total_edges = len(resolved_edges)
 
-        # Degree-prune the AST layer only (externals follow their surviving edge).
-        if node_limit is None or total_nodes <= node_limit:
-            nodes = list(all_nodes)
-        else:
-            degree: Counter[str] = Counter()
+        # Degree over the full resolved edge set — needed by the AST prune
+        # below (when it fires) and by the external cap that follows it, so
+        # it's computed once whenever a limit is in play at all. Left EMPTY
+        # when nothing is capped: both readers are behind the same
+        # ``node_limit is not None`` guard, and a Counter answers 0 for an
+        # absent key, so an unlimited read can never see a wrong rank.
+        degree: Counter[str] = Counter()
+        if node_limit is not None:
             for e in resolved_edges:
                 degree[e.source] += 1
                 degree[e.target] += 1
+
+        # Degree-prune the AST layer (externals follow their surviving edge,
+        # then get their own cap below).
+        if node_limit is None or total_nodes <= node_limit:
+            nodes = list(all_nodes)
+        else:
             nodes = sorted(
                 all_nodes, key=lambda n: (-degree[n.node_id], n.node_id)
             )[:node_limit]
@@ -721,14 +977,41 @@ class KnowledgeGraphView:
         ]
         # Keep only externals still referenced by a surviving edge.
         live_ext_ids = {e.target for e in edges if e.target in ext_by_id}
-        kept_externals = tuple(ext_by_id[i] for i in sorted(live_ext_ids))
-        payload_ast_ids = kept_ast_ids | live_ext_ids
+
+        # ``node_limit`` caps the WHOLE payload, not just the persisted AST
+        # layer — a view-synthesized External node still counts against it.
+        # Externals get whatever budget the AST prune above left behind (zero
+        # when that prune already spent the full cap), ranked by the SAME
+        # degree-then-``node_id`` rule so the tie-break policy is one rule,
+        # not two. Final tuple is re-sorted by ``node_id`` for stable output,
+        # matching the AST layer's own ordering guarantee.
+        if node_limit is None:
+            live_externals = [ext_by_id[i] for i in live_ext_ids]
+        else:
+            budget = max(0, node_limit - len(nodes))
+            live_externals = sorted(
+                (ext_by_id[i] for i in live_ext_ids),
+                key=lambda n: (-degree[n.node_id], n.node_id),
+            )[:budget]
+        kept_externals = tuple(sorted(live_externals, key=lambda n: n.node_id))
+        kept_ext_ids = {n.node_id for n in kept_externals}
+        if kept_ext_ids != live_ext_ids:
+            # The external cap dropped some of the externals ``edges`` above
+            # was built against — drop the now-dangling edges pointing at
+            # them so no edge survives whose target was capped away.
+            edges = [
+                e
+                for e in edges
+                if e.target in kept_ast_ids or e.target in kept_ext_ids
+            ]
+        payload_ast_ids = kept_ast_ids | kept_ext_ids
 
         # ── Entity layer ─────────────────────────────────────────────────
         entity_nodes = store.query_entities(slug)
         entity_ids = {e.id for e in entity_nodes}
         entity_rels: list[EntityRelation] = []
         entity_cross: list[tuple[str, str]] = []
+        stranded: list[EntityRelation] = []
         for rel in store.list_entity_edges(slug):
             if rel.target_id in entity_ids and rel.source_id in entity_ids:
                 # entity ↔ entity → RELATES (verb in label)
@@ -736,7 +1019,15 @@ class KnowledgeGraphView:
             elif rel.source_id in entity_ids and rel.target_id in payload_ast_ids:
                 # entity → AST node → cross-layer ANCHORS
                 entity_cross.append((rel.source_id, rel.target_id))
+            elif rel.source_id in entity_ids:
+                # Anchored at an AST node that is not in this payload. Under a
+                # commit scope that is usually not a dangling anchor but a
+                # SUPERSEDED one — see the repair below.
+                stranded.append(rel)
             # else: dangling (target absent from this payload) → dropped
+        entity_cross.extend(
+            cls._reanchor_entity_edges(store, slug, stranded, nodes, payload_ast_ids)
+        )
 
         # ── Memory layer ─────────────────────────────────────────────────
         memory_nodes = store.query_memory(slug)
@@ -787,6 +1078,7 @@ class KnowledgeGraphView:
             cross_edges=tuple(entity_cross + memory_cross),
             total_nodes=total_nodes,
             total_edges=total_edges,
+            total_externals=len(live_ext_ids),
             folder_tree=folder_tree,
         )
 
@@ -847,11 +1139,28 @@ class KnowledgeGraphView:
 
     @property
     def kinds(self) -> dict[str, int]:
-        """Per-type AST-node histogram — drives the legend on the FE."""
-        return dict(
+        """Per-kind histogram over EVERY node this view puts on the wire.
+
+        Counts the Entity, Memory and Folder classes alongside the AST kinds
+        because the FE derives its whole legend from this one map: it lists a
+        kind only when the tally is positive, and sums the same map to decide
+        which LAYERS to offer. Counting the AST layer alone therefore did not
+        merely under-report — it drew those three classes on the canvas with no
+        legend entry and no toggle, so a user could neither identify them nor
+        turn them off.
+
+        Folder is counted only in the hierarchy wire mode, which is the only
+        mode that emits Folder nodes.
+        """
+        counts = (
             Counter(n.type for n in self.nodes)
             + Counter(n.type for n in self.external_nodes)
+            + Counter({"Entity": len(self.entity_nodes)} if self.entity_nodes else {})
+            + Counter({"Memory": len(self.memory_nodes)} if self.memory_nodes else {})
         )
+        if self.folder_tree is not None and self.folder_tree.folder_nodes:
+            counts += Counter({"Folder": len(self.folder_tree.folder_nodes)})
+        return dict(counts)
 
     # ── Serialisation ───────────────────────────────────────────────────
 
@@ -887,7 +1196,7 @@ class KnowledgeGraphView:
             nodes += [self._node_to_wire(f, "ast", tree) for f in tree.folder_nodes]
             edges += [self._edge_to_wire(e, "ast") for e in tree.folder_edges]
         stats: dict[str, Any] = {
-            # Legacy AST-only counters kept for back-compat consumers.
+            # AST-only counters — the flat shape wire consumers read.
             "nodeCount": self.node_count,
             "edgeCount": self.edge_count,
             "kinds": self.kinds,
@@ -897,7 +1206,7 @@ class KnowledgeGraphView:
             # pre-cap AST total is ``self.total_nodes``. Uncapped ⇒ M == N.
             "totalNodes": (
                 self.total_nodes
-                + len(self.external_nodes)
+                + self.total_externals
                 + len(self.entity_nodes)
                 + len(self.memory_nodes)
             ),
@@ -907,14 +1216,18 @@ class KnowledgeGraphView:
                 + len(self.memory_edges)
                 + len(self.cross_edges)
             ),
-            # ``truncated`` reflects the AST-layer node cap only (entity +
-            # memory layers are always fully included). Compare REAL kept
-            # AST nodes (``self.nodes``) against the pre-cap total —
-            # synthesized External nodes are NOT real graph nodes, so
-            # including them in the count can mask a genuine cap (e.g. cap 3
-            # of 5 real nodes + 3 externals → 6 > 5 would falsely read
-            # un-truncated). Edge drop from orphan hygiene is not truncation.
-            "truncated": len(self.nodes) < self.total_nodes,
+            # ``truncated`` answers "did the cap drop anything the payload
+            # would otherwise carry", and the cap governs BOTH populations —
+            # so both are compared against their own pre-cap total. The two
+            # counts stay separate rather than summed: summing lets a surplus
+            # on one side mask a shortfall on the other, which is how a
+            # payload that had lost a quarter of its nodes still reported
+            # itself complete. Entity + memory layers are never capped, and
+            # an edge dropped by orphan hygiene is not truncation.
+            "truncated": (
+                len(self.nodes) < self.total_nodes
+                or len(self.external_nodes) < self.total_externals
+            ),
             "perLayer": {
                 "ast": len(self.nodes) + len(self.external_nodes),
                 "entity": len(self.entity_nodes),

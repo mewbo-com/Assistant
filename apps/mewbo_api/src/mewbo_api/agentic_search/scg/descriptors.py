@@ -7,7 +7,7 @@ composition is deliberately app-layer: the SCG engine (``mewbo_graph``) can
 never import the MCP transport (``mewbo_tools``) — only an app may combine the
 two (root CLAUDE.md layering DAG).
 
-Security stance (spec §6, mirrors ``map_job.py``): the built descriptor is a
+Security stance: the built descriptor is a
 SCHEMA only — tool names, descriptions, and input schemas straight off the MCP
 handshake. No token, credential, or connection header is ever copied into it;
 ``auth_scope`` (a redacted descriptor string) stays the caller's concern.
@@ -81,7 +81,10 @@ class SourceDescriptorBuilder:
             raise RuntimeError("MCP support is not installed (mewbo-tools).") from exc
 
         try:
-            return list_server_tool_schemas(self.source_id, cwd=self.project)
+            # ``self.project`` came from request input — see SourceCatalog.
+            return list_server_tool_schemas(
+                self.source_id, cwd=self.project, trust_cwd=False
+            )
         except LookupError as exc:
             raise LookupError(
                 f"source '{self.source_id}' has no configured MCP connector; "

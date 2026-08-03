@@ -464,19 +464,22 @@ def build_server(config: McpConfig | None = None) -> FastMCP:
     @tool(ToolGroup.WIKI, EffectTier.ASK)
     @_enveloped
     async def ask_wiki(
-        ctx: Context, project: str, question: str, model: str | None = None
+        ctx: Context, project: str, question: str, model: str | None = None, mode: str = "fast"
     ) -> dict[str, Any]:
         """Ask a wiki project a natural-language question and await the answer.
 
         Starts a wiki Q&A run and polls until the answer settles (bounded
         timeout). ``model`` is OPTIONAL — leave it unset to use the server's
-        configured default QA model. Returns ``{answer_id, answer, citations,
-        status}``; ``status: "running"`` means the answer was not ready within
-        the timeout — call ``get_wiki_answer(answer_id)`` to resume it.
+        configured default QA model. ``mode`` selects ``fast`` (direct
+        retrieval, quicker) or ``deep`` (hypervisor + probe fan-out, more
+        thorough); it defaults to ``fast``, matching the console. Returns
+        ``{answer_id, answer, citations, status}``; ``status: "running"`` means
+        the answer was not ready within the timeout — call
+        ``get_wiki_answer(answer_id)`` to resume it.
         """
         async with _client(ctx) as client:
             return await tools.WikiTools(client).ask(
-                project=project, question=question, model=model
+                project=project, question=question, model=model, mode=mode
             )
 
     @tool(ToolGroup.WIKI, EffectTier.READ)

@@ -1,3 +1,19 @@
+# .dockerignore — the build context for EVERY image in this repo.
+#
+# One file, deliberately, and not a per-Dockerfile `Dockerfile.api.dockerignore`
+# set: a Dockerfile-specific ignore file takes PRECEDENCE over this one rather
+# than merging with it, so each would have to restate every rule below and a new
+# exclusion added here would silently not apply to those builds.
+#
+# Two of the rules are load-bearing rather than hygiene — an unreadable path
+# fails the build outright, and `Dockerfile.base` ends in `COPY . /app`, so
+# anything not excluded here lands in the base image that api and mcp build
+# FROM. Both are called out where they appear.
+#
+# Almost everything here is gitignored too, so CI builds from a clean checkout
+# never see it and only local builds do. That asymmetry is exactly why the rules
+# have to be written down rather than assumed.
+
 # ── Virtual environments & caches ──────────────────────────────
 .venv/
 .mypy_cache/
@@ -12,14 +28,78 @@
 .gitattributes
 .gitignore
 
+# ── Paths that BREAK the build, not just bloat it ─────────────
+# Git worktrees checked out under the repo, and the redroid emulator's state
+# dirs. Both hold root-owned files the emulator created (an adb socket) that the
+# context sender cannot read, so the build fails with EACCES while transferring
+# the context — before any COPY runs, and with an error that names the file
+# rather than the reason. Never build inputs in any case.
+.worktrees/
+apps/mewbo_aura/tools/redroid/data/
+apps/mewbo_aura/tools/redroid/data-gms/
+
+# ── Generated build output — the bulk of the context ──────────
+# The Android Gradle output alone was ~1.6 GB of a ~3.4 GB context, re-sent on
+# every build of every image, and no image copies any of it: the Aura client is
+# built on the host and in CI, never inside these containers. The app SOURCE
+# stays available; only what Gradle regenerates is dropped.
+apps/mewbo_aura/app/build/
+apps/mewbo_aura/build/
+**/.gradle/
+**/.cxx/
+**/*.apk
+**/*.aab
+# mkdocs render output and the interview-docs scratch tree — both regenerated,
+# together another ~120 MB.
+site/
+docs-interview/
+
 # ── Node / frontend build artifacts ──────────────────────────
 **/node_modules/
 apps/mewbo_console/dist/
+apps/mewbo_ide/dist/
 
 # ── Environment & secrets ─────────────────────────────────────
 .env
 .env.*
 docker.env
+**/*.jks
+**/*.keystore
+**/*.pem
+**/*.p12
+
+# ── Runtime init scripts — never baked into ANY image ─────────
+# docker/init.d/*.sh is bind-mounted read-only by docker-compose.yml and sourced
+# by docker/entrypoint.sh at start, so runtime setup can be edited, or a tool
+# version pinned, with a restart instead of a rebuild.
+#
+# Excluding it HERE is what makes that true — dropping the COPY lines was not
+# enough, because `COPY . /app` in Dockerfile.base swept the directory into the
+# base image and the scripts kept arriving with no COPY naming them.
+#
+# It also closes a leak a hand-maintained allowlist used to guard: this
+# directory is gitignored apart from the tracked few, so a build from a dirty
+# tree would bake a developer's local-only script — one naming an internal
+# host — into a published image. Now neither build can, and there is no
+# allowlist left to forget to update.
+docker/init.d/
+
+# ── Operator config — never baked into ANY image ──────────────
+# Same contract as docker/init.d/ above: an operator's app.json / mcp.json is
+# runtime identity, not build capability. Both are gitignored, and both the api
+# and mewbo-mcp services bind-mount ./configs over /app/configs, so a baked copy
+# is shadowed the instant a container starts and only ever serves to leak.
+#
+# It is also load-bearing for the BUILD. Operator config carries `${VAR}`
+# references whose values arrive at runtime through env_file, and the config
+# validator refuses an unresolved reference. Any build step that imports mewbo
+# code resolves config transitively — a logger call alone reaches
+# get_config_value — so a baked app.json turns "the gateway URL lives in the
+# environment" into a build that cannot complete. The tracked *.example.json
+# files stay: they hold literals, and they are the fallback a fresh checkout
+# builds against.
+configs/app.json
+configs/mcp.json
 
 # ── IDE / editor ──────────────────────────────────────────────
 .vscode/
@@ -36,6 +116,7 @@ LICENSE
 # ── Test / CI artifacts ───────────────────────────────────────
 tests/
 .coverage
+coverage.json
 htmlcov/
 .github/
 

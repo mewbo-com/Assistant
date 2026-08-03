@@ -10,7 +10,7 @@ import { useSessionQuery } from "../hooks/useSessionQuery";
 import { useThroughput } from "../hooks/useThroughput";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { SessionSummary, TurnMeta } from "../types";
-import { buildTimeline, getActiveStreamText, getActiveTurn, getLastContext, turnHasWidget } from "../utils/timeline";
+import { buildTimeline, getActiveStreamText, getActiveTurn, getLastContext, isRunAccepted, turnHasWidget } from "../utils/timeline";
 import { mergeDiffFiles } from "../utils/diff";
 import { Alert, AlertDescription, AlertTitle } from "./ui/alert";
 import { extractSummaryTesting } from "../utils/logs";
@@ -28,7 +28,7 @@ interface SessionDetailViewProps {
   onTitleUpdate?: (sessionId: string, title: string) => void;
   onSessionChange?: () => void;
   onSelectSession?: (sessionId: string) => void;
-  // Session-header obligations, re-homed from the old detail NavBar.
+  // Session-header obligations.
   onBack: () => void;
   onRenameTitle?: (sessionId: string, title: string) => Promise<void>;
   onRegenerateTitle?: (sessionId: string) => Promise<string>;
@@ -62,12 +62,15 @@ export function SessionDetailView({
     events,
     running,
     status: liveStatus,
+    title: liveTitle,
     doneReason: liveDoneReason,
+    terminated: liveTerminated,
+    recoverable: liveRecoverable,
     error: eventsError,
     resume,
     reset: resetEvents,
   } = useSessionEvents(session.session_id);
-  const { usage: sessionUsage } = useSessionUsage(session.session_id, running);
+  const { usage: sessionUsage } = useSessionUsage(session.session_id, events);
   const {
     send,
     stop,
@@ -76,16 +79,19 @@ export function SessionDetailView({
     submitting
   } = useSessionQuery(session.session_id, session.context, running);
   const timeline = useMemo(() => buildTimeline(events), [events]);
-  // A session is permanently terminated when any of three signals says so: the
-  // `session_terminated` transcript event, the backend's session status, or a
-  // 410 caught by the composer's send/stop path. The composer disables and the
-  // recovery affordances suppress once terminated (it can never run again).
+  // A session is permanently terminated when any of four signals says so: the
+  // `session_terminated` transcript event, the server's own live termination
+  // flag, the listing's session status, or a 410 caught by the composer's
+  // send/stop path. The composer disables and the recovery affordances suppress
+  // once terminated (it can never run again). The live flag is what keeps this
+  // correct before the listing has a row to read `status` from.
   const isTerminated = useMemo(
     () =>
       queryTerminated ||
+      liveTerminated === true ||
       session.status === "terminated" ||
       events.some((e) => e.type === "session_terminated"),
-    [queryTerminated, session.status, events],
+    [queryTerminated, liveTerminated, session.status, events],
   );
   const sessionFiles = useMemo(
     () => mergeDiffFiles(timeline.flatMap((e) => e.turn?.files ?? [])),
@@ -93,9 +99,17 @@ export function SessionDetailView({
   );
   const liveTurn = useMemo(() => getActiveTurn(events), [events]);
   const activeTurnId = liveTurn?.id ?? null;
+  // Orchestrator cold start: the run is accepted (`run_accepted`) but has not
+  // opened its turn, so the transcript has no row to show. Both conditions are
+  // load-bearing — the marker proves a run was accepted for THIS session, and
+  // `running` proves the server still considers it live, so an abandoned marker
+  // (process killed before the sweep settled the run) can't leave a session
+  // reading "Starting…" forever. Once the turn opens, `liveTurn` is non-null
+  // and the pending beat takes over.
+  const isStarting = (running || submitting) && !liveTurn && isRunAccepted(events);
   // Live assistant text streamed from the in-flight turn. Empty
-  // string when no deltas have arrived (non-streaming model / legacy events),
-  // so ConversationTimeline falls back to the "Working…" beat.
+  // string when no deltas have arrived (non-streaming model, or events with
+  // no delta stream), so ConversationTimeline falls back to the "Working…" beat.
   const streamingText = useMemo(() => getActiveStreamText(events), [events]);
   const selectedTurn = useMemo(() => {
     if (!selectedTurnId) {
@@ -118,6 +132,38 @@ export function SessionDetailView({
   const effectiveContext = useMemo(
     () => getLastContext(events, session.context),
     [events, session.context],
+  );
+  // The subject this page renders. `session` is the row the sessions listing
+  // holds for this id — frequently nothing yet, because that listing summarises
+  // EVERY session and takes seconds, while this page's own per-session fetches
+  // return the same authoritative facts for THIS one in a fraction of it. So
+  // each field is taken from whichever source has it, and the page never waits
+  // on the listing to paint. `liveStatus`/`liveDoneReason` stay separate props
+  // on the header — its own snapshot-vs-live precedence already covers those.
+  const subject: SessionSummary = useMemo(
+    () => ({
+      ...session,
+      // Precedence is INVERTED relative to status here, deliberately: a rename
+      // patches the listing optimistically (`applyTitle`), so a non-empty
+      // snapshot outranks the server's older projection instead of flickering
+      // back to it. The projection fills the gap when the listing has no row.
+      title: session.title || liveTitle || "",
+      // The server derives this identically (`summarize_session` reads the
+      // first event's `ts`), so this is the listing's own value arriving early
+      // rather than an invented timestamp. It assumes the transcript window
+      // starts at the session's first event, which holds while the initial
+      // `/events` fetch is unbounded; bound that fetch and this has to go back
+      // to waiting for the listing's value.
+      created_at: session.created_at ?? events[0]?.ts,
+      recoverable: liveRecoverable ?? session.recoverable,
+      // The header already prefers its `context` prop over this field
+      // (`liveContext`), but two of its reads go straight to `session.context`
+      // (the model chip, the app-jump button). Folding the transcript-derived
+      // context in here is what keeps those two working before the listing has
+      // a row, instead of teaching the header a third precedence rule.
+      context: session.context ?? effectiveContext,
+    }),
+    [session, liveTitle, liveRecoverable, events, effectiveContext],
   );
   const summaryData = useMemo(() => extractSummaryTesting(events), [events]);
   // Live throughput + phase classification, differenced from the
@@ -159,14 +205,16 @@ export function SessionDetailView({
     };
   }, [events, running, submitting, sessionUsage, throughput.phase, throughput.tokPerSec]);
   const errorMessage = eventsError || queryError;
-  const errorTitle = eventsError ? "Polling error" : "Request error";
+  const errorTitle = eventsError ? "Stream error" : "Request error";
   const autoOpenedRef = useRef<string | null>(null);
+  const pushedTitleRef = useRef<string | null>(null);
   useEffect(() => {
     setSelectedTurnId(null);
     setIsWorkspaceOpen(false);
     setIsMaximized(false);
     setActiveTab("logs");
     autoOpenedRef.current = null;
+    pushedTitleRef.current = null;
   }, [session.session_id]);
   // Auto-open the trace when a session first loads. Fires once per session
   // (guarded by autoOpenedRef). Skipped on mobile where the workspace would
@@ -198,6 +246,26 @@ export function SessionDetailView({
       }
     }
   }, [timeline, session.session_id, isMobile, running, liveTurn]);
+  // Push the newest `title_update` into the listing cache — ONCE per distinct
+  // (session, title), tracked here rather than inferred from `session.title`.
+  //
+  // ⚠️ This effect was an unbounded render loop, and the shape is worth
+  // recognising because nothing about it looks dangerous:
+  //
+  //  * `onTitleUpdate` arrives as an inline arrow, so its identity changes
+  //    every render and the dep array re-runs the effect every render;
+  //  * the old guard compared the event's title against `session.title`, which
+  //    on a DIRECT visit is the memoised placeholder row (`title: ""`) that
+  //    `SessionDetailRoute` mounts while the `O(collection)` listing loads —
+  //    so the comparison could not go false no matter what was written;
+  //  * and `applyTitle` fabricated an empty list when the listing had not
+  //    loaded, so the write both changed cache data (re-rendering the app,
+  //    re-entering the effect) and guaranteed the row stayed missing.
+  //
+  // A guard must therefore key off what this effect ALREADY DID, never off
+  // state some other layer is expected to echo back. This ref is the fix that
+  // was measured to stop the loop on its own; `useSessions` separately stopped
+  // fabricating the list, which is what let the placeholder row ever resolve.
   useEffect(() => {
     if (!onTitleUpdate) return;
     for (let i = events.length - 1; i >= 0; i--) {
@@ -205,7 +273,13 @@ export function SessionDetailView({
       if (ev.type === "title_update") {
         const payload = ev.payload as { title?: string } | undefined;
         const title = payload?.title;
-        if (typeof title === "string" && title && title !== session.title) {
+        if (
+          typeof title === "string" &&
+          title &&
+          title !== session.title &&
+          title !== pushedTitleRef.current
+        ) {
+          pushedTitleRef.current = title;
           onTitleUpdate(session.session_id, title);
         }
         break;
@@ -246,9 +320,20 @@ export function SessionDetailView({
     [session.session_id, resume],
   );
   const handleAnswerQuestion = useCallback(
-    async (callId: string, callToken: string, answers: QuestionAnswerItemPayload[]) => {
+    async (
+      callId: string,
+      callToken: string,
+      answers: QuestionAnswerItemPayload[],
+      notes?: string,
+    ) => {
       try {
-        return await answerQuestion(session.session_id, callId, { call_token: callToken, answers });
+        return await answerQuestion(session.session_id, callId, {
+          call_token: callToken,
+          answers,
+          // Omitted entirely when blank — the server contract forbids an empty
+          // string, and a note nobody typed is not a note.
+          ...(notes ? { notes } : {}),
+        });
       } finally {
         // Same dead-end as plan approval: answering unblocks the loop, so
         // wake the poll rather than leaving it parked until a manual refresh.
@@ -347,7 +432,7 @@ export function SessionDetailView({
   // event, so opening /s/<id> on a crashed session still offers recovery.
   // When a live failure card is on screen this defers to it — one affordance.
   const showHeaderRecovery =
-    Boolean(session.recoverable) &&
+    Boolean(subject.recoverable) &&
     !running &&
     !submitting &&
     !isTerminated &&
@@ -403,6 +488,7 @@ export function SessionDetailView({
         onOpenFiles={handleOpenFiles}
         activeTurnId={activeTurnId}
         isRunning={running || submitting}
+        isStarting={isStarting}
         streamingText={streamingText}
         onShowActiveTrace={handleShowLiveTrace}
         onApprovePlan={handleApprovePlan}
@@ -507,7 +593,8 @@ export function SessionDetailView({
   return (
     <div className="flex h-full min-h-0 flex-col bg-[hsl(var(--background))]">
       <SessionHeader
-        session={session}
+        session={subject}
+        context={effectiveContext}
         usage={sessionUsage}
         isTerminated={isTerminated}
         liveStatus={liveStatus}

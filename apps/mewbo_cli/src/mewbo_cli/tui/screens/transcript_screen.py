@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from mewbo_core.types import EventRecord
+from mewbo_core.contracts.types import EventRecord
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -120,6 +120,17 @@ class TranscriptScreen(ModalScreen):
                 head = _TEXT_KINDS[etype]
                 label = f"{head} · {model}" if model else head
                 yield Label(label, classes="ts-meta")
+                yield Static(Text(text))
+            elif etype == "generative_ui":
+                # Not foldable into ``_TEXT_KINDS``: the panel's prose lives on
+                # ``alt_text``, not ``text``. The component tree is skipped —
+                # a terminal cannot draw it, which is why the event carries a
+                # prose rendering alongside it.
+                text = str(payload.get("alt_text") or "").strip()
+                if not text:
+                    continue
+                summary = str(payload.get("summary") or "")
+                yield Label(f"panel · {summary}" if summary else "panel", classes="ts-meta")
                 yield Static(Text(text))
             elif etype == "tool_result":
                 yield from self._render_tool(payload)

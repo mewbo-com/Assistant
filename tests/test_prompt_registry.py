@@ -9,7 +9,7 @@ package-level ``validate_all`` smoke that gates the whole registry in CI.
 from __future__ import annotations
 
 import pytest
-from mewbo_core.prompt_registry import (
+from mewbo_core.llm.prompt_registry import (
     PromptContext,
     PromptEntry,
     PromptOverride,
@@ -175,12 +175,12 @@ def test_register_prompt_modifier_is_idempotent_and_resettable():
     try:
         register_prompt_modifier(mod)
         register_prompt_modifier(mod)
-        from mewbo_core import prompt_registry as pr
+        from mewbo_core.llm import prompt_registry as pr
 
         assert pr._PROMPT_MODIFIERS.count(mod) == 1
     finally:
         reset_prompt_modifiers()
-        from mewbo_core import prompt_registry as pr
+        from mewbo_core.llm import prompt_registry as pr
 
         assert mod not in pr._PROMPT_MODIFIERS
 

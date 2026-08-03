@@ -31,7 +31,7 @@ engine:
   display and don't carry this rule; apps do. This is the "keep banning js-raw"
   requirement generalized to every allowlist-bypass, not just the `js` name.
 
-A `mode="code"` PIPELINE file (Phase 2) is NOT linted by this module at
+A `mode="code"` PIPELINE file is NOT linted by this module at
 all — `pipeline_runner.py:lint_pipeline`/`PIPELINE_ALLOWED_MODULES` is the
 ONE canonical pipeline lint (it gates ACTUAL execution: an import outside its
 allowlist fails the guarded `__import__` at runtime regardless of any static

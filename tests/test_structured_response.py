@@ -5,15 +5,15 @@ import asyncio
 import threading
 
 from mewbo_core.classes import ActionStep
-from mewbo_core.exit_plan_mode import ExitPlanModeTool
-from mewbo_core.permissions import auto_approve
-from mewbo_core.session_provenance import SessionOrigin
-from mewbo_core.structured_response import (
+from mewbo_core.loop.structured_response import (
     FORCE_EMIT_DIRECTIVE,
     EmitStructuredResponseTool,
     StructuredResponder,
     StructuredResponseError,
 )
+from mewbo_core.permissions import auto_approve
+from mewbo_core.session.session_provenance import SessionOrigin
+from mewbo_core.tooling.exit_plan_mode import ExitPlanModeTool
 
 _PERSON_SCHEMA = {
     "type": "object",
@@ -178,7 +178,7 @@ def test_responder_stamps_structured_provenance_tag_and_surface():
     every other run's tag. This also covers the MCP ``structured_query``
     tool, which posts to the same route.
     """
-    from mewbo_core.structured_response import STRUCTURED_RUN_TAG
+    from mewbo_core.loop.structured_response import STRUCTURED_RUN_TAG
 
     runtime = _FakeRuntime(tool_inputs=[{"name": "Ada"}])
     responder = StructuredResponder(
@@ -336,7 +336,7 @@ def test_emit_tool_terminal_reason_is_completed():
 def test_exit_plan_mode_terminal_reason_is_awaiting_approval():
     """ExitPlanModeTool.terminal_reason() must still return 'awaiting_approval'.
 
-    Regression guard: the Bug A fix must NOT change plan-mode semantics.
+    The re-drive machinery must NOT change plan-mode semantics.
     """
     tool = ExitPlanModeTool(session_id="s1")
     assert tool.terminal_reason() == "awaiting_approval"
@@ -353,15 +353,15 @@ def test_loop_done_reason_uses_terminating_tool_terminal_reason():
     from unittest.mock import AsyncMock, MagicMock, patch
 
     from langchain_core.messages import AIMessage
-    from mewbo_core.agent_context import AgentContext
+    from mewbo_core.agents.agent_context import AgentContext
+    from mewbo_core.agents.hypervisor import AgentHypervisor
     from mewbo_core.common import MockSpeaker
-    from mewbo_core.context import ContextSnapshot
     from mewbo_core.hooks import HookManager
-    from mewbo_core.hypervisor import AgentHypervisor
+    from mewbo_core.loop.tool_use_loop import ToolUseLoop
     from mewbo_core.permissions import PermissionDecision, PermissionPolicy
-    from mewbo_core.token_budget import TokenBudget
-    from mewbo_core.tool_registry import ToolRegistry, ToolSpec
-    from mewbo_core.tool_use_loop import ToolUseLoop
+    from mewbo_core.session.context import ContextSnapshot
+    from mewbo_core.session.token_budget import TokenBudget
+    from mewbo_core.tooling.tool_registry import ToolRegistry, ToolSpec
 
     # A fake SessionTool that terminates immediately with a custom reason.
     class _TerminatingTool:
@@ -440,7 +440,7 @@ def test_loop_done_reason_uses_terminating_tool_terminal_reason():
         ),
     )
 
-    with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+    with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
         mock_build.return_value = MagicMock()
         mock_build.return_value.bind_tools.return_value = bound
 
@@ -471,10 +471,9 @@ def test_loop_done_reason_uses_terminating_tool_terminal_reason():
 def test_start_async_redrives_when_first_pass_misses_emit():
     """start_async re-drives once when the model omits emit_result on the first pass.
 
-    The async path used to skip the belt-and-suspenders re-drive (Bug B). This
-    test verifies the fix: first run_sync → no emit → second run_sync (re-drive)
-    → emit → background thread exits; the structured_output event appears in the
-    event log.  Fails today without the Bug B fix.
+    The async path must not skip the belt-and-suspenders re-drive: first
+    run_sync → no emit → second run_sync (re-drive) → emit → background thread
+    exits, and the structured_output event appears in the event log.
     """
     done = threading.Event()
 

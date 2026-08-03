@@ -20,9 +20,10 @@ from unittest.mock import patch
 
 import mongomock
 import pytest
-from mewbo_core.key_store_mongo import MongoKeyStore
-from mewbo_core.session_runtime import SessionRuntime
-from mewbo_core.session_store_mongo import MongoSessionStore
+from mewbo_core.loop.session_runtime import SessionRuntime
+from mewbo_core.secrets.key_store_mongo import MongoKeyStore
+from mewbo_core.session.event_cursor import EventCursor
+from mewbo_core.session.session_store_mongo import MongoSessionStore
 from mewbo_core.triggers.spec import CronTrigger, WebhookTrigger
 from mewbo_core.triggers.store_mongo import MongoTriggerStore
 from mewbo_demo_seeder.models import (
@@ -35,6 +36,22 @@ from mewbo_demo_seeder.seeder import DemoSeeder
 from pydantic import ValidationError
 
 T0 = datetime(2026, 7, 14, 9, 30, 0, tzinfo=timezone.utc)
+
+
+def _stored_ts(moment: datetime) -> str:
+    """*moment* in the SPELLING the session store persists.
+
+    The store canonicalises every ``ts`` through ``EventCursor.canonical``,
+    which always writes microseconds out — deliberately, because a bare
+    ``isoformat()`` drops a zero-microsecond field and every ``ts`` comparison
+    in the store is TEXTUAL, so the two spellings sort differently. An
+    expectation built with bare ``isoformat()`` therefore disagrees with
+    anything read back through the store.
+
+    Calling the store's own normaliser rather than re-spelling it here is what
+    stops this from drifting again the next time that spelling changes.
+    """
+    return EventCursor.canonical(moment.isoformat()) or moment.isoformat()
 
 _BUNDLE_PATH = (
     Path(__file__).resolve().parents[2] / "demo" / "seeder" / "bundles" / "console-poc.json"
@@ -49,7 +66,7 @@ _BUNDLE_PATH = (
 @pytest.fixture
 def session_store(tmp_path):
     """A MongoSessionStore backed by mongomock."""
-    with patch("mewbo_core.session_store_mongo.MongoClient", mongomock.MongoClient):
+    with patch("mewbo_core.session.session_store_mongo.MongoClient", mongomock.MongoClient):
         return MongoSessionStore(
             root_dir=str(tmp_path), uri="mongodb://localhost:27017", database="test_demo"
         )
@@ -65,7 +82,7 @@ def trigger_store():
 @pytest.fixture
 def key_store():
     """A MongoKeyStore backed by mongomock (canonical bundle declares api_keys)."""
-    with patch("mewbo_core.key_store_mongo.MongoClient", mongomock.MongoClient):
+    with patch("mewbo_core.secrets.key_store_mongo.MongoClient", mongomock.MongoClient):
         return MongoKeyStore(uri="mongodb://localhost:27017", database="test_demo")
 
 
@@ -224,10 +241,10 @@ def test_offsets_rebase_against_injected_t0(session_store, trigger_store):
     ).seed()
 
     events = session_store.load_transcript("sess-shell")
-    first_ts = (T0 + timedelta(seconds=-600 + 0)).isoformat()
+    first_ts = _stored_ts(T0 + timedelta(seconds=-600 + 0))
     assert events[0]["ts"] == first_ts
     # user event is session offset -600 + at_seconds 2.
-    assert events[1]["ts"] == (T0 + timedelta(seconds=-600 + 2)).isoformat()
+    assert events[1]["ts"] == _stored_ts(T0 + timedelta(seconds=-600 + 2))
     timestamps = [e["ts"] for e in events]
     assert timestamps == sorted(timestamps)
     assert len(set(timestamps)) == len(timestamps)  # every ts distinct
@@ -252,6 +269,9 @@ def test_seed_documents_match_store_contract(session_store, trigger_store):
         )
         for ev in session.events
     ]
+    # ``to_event`` is a pure transform, so its ts is un-normalised — the store
+    # canonicalises on write. Compare against the stored spelling.
+    expected = [{**doc, "ts": _stored_ts(datetime.fromisoformat(doc["ts"]))} for doc in expected]
     assert session_store.load_transcript(session.id) == expected
 
 
@@ -325,7 +345,7 @@ def test_seeded_session_summarizes_as_completed(session_store, trigger_store):
     assert summary["status"] == "completed"
     assert summary["title"] == "Shell session"
     assert summary["origin"] == "user"
-    assert summary["created_at"] == (T0 + timedelta(seconds=-600)).isoformat()
+    assert summary["created_at"] == _stored_ts(T0 + timedelta(seconds=-600))
 
 
 def test_list_sessions_orders_newest_first(session_store, trigger_store):

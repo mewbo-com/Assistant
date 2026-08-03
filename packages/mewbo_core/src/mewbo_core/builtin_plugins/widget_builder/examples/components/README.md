@@ -146,6 +146,6 @@ component files, use `components.v1.declare_component`, use
 Adding a component = one new file that follows the banner + class
 pattern above + one row in the table. No code changes elsewhere. If
 your component needs a new third-party library, append it to
-`../linter.py::ALLOWED_MODULES` **and** to the "Allowed libraries"
-list in `../../agents/st-widget-builder.md` — the parity test enforces
-both sides stay in sync.
+`../linter.py::ALLOWED_MODULES` **and** to the "Allowed imports only"
+list in `../../agents/st-widget-builder.md`, backtick-quoted — the
+parity test asserts every allowed module appears there verbatim.

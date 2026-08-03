@@ -40,7 +40,7 @@ class ComposerScopeTest {
 
     @Test
     fun `projectDisplayName degrades to the raw key while the catalog hasn't loaded yet`() {
-        // Revisit-session race: commit 3add535 hydrates selectedProjectKey before
+        // Revisit-session race: a revisited session hydrates selectedProjectKey before
         // refreshComposerScope resolves the catalog - a non-null selection must never read "Temporary".
         val scope = ComposerScope(projects = null, selectedProjectKey = "Assistant")
         assertEquals("Assistant", scope.projectDisplayName)
@@ -50,6 +50,73 @@ class ComposerScopeTest {
     fun `projectDisplayName degrades to the raw key when the loaded catalog does not contain it`() {
         val scope = ComposerScope(projects = listOf(configProject), selectedProjectKey = "managed:gone")
         assertEquals("managed:gone", scope.projectDisplayName)
+    }
+
+    // --- auto-select mode ---
+    //
+    // "auto" is a RESERVED key, not a project: it never appears in the catalog and resolves to no
+    // directory until the model calls switch_project. Everything below exists so it can never be
+    // mistaken for either a real project (it would degrade to the raw "auto") or for Temporary
+    // (which is a cwd nobody will move off).
+
+    @Test
+    fun `projectDisplayName labels the auto sentinel rather than degrading to the raw key`() {
+        val scope = ComposerScope(projects = listOf(configProject), selectedProjectKey = ComposerScope.AUTO_PROJECT_KEY)
+        assertEquals("Auto", scope.projectDisplayName)
+        assertTrue(scope.isAutoProject)
+    }
+
+    @Test
+    fun `auto is not Temporary - the two are different modes and must not collapse`() {
+        assertFalse(ComposerScope(selectedProjectKey = null).isAutoProject)
+        assertEquals("Temporary", ComposerScope(selectedProjectKey = null).projectDisplayName)
+    }
+
+    @Test
+    fun `a real project named auto is out of reach by construction - the sentinel wins the key`() {
+        // Documenting the accepted collision rather than defending against it: the resolver reserves
+        // this key too, so a project could not be addressed by it either way.
+        val scope = ComposerScope(
+            projects = listOf(ProjectSummary(name = "auto", source = "config")),
+            selectedProjectKey = "auto",
+        )
+        assertEquals("Auto", scope.projectDisplayName)
+    }
+
+    @Test
+    fun `a tool-catalog fetch is UNSCOPED in auto mode - there is no project to scope it to yet`() {
+        assertNull(ComposerScope(selectedProjectKey = ComposerScope.AUTO_PROJECT_KEY).toolScopeKey)
+        assertNull(ComposerScope.toolScopeKeyOf(ComposerScope.AUTO_PROJECT_KEY))
+    }
+
+    @Test
+    fun `every other project key scopes the tool catalog to itself, unchanged`() {
+        assertEquals("Assistant", ComposerScope(selectedProjectKey = "Assistant").toolScopeKey)
+        assertEquals("managed:abc123", ComposerScope.toolScopeKeyOf("managed:abc123"))
+        assertNull(ComposerScope(selectedProjectKey = null).toolScopeKey)
+    }
+
+    // --- activeProjectLabel: the open-session top bar's "where am I working" readout ---
+
+    @Test
+    fun `activeProjectLabel is null for a session with no project, so the bar stays one line`() {
+        assertNull(ComposerScope(selectedProjectKey = null).activeProjectLabel)
+    }
+
+    @Test
+    fun `activeProjectLabel reads Auto until the model has picked, then the project it picked`() {
+        val scope = ComposerScope(projects = listOf(configProject, managedProject))
+
+        assertEquals("Auto", scope.copy(selectedProjectKey = ComposerScope.AUTO_PROJECT_KEY).activeProjectLabel)
+        // What a switch_project's context event folds in mid-run (SessionEvent.adoptContextProject).
+        assertEquals("scratch-worktree", scope.copy(selectedProjectKey = "managed:abc123").activeProjectLabel)
+    }
+
+    @Test
+    fun `activeProjectLabel degrades to the raw key while the catalog hasn't loaded`() {
+        // Same posture as projectDisplayName: never claim a project the catalog can't confirm, but
+        // never claim there ISN'T one either - a switched-to key is a real fact about the session.
+        assertEquals("acme/beacon", ComposerScope(projects = null, selectedProjectKey = "acme/beacon").activeProjectLabel)
     }
 
     // --- mcp_tools omitted-when-untouched vs narrowed ---
@@ -170,7 +237,7 @@ class ComposerScopeTest {
         assertEquals(0 to 0, scope.activeCountFor("unknown-server"))
     }
 
-    // --- provenance facets (scope row grouped counts, user directive 2026-07-14) ---
+    // --- provenance facets (scope row grouped counts, user directive) ---
 
     private fun scoped(id: String, scope: String?, enabled: Boolean = true) =
         ToolSummary(toolId = id, name = id, kind = "mcp", enabled = enabled, scope = scope)

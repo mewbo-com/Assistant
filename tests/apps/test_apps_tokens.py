@@ -3,8 +3,8 @@
 Covers the ``AppReadTokenSigner`` mint/verify round-trip and rotation isolation
 (a token minted under one secret must not verify under another), plus the
 ``api.apps_token_secret`` config override / master-token fallback wiring
-(``_build_apps_token_signer``) — the security-default half of Phase 1 that
-lets an operator rotate app-token signing independently of the master token.
+(``_build_apps_token_signer``), which lets an operator rotate app-token
+signing independently of the master token.
 Every clock read is an injected NOW.
 """
 
@@ -33,7 +33,7 @@ class TestSignerRoundTrip:
 
 
 class TestWriteScope:
-    """Phase 2: scope folded into the signed blob, backward compatible."""
+    """The scope is folded into the signed blob; a blob without one reads read-only."""
 
     def test_mint_defaults_to_read_scope(self):
         signer = AppReadTokenSigner(secret="s")

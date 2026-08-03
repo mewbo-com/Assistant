@@ -1,7 +1,7 @@
 """``JobRecovery.recover_interrupted`` must not let a
 ``ResumeCountError`` refusal consume a slug's retry-cap attempt.
 
-Before this fix, ``recovery.py`` bumped the per-slug counter BEFORE calling
+The trap this pins: bumping the per-slug counter BEFORE calling
 ``WikiResume.resume`` — unconditionally, whether the resume succeeded, failed,
 or was refused. Once ``ResumePlan.build`` started failing closed (raising
 ``ResumeCountError`` instead of silently returning 0 on a transient store-read

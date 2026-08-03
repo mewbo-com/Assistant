@@ -3,10 +3,10 @@ import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { formatTokens } from '../utils/time';
 
 /**
- * Visual progress bar for the root agent's context window. Replaces the
- * legacy text-only "X left until compact" pill with a Kilocode-/Codex-style
- * 3-segment bar plus a click-to-expand popover that breaks down billable
- * cost, cache savings, sub-agent usage, and compaction history.
+ * Visual progress bar for the root agent's context window: a
+ * Kilocode-/Codex-style 3-segment bar plus a click-to-expand popover that
+ * breaks down billable cost, cache savings, sub-agent usage, and
+ * compaction history.
  *
  * Source of truth is `root_last_input_tokens` — the size of the most recent
  * root prompt — because that is what the model actually has in its window
@@ -23,22 +23,30 @@ interface Props {
 export function ContextWindowBar({ usage, compact = false }: Props) {
   if (!usage || usage.root_max_input_tokens <= 0) return null;
 
-  const used = Math.min(usage.root_last_input_tokens, usage.root_max_input_tokens);
+  // Unclamped: a session can genuinely exceed the resolved window (the
+  // provider echoed more than we expected, or compaction hasn't fired yet).
+  // Clamping `used` to `window_` made that state indistinguishable from
+  // exactly-full — a solid bar at 100% either way. `usedPct` is allowed past
+  // 100 so the label and tone both keep tracking reality; only the FILL's
+  // rendered width clamps, because a bar can't paint past its own box.
+  const used = usage.root_last_input_tokens;
   const window_ = usage.root_max_input_tokens;
   const compactAt = Math.floor(window_ * usage.compact_threshold);
   const reservedForCompact = Math.max(0, window_ - compactAt);
 
   const usedPct = window_ > 0 ? (used / window_) * 100 : 0;
+  const isOverflowing = usedPct > 100;
+  const usedFillPct = Math.min(usedPct, 100);
   const reservedPct = window_ > 0 ? (reservedForCompact / window_) * 100 : 0;
-  const availPct = Math.max(0, 100 - usedPct - reservedPct);
+  const availPct = Math.max(0, 100 - usedFillPct - reservedPct);
 
   // Tone gates: warn at the auto-compact threshold (typically 80%), error
-  // when within 10% of the absolute window. Matches the prior CompactionPill
-  // semantics so users see the same color states.
+  // when within 10% of the absolute window or already past it. Matches the
+  // prior CompactionPill semantics so users see the same color states.
   const ratioRemaining =
     window_ > 0 ? usage.tokens_until_compact / window_ : 1;
   const usedFillCls =
-    ratioRemaining <= 0.1
+    isOverflowing || ratioRemaining <= 0.1
       ? 'bg-[hsl(var(--destructive))]'
       : ratioRemaining <= 0.2
         ? 'bg-[hsl(var(--primary))]'
@@ -61,16 +69,20 @@ export function ContextWindowBar({ usage, compact = false }: Props) {
     >
       <div
         className={`relative h-1.5 ${compact ? 'w-16' : 'w-24'} rounded-full overflow-hidden bg-[hsl(var(--muted))]`}
-        title={`${formatTokens(used)} of ${formatTokens(window_)} (${Math.round(usedPct)}%)`}
+        title={
+          isOverflowing
+            ? `${formatTokens(used)} of ${formatTokens(window_)} — ${Math.round(usedPct)}% over window`
+            : `${formatTokens(used)} of ${formatTokens(window_)} (${Math.round(usedPct)}%)`
+        }
       >
         <div
           className={`absolute inset-y-0 left-0 ${usedFillCls} transition-all`}
-          style={{ width: `${usedPct}%` }}
+          style={{ width: `${usedFillPct}%` }}
         />
         {reservedPct > 0 && (
           <div
             className="absolute inset-y-0 bg-[hsl(var(--accent))]"
-            style={{ left: `${usedPct}%`, width: `${reservedPct}%` }}
+            style={{ left: `${usedFillPct}%`, width: `${reservedPct}%` }}
             title={`Reserved for auto-compact buffer (${Math.round(usage.compact_threshold * 100)}% threshold)`}
           />
         )}
@@ -83,6 +95,7 @@ export function ContextWindowBar({ usage, compact = false }: Props) {
       </div>
       <span className="tabular-nums">
         {formatTokens(used)}/{formatTokens(window_)}
+        {isOverflowing && <span className="text-[hsl(var(--destructive))]"> ({Math.round(usedPct)}%)</span>}
       </span>
     </button>
   );

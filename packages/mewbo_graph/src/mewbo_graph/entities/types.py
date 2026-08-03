@@ -57,6 +57,18 @@ class EntityMention(BaseModel):
     ts: str
     surface_name: str
 
+    @property
+    def identity(self) -> tuple[str, str | None, str]:
+        """What makes two provenance records the SAME mention — ``ts`` EXCLUDED.
+
+        A mention answers "this surface was seen in this source"; the clock
+        reading merely says when we last processed it. Including ``ts`` in the
+        identity is what made a replayed mint accrete a fresh record per
+        attempt, so an interrupted index that re-ran its enrich fan-out reported
+        an entity as N times more attested than the source actually attests it.
+        """
+        return (self.source, self.insight_id, self.surface_name)
+
 
 class Entity(BaseModel):
     """An abstract entity reified as a multiplex node.
@@ -104,6 +116,23 @@ class Entity(BaseModel):
             self.id = derived
         return self
 
+    def with_mention(self, mention: EntityMention) -> Entity:
+        """Return a copy carrying *mention*, at most once per :attr:`EntityMention.identity`.
+
+        The write-side half of the deterministic-id convergence guarantee: the id
+        makes a re-mint of the same surface land on the same NODE, and this makes
+        it land with the same PROVENANCE. Without it every field on a replayed
+        entity converged except ``mentions``, which grew by one record per
+        attempt — so a resumed index left the ladder reading a bare re-run as
+        corroborating evidence.
+
+        The first record wins on a collision: the earliest sighting is the true
+        one, and a later clock reading of the same fact is not new information.
+        """
+        if any(m.identity == mention.identity for m in self.mentions):
+            return self
+        return self.model_copy(update={"mentions": [*self.mentions, mention]})
+
 
 class EntityRelation(BaseModel):
     """A typed, directed relationship between two entities (e.g. owns/works_on)."""
@@ -146,10 +175,37 @@ class EntityRecommendation(BaseModel):
 
     model_config = _CFG
 
+    # Always derived (= sha1(action|sorted subjects|type)); a supplied value is
+    # ignored. The same idiom ``Entity``/``EntityRelation`` use, and here it is
+    # load-bearing for RESUME: these records are read back as resolution priors,
+    # so an unkeyed append let a replayed enrich pass re-state the same prior
+    # twice and silently re-weight the ladder it feeds.
+    id: str = ""
     action: RecommendationAction
     subjects: list[str]
     type: str | None = None
     rationale: str = ""
+
+    @staticmethod
+    def compute_id(action: str, subjects: list[str], type: str | None) -> str:
+        """Deterministic id over ``(action, SORTED subjects, type)``.
+
+        Subjects are sorted because the pair a ``merge``/``distinct`` prior binds
+        is unordered — ``EntityResolver`` keys priors on a ``frozenset`` — so
+        ``[a, b]`` and ``[b, a]`` are one recommendation and must not persist as
+        two. ``rationale`` is prose ABOUT the prior rather than part of it: a
+        re-worded re-statement of the same recommendation converges onto the same
+        row instead of accreting a near-duplicate.
+        """
+        payload = "|".join([action, *sorted(subjects), type or ""])
+        return hashlib.sha1(payload.encode()).hexdigest()
+
+    @model_validator(mode="after")
+    def _derive_id(self) -> EntityRecommendation:
+        derived = self.compute_id(self.action, self.subjects, self.type)
+        if self.id != derived:
+            self.id = derived
+        return self
 
 
 class EntityEmbedding(BaseModel):

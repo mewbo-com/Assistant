@@ -8,7 +8,7 @@ import json
 from dataclasses import dataclass
 
 from mewbo_api import backend
-from mewbo_core.session_store import SessionStore
+from mewbo_core.session.session_store import SessionStore
 
 
 def _reset_backend(tmp_path):
@@ -146,7 +146,7 @@ def _patch_compact(monkeypatch):
         self.save_summary(session_id, "transcript-summary")
         return _FakeCompactResult()
 
-    from mewbo_core.session_store import SessionStoreBase
+    from mewbo_core.session.session_store import SessionStoreBase
 
     monkeypatch.setattr(SessionStoreBase, "compact_session", fake_compact, raising=True)
 
@@ -229,7 +229,7 @@ def test_post_command_compact_marks_session_running(tmp_path, monkeypatch):
         release.wait(timeout=5.0)
         return _Result()
 
-    from mewbo_core.session_store import SessionStoreBase
+    from mewbo_core.session.session_store import SessionStoreBase
 
     monkeypatch.setattr(SessionStoreBase, "compact_session", slow_compact, raising=True)
 
@@ -284,7 +284,7 @@ def test_post_command_compact_rejects_when_already_running(tmp_path, monkeypatch
         release.wait(timeout=5.0)
         return _Result()
 
-    from mewbo_core.session_store import SessionStoreBase
+    from mewbo_core.session.session_store import SessionStoreBase
 
     monkeypatch.setattr(SessionStoreBase, "compact_session", hold_compact, raising=True)
 
@@ -361,7 +361,7 @@ def test_post_command_compact_failure_emits_failed_notification(tmp_path, monkey
     async def boom_compact(self, session_id, mode=None, **kwargs):
         raise RuntimeError("boom")
 
-    from mewbo_core.session_store import SessionStoreBase
+    from mewbo_core.session.session_store import SessionStoreBase
 
     monkeypatch.setattr(SessionStoreBase, "compact_session", boom_compact, raising=True)
 

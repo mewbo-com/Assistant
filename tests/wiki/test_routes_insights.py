@@ -28,7 +28,7 @@ def store(tmp_path: Path):
 
 @pytest.fixture()
 def client(monkeypatch, store):
-    monkeypatch.setenv("MASTER_API_TOKEN", API_KEY)
+    monkeypatch.setenv("MEWBO_MASTER_API_TOKEN", API_KEY)
     monkeypatch.setattr("mewbo_api.backend.MASTER_API_TOKEN", API_KEY, raising=False)
 
     # No real embedder/LLM in tests → BM25-only, no condense.

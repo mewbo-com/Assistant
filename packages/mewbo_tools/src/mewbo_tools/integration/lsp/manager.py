@@ -20,6 +20,7 @@ from mewbo_tools.integration.lsp.servers import (
     ServerDef,
     available_servers,
 )
+from mewbo_tools.integration.sandbox_launcher import SandboxLauncher
 
 logger = get_logger(__name__)
 
@@ -63,8 +64,8 @@ class LSPServerManager:
     async def ensure_server(self, file_path: str) -> BaseLanguageClient | None:
         """Start the appropriate server for *file_path* if not running.
 
-        Returns ``None`` if no server is available or the server failed to
-        start previously.
+        Returns ``None`` if no server is available or the server is marked
+        failed.
         """
         sdef = self.server_for_file(file_path)
         if sdef is None or sdef.id in self._failed:
@@ -139,10 +140,12 @@ class LSPServerManager:
             def _on_log_message(params: types.LogMessageParams) -> None:
                 pass  # Suppress noisy log messages from servers
 
-            await client.start_io(sdef.command[0], *sdef.command[1:])
-
-            # Find workspace root
+            # Resolved BEFORE the spawn, not after: it is both the workspace
+            # this server will serve and the root its sandbox is keyed on.
             root_path = self._find_root(sdef)
+            command, kwargs = self._launch(sdef, root_path)
+            await client.start_io(command[0], *command[1:], **kwargs)
+
             root_uri = Path(root_path).as_uri()
 
             await client.initialize_async(
@@ -169,6 +172,29 @@ class LSPServerManager:
             logger.warning("Failed to start LSP server '{}': {}", sdef.id, exc)
             self._failed.add(sdef.id)
             return None
+
+    @staticmethod
+    def _launch(sdef: ServerDef, root_path: str) -> tuple[list[str], dict[str, Any]]:
+        """The argv and ``start_io`` kwargs that spawn *sdef*, confined if asked.
+
+        ``pygls`` spawns the server itself, so there is no ``preexec_fn`` to
+        hand it — the command is prefixed with the launcher shim instead, which
+        applies the ruleset to itself and is then replaced by the real server.
+
+        Scope: *root_path*, the workspace this server exists to serve. Unlike
+        the process-wide MCP pool, a manager is built per session around a fixed
+        ``cwd``, so the served workspace is known at spawn time and stays the
+        one this server is for.
+
+        With the sandbox off it returns ``sdef.command`` and NO kwargs, so the
+        spawn is byte-identical to an unsandboxed one — passing ``env`` at all
+        would replace the inherited environment rather than extend it, which is
+        also why the sandboxed arm carries ``os.environ`` over explicitly.
+        """
+        launcher = SandboxLauncher.for_root(root_path)
+        if launcher is None:
+            return list(sdef.command), {}
+        return launcher.command(sdef.command), {"env": launcher.environ(os.environ)}
 
     def _find_root(self, sdef: ServerDef) -> str:
         """Walk up from CWD to find a directory containing a root marker."""

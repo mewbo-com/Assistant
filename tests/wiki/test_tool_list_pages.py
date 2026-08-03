@@ -289,3 +289,99 @@ def test_list_pages_returns_error_when_store_list_pages_raises(tmp_path: Path) -
     assert "error" in result.content
     payload = ast.literal_eval(result.content)
     assert payload["error"]["code"] == "internal"
+
+
+# ── The refresh hint: surfaced, ranked, and never commanding ────────────────
+
+
+def _note(store: JsonWikiStore, slug: str, page_id: str, **kw):
+    """Persist a DocPageNote the way a scored refresh would leave one."""
+    from mewbo_graph.wiki.memory_types import DocPageNote
+
+    store.upsert_doc_notes(slug, [DocPageNote(
+        slug=slug, page_id=page_id, title=page_id.title(),
+        content_hash="h", page_type="concept", **kw,
+    )])
+
+
+def test_list_pages_surfaces_the_refresh_hint_with_its_evidence(tmp_path: Path) -> None:
+    """A page's verdict AND the anchors behind it reach the model.
+
+    Without this the hint is decoration: the refresh scores every page and
+    persists the verdict, but nothing could read it, so a later pass could not
+    tell which pages a change actually touched.
+    """
+    store = _store(tmp_path)
+    slug = "org/repo"
+    store.save_qa(_qa("ans-h", slug=slug))
+    store.attach_qa_session("ans-h", "sess-hint")
+    _save_page(store, slug, "auth", "Auth")
+    _note(
+        store, slug, "auth",
+        anchor_keys=["auth.py#login", "session.py"],
+        stale_anchor_keys=["auth.py#login"],
+        deleted_anchor_keys=["session.py"],
+        staleness_score=0.65,
+        staleness_reason="anchors changed",
+        generation_policy="regenerate",
+    )
+
+    payload = ast.literal_eval(_run_list_pages(store, {}, session_id="sess-hint").content)
+
+    row = payload["pages"][0]
+    assert row["policy"] == "regenerate"
+    assert row["staleness"] == 0.65
+    assert row["changedAnchors"] == ["auth.py#login"]
+    assert row["deletedAnchors"] == ["session.py"]
+
+
+def test_list_pages_ranks_stale_pages_first(tmp_path: Path) -> None:
+    """The hint RANKS. Alphabetical order would bury the page that moved."""
+    store = _store(tmp_path)
+    slug = "org/repo"
+    store.save_qa(_qa("ans-r", slug=slug))
+    store.attach_qa_session("ans-r", "sess-rank")
+    _save_page(store, slug, "aaa", "Aaa Stable")
+    _save_page(store, slug, "zzz", "Zzz Changed")
+    _note(store, slug, "aaa", generation_policy="keep", staleness_score=0.0)
+    _note(store, slug, "zzz", generation_policy="regenerate", staleness_score=0.8)
+
+    payload = ast.literal_eval(_run_list_pages(store, {}, session_id="sess-rank").content)
+
+    # Alphabetically "Aaa Stable" wins; by staleness "Zzz Changed" must.
+    assert [r["title"] for r in payload["pages"]] == ["Zzz Changed", "Aaa Stable"]
+
+
+def test_list_pages_stale_only_narrows_to_the_work_list(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    slug = "org/repo"
+    store.save_qa(_qa("ans-s", slug=slug))
+    store.attach_qa_session("ans-s", "sess-stale")
+    _save_page(store, slug, "fresh", "Fresh")
+    _save_page(store, slug, "stale", "Stale")
+    _note(store, slug, "fresh", generation_policy="keep")
+    _note(store, slug, "stale", generation_policy="edit", staleness_score=0.2)
+
+    payload = ast.literal_eval(
+        _run_list_pages(store, {"stale_only": True}, session_id="sess-stale").content
+    )
+
+    assert payload["count"] == 1
+    assert payload["pages"][0]["title"] == "Stale"
+
+
+def test_list_pages_still_lists_a_wiki_that_has_no_doc_notes(tmp_path: Path) -> None:
+    """A wiki indexed before doc notes existed must still open its front door.
+
+    The hint degrades; the catalog does not.
+    """
+    store = _store(tmp_path)
+    slug = "org/repo"
+    store.save_qa(_qa("ans-n", slug=slug))
+    store.attach_qa_session("ans-n", "sess-none")
+    _save_page(store, slug, "overview", "Overview")
+
+    payload = ast.literal_eval(_run_list_pages(store, {}, session_id="sess-none").content)
+
+    assert payload["count"] == 1
+    assert "policy" not in payload["pages"][0]

@@ -11,12 +11,13 @@ import type { AppReadyEvent } from "../../types/apps";
 
 /**
  * Live build-progress view. Tails the builder session's EXISTING event stream
- * (no bespoke transport — the same `useSessionEvents` poll every session view
- * uses) and shows the agent working until the `app_ready` terminal event. It
- * never fabricates progress: the readout is the real event log, and the terminal
- * signal is the real event. When `app_ready` lands it calls `onReady`, but the
- * parent's polled manifest (status → live) is the durable trigger, so a missed
- * event still resolves on the next poll.
+ * (no bespoke transport — the same `useSessionEvents` SSE connection every
+ * session view uses) and shows the agent working until the `app_ready`
+ * terminal event. It never fabricates progress: the readout is the real event
+ * log, and the terminal signal is the real event. When `app_ready` lands it
+ * calls `onReady`, but the parent's polled manifest (status → live) is the
+ * durable trigger, so an event missed across a reconnect still resolves on the
+ * next manifest refresh.
  */
 export function BuildProgress({
   sessionId,

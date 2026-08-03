@@ -15,7 +15,7 @@ Producer side (the plugin tools, importing this DOWN):
     * a navigation seed or a file/page read → :meth:`touch` (unscored).
 
 Consumer side (``mewbo_graph.wiki.qa``, same layer): :meth:`from_event` parses an
-``access`` event back into records (tolerating the legacy bare-``refs`` shape) and
+``access`` event back into records (bare-``refs`` shape included) and
 :meth:`fold` produces the bounded, ordered ``accessed_sources`` ref list.
 """
 from __future__ import annotations
@@ -116,11 +116,11 @@ class QaAccessRecord(BaseModel):
 
     @classmethod
     def from_event(cls, event: dict[str, Any]) -> list[QaAccessRecord]:
-        """Parse one ``access`` event into records, tolerating the legacy shape.
+        """Parse one ``access`` event into records, in either stored shape.
 
-        A current event carries ``records: [{ref, score, ...}, ...]``; a legacy
-        event carries ``refs: [str, ...]`` (all unscored). Both fold — a stored
-        event missing the new fields still resolves.
+        ``records: [{ref, score, ...}, ...]`` and ``refs: [str, ...]`` (all
+        unscored) both fold, so an event missing the scored fields still
+        resolves.
         """
         out: list[QaAccessRecord] = []
         for item in event.get("records") or []:
@@ -131,7 +131,7 @@ class QaAccessRecord(BaseModel):
                     continue
             elif isinstance(item, str) and item:
                 out.append(cls(ref=item))
-        for ref in event.get("refs") or []:  # legacy bare-string trail
+        for ref in event.get("refs") or []:  # bare-string trail
             if isinstance(ref, str) and ref:
                 out.append(cls(ref=ref))
         return out

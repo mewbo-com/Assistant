@@ -23,12 +23,12 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mewbo_core.hooks import HookManager
-from mewbo_core.session_runtime import SessionRuntime
-from mewbo_core.session_store import SessionStoreBase
-from mewbo_core.session_tools import SessionTool
-from mewbo_core.skills import activate_skill
-from mewbo_core.task_master import generate_action_plan
-from mewbo_core.tool_registry import ToolRegistry
+from mewbo_core.loop.session_runtime import SessionRuntime
+from mewbo_core.loop.task_master import generate_action_plan
+from mewbo_core.session.session_store import SessionStoreBase
+from mewbo_core.tooling.session_tools import SessionTool
+from mewbo_core.tooling.skills import activate_skill
+from mewbo_core.tooling.tool_registry import ToolRegistry
 from mewbo_tools.integration.reference_expansion import expand_references
 from rich.console import Console
 from rich.text import Text
@@ -299,6 +299,10 @@ class TurnEngine:
             # run with the App's permission modal + lifecycle hooks.
             approval_callback=self.permission,
             hook_factory=self._hook_factory,
+            # …and with ``ask_user_question`` bound, so a command-driven run
+            # (/continue, /retry, /edit) can ask instead of guess. Recovery is
+            # exactly when a run most needs a human decision.
+            extra_session_tools_factory=self._extra_session_tools,
         )
         keep = True
         try:

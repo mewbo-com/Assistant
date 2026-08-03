@@ -135,6 +135,53 @@ describe("buildKernelOptions", () => {
     expect(options.pyodideUrl).toBe("https://example.test/pyodide.mjs");
   });
 
+  it("injects the compact-density override after facade.apply, before runpy", () => {
+    const options = buildKernelOptions(payload, { theme: "dark", wheelUrls });
+    const wrapper = (options.files["app.py"] as { data: string }).data;
+    const applyIdx = wrapper.indexOf("_mewbo_facade_theme.apply(");
+    const densityIdx = wrapper.indexOf("_mewbo_st.markdown(");
+    const runpyIdx = wrapper.indexOf("runpy.run_path(");
+    expect(applyIdx).toBeGreaterThan(-1);
+    expect(densityIdx).toBeGreaterThan(applyIdx);
+    expect(runpyIdx).toBeGreaterThan(densityIdx);
+    // Never a zoom/transform hack — permanently banned, see "Natural scale" in
+    // apps/mewbo_console/CLAUDE.md.
+    expect(wrapper).not.toContain("zoom:");
+    expect(wrapper).not.toContain("transform:");
+  });
+
+  it("shrinks the rem BASIS, not just the elements it can name", () => {
+    // The whole point of the density fix: Streamlit's control heights, gaps,
+    // paddings and heading sizes are all rem-derived, so the `html` font-size
+    // is the one knob that moves them together. A per-element override list
+    // (how this was first written) leaves everything unnamed oversized — the
+    // reason a first attempt measured a 41.8% smaller h1 and still read as
+    // completely unchanged on the running deployment.
+    const wrapper = (
+      buildKernelOptions(payload, { theme: "dark", wheelUrls }).files["app.py"] as { data: string }
+    ).data;
+    expect(wrapper).toMatch(/html \{ font-size: 12\.5px !important; \}/);
+  });
+
+  it("holds READING text at an absolute size so the basis shrink can't drag prose to ~11px", () => {
+    const wrapper = (
+      buildKernelOptions(payload, { theme: "dark", wheelUrls }).files["app.py"] as { data: string }
+    ).data;
+    // Body prose, widget labels, inputs and tab labels are the surfaces a human
+    // reads; chrome scales with the basis, these do not. The wrapper embeds the
+    // CSS via JSON.stringify, so the attribute selectors' quotes arrive
+    // BACKSLASH-ESCAPED — assert against the escaped form the file really holds
+    // rather than the pre-serialization spelling.
+    for (const sel of [
+      String.raw`[data-testid=\"stMarkdownContainer\"] p`,
+      String.raw`[data-testid=\"stWidgetLabel\"] p`,
+      String.raw`[data-testid=\"stTabs\"] button p`,
+    ]) {
+      expect(wrapper).toContain(sel);
+    }
+    expect(wrapper).toContain("font-size: 13px !important");
+  });
+
   it("merges the STLITE_THEME palette for the requested theme into streamlitConfig", () => {
     const dark = buildKernelOptions(payload, { theme: "dark", wheelUrls });
     expect(dark.streamlitConfig["theme.base"]).toBe("dark");

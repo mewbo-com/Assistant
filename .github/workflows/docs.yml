@@ -15,6 +15,7 @@ on:
       - "mkdocs.yml"
       - "configs/**"
       - "apps/mewbo_api/**"
+      - "packages/mewbo_graph/**"
       - "packages/mewbo_core/src/mewbo_core/config.py"
       - "scripts/ci/generate_openapi_spec.py"
       - "scripts/ci/generate_config_schema.py"
@@ -26,6 +27,7 @@ on:
       - "mkdocs.yml"
       - "configs/**"
       - "apps/mewbo_api/**"
+      - "packages/mewbo_graph/**"
       - "packages/mewbo_core/src/mewbo_core/config.py"
       - "scripts/ci/generate_openapi_spec.py"
       - "scripts/ci/generate_config_schema.py"
@@ -65,16 +67,23 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip uv
-          uv sync --group docs --extra ha --extra api
+          # The wiki extra pulls mewbo-graph, so the spec published from here is
+          # generated in the same shape as the committed one rather than
+          # depending on every graph import in the api staying guarded.
+          uv sync --group docs --extra ha --extra api --extra wiki
 
       - name: Prepare docs inputs
         run: |
           printf '{"commit":"%s"}\n' "$(git rev-parse --short HEAD)" > docs/build-info.json
-          uv run python scripts/ci/generate_config_schema.py || true
-          cp configs/app.schema.json docs/app.schema.json || true
-          # Refresh the REST API spec; the committed docs/openapi.json serves
-          # as fallback when the API app is not importable here.
-          uv run python scripts/ci/generate_openapi_spec.py || true
+          # Both generators exit 0 whether the artifact was rewritten or already
+          # current, and non-zero only on a genuine failure, so neither call is
+          # masked. While they were masked a broken export was indistinguishable
+          # from a clean one and the site kept publishing the committed schema
+          # and spec regardless, so an API change that was never regenerated
+          # locally shipped stale docs with no signal anywhere.
+          uv run python scripts/ci/generate_config_schema.py
+          cp configs/app.schema.json docs/app.schema.json
+          uv run python scripts/ci/generate_openapi_spec.py
 
       # --- github.com: versioned GitHub Pages via mike ---
       - name: Configure git (mike)

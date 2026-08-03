@@ -40,12 +40,12 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from mewbo_core.agent_registry import parse_agent_file
+from mewbo_core.agents.agent_registry import parse_agent_file
 from mewbo_core.common import get_logger
 from mewbo_core.config import get_config
-from mewbo_core.plugins import load_all_plugin_components
 from mewbo_core.system_instructions import InstructionValueCatalog
-from mewbo_core.tool_registry import get_or_build_registry
+from mewbo_core.tooling.plugins import load_all_plugin_components
+from mewbo_core.tooling.tool_registry import get_or_build_registry
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Callable

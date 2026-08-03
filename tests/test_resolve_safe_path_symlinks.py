@@ -1,11 +1,10 @@
 """Tests for ``resolve_safe_path`` symlink handling.
 
 A symlink living inside an allowed project root must be honored even when
-its target sits outside every root. The previous implementation called
-``Path.resolve()`` which follows symlinks, so a workspace symlink like
-``<project>/homelab -> /mnt/external`` was rejected with
-"resolves outside all allowed project roots". ``../`` escape attempts
-must still be rejected.
+its target sits outside every root — a workspace symlink like
+``<project>/shared -> /mnt/external`` is legitimate. Resolution therefore
+cannot lean on ``Path.resolve()`` alone, which follows the link and lands
+outside every root. ``../`` escape attempts must still be rejected.
 """
 
 from __future__ import annotations
@@ -13,7 +12,30 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from mewbo_core.config import reset_config, set_config_override
 from mewbo_tools.core import resolve_safe_path
+
+
+@pytest.fixture(autouse=True)
+def _tmp_path_is_a_configured_project(tmp_path: Path):
+    """Register ``tmp_path`` as a configured project — deliberately NOT a flag pin.
+
+    Every sibling module that broke the same way pins
+    ``path_scope_to_active_project`` OFF, because its subject is tool semantics
+    and the path guard is incidental. This module's subject IS
+    ``resolve_safe_path``, so pinning the axis off would leave the SHIPPED shape
+    untested in the one file that most needs to test it — a test that pins away
+    the default it exists to exercise is a test that has stopped being able to
+    fail.
+
+    Making ``tmp_path`` a configured project keeps scoping ON and puts the roots
+    these cases pass inside the allowed union legitimately, so the caller's
+    ``root`` NARROWS rather than widens. The symlink and traversal assertions
+    then run against the real gate instead of around it.
+    """
+    set_config_override({"projects": {"tmpfixture": {"path": str(tmp_path)}}})
+    yield
+    reset_config()
 
 
 def test_accepts_symlink_inside_root_pointing_outside(tmp_path: Path) -> None:
@@ -23,13 +45,13 @@ def test_accepts_symlink_inside_root_pointing_outside(tmp_path: Path) -> None:
     external.mkdir()
     (external / "config.yml").write_text("hello\n", encoding="utf-8")
 
-    (project / "homelab").symlink_to(external)
+    (project / "shared").symlink_to(external)
 
-    resolved = resolve_safe_path("homelab/config.yml", root=str(project))
+    resolved = resolve_safe_path("shared/config.yml", root=str(project))
 
     assert resolved.read_text(encoding="utf-8") == "hello\n"
     # The file is readable — the exact returned path may be the physical
-    # (resolved) location since /tmp is now in the allowed roots.
+    # (resolved) location, since /tmp is itself an allowed root.
 
 
 def test_accepts_absolute_path_through_symlink(tmp_path: Path) -> None:
@@ -48,8 +70,8 @@ def test_accepts_absolute_path_through_symlink(tmp_path: Path) -> None:
 
 
 def test_rejects_dot_dot_escape_to_system_path(tmp_path: Path) -> None:
-    # Both tmp_path siblings are now under /tmp (which is allowed).
-    # Verify that escaping to a system path well outside /tmp is still blocked.
+    # Both tmp_path siblings sit under /tmp, which is allowed. Escaping to a
+    # system path well outside /tmp must still be blocked.
     project = tmp_path / "project"
     project.mkdir()
 
@@ -69,10 +91,10 @@ def test_rejects_direct_path_outside_all_tmp_and_roots(tmp_path: Path) -> None:
 def test_rejection_error_names_the_allowed_roots(tmp_path: Path) -> None:
     """A rejection must tell the model what IS allowed, not only what isn't.
 
-    The bare "resolves outside all allowed project roots" message left the
-    model no way to self-correct — it retried via shell workarounds instead
-    of restaging under an allowed root (13 sessions of thrash in the event
-    corpus). Naming the roots turns the denial into a one-turn recovery.
+    A bare "resolves outside all allowed project roots" leaves the model no
+    way to self-correct: it retries via shell workarounds instead of
+    restaging under an allowed root. Naming the roots turns the denial into
+    a one-turn recovery.
     """
     project = tmp_path / "project"
     project.mkdir()
@@ -124,9 +146,10 @@ def test_read_tool_reads_through_symlink(tmp_path: Path) -> None:
     project.mkdir()
     external.mkdir()
     (external / "litellm-config.yml").write_text("model_list: []\n", encoding="utf-8")
-    (project / "homelab").symlink_to(external)
+    (project / "shared").symlink_to(external)
 
-    # Set up a nested symlink structure matching the real-world report.
+    # The link's target itself holds a directory, so the traversal crosses
+    # the symlink boundary and then descends.
     nested = external / "litellm"
     nested.mkdir()
     (nested / "litellm-config.yml").write_text("model_list: []\n", encoding="utf-8")
@@ -136,7 +159,7 @@ def test_read_tool_reads_through_symlink(tmp_path: Path) -> None:
         tool_id="read_file",
         operation="get",
         tool_input={
-            "path": "homelab/litellm/litellm-config.yml",
+            "path": "shared/litellm/litellm-config.yml",
             "root": str(project),
         },
     )

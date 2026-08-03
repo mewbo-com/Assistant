@@ -28,9 +28,12 @@
  * Rendering `<App/>` pulls in every facet's pane (a redirect can land on
  * any of them), so the mock surface below merges the fixtures already
  * established by `app.test.tsx`, `ProjectsPane.test.tsx`, `pluginsPane.test.tsx`,
- * `TriggersPane.test.tsx`, and `GitCredentialsView.test.tsx` — nothing new,
- * just assembled in one place. This suite doesn't enable Vitest globals, so
- * RTL's auto-cleanup never runs — `afterEach(cleanup)` below is load-bearing.
+ * and `TriggersPane.test.tsx` — nothing new, just assembled in one place.
+ * (`/keys` used to also pull in `GitCredentialsView`, back when it lived on
+ * the Security facet; it moved to Repositories, which none of the redirects
+ * this file exercises land on, so that fixture isn't needed here anymore.)
+ * This suite doesn't enable Vitest globals, so RTL's auto-cleanup never
+ * runs — `afterEach(cleanup)` below is load-bearing.
  */
 import { cleanup, render as rtlRender, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -58,7 +61,6 @@ vi.mock("../api/client", () => ({
   uploadAttachments: vi.fn(),
   createShare: vi.fn(),
   exportSession: vi.fn(),
-  fetchEvents: vi.fn(),
   // HomeView -> ProductHero -> InputBar (mounted at "/", the catch-all route).
   listModels: vi.fn(),
   listTools: vi.fn(),
@@ -103,21 +105,6 @@ vi.mock("../api/triggers", async (orig) => {
     terminateSession: vi.fn(),
   };
 });
-
-// Security facet -> GitCredentialsView. Stub its data hook + the wiki-projects
-// hint query it reads at mount; the panel's own network calls (put/delete/
-// validate) only fire on user interaction, which these tests never trigger.
-vi.mock("../hooks/useGitCredentials", () => ({
-  useGitCredentials: () => ({
-    credentials: [],
-    loading: false,
-    error: null,
-    refresh: vi.fn(),
-  }),
-}));
-vi.mock("../components/wiki/api/hooks", () => ({
-  useWikiProjects: () => ({ data: [] }),
-}));
 
 const listSessions = vi.mocked(client.listSessions);
 const listNotifications = vi.mocked(client.listNotifications);

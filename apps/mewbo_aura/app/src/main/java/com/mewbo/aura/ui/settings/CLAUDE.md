@@ -6,15 +6,16 @@ Scope: `ui/settings/` — `SettingsScreen`, `SettingsViewModel`/`SettingsUiState
 All persisted state is [`data/settings/SettingsStore`](../../data/settings/CLAUDE.md); this is the UI
 over it.
 
-## The 7-section reorg (2026-07-14)
+## The seven sections
 
-`SettingsScreen` is grouped into seven icon-headed sections via `SettingsSectionHeader` (a `(text, icon)`
-Row): **Connection** (Lock) · **Identity** (Person) · **Defaults** (Star — default project + per-surface
-models) · **Voice & Motion** (Mic) · **Device capabilities** (Phone — set-default-assistant + SMS access
-+ the per-tool `DeviceToolToggles.GROUPS` switches) · **Widgets** (AddCircle — renamed from "Experimental")
-· **Debug** (Build, debug-only). The header icon is decorative (`contentDescription = null`) and the Text
-carries `.semantics { heading() }` for TalkBack section-jumps. **Zero contract change** — `SettingsUiState`/
-`SettingsViewModel`/tests were untouched; this was a `SettingsScreen.kt`-only reshuffle.
+`SettingsScreen` is grouped into seven icon-headed sections via `SettingsSectionHeader` (a
+`(text, icon)` Row): **Connection** (Lock) · **Identity** (Person) · **Defaults** (Star — default
+project + per-surface models) · **Voice & Motion** (Mic) · **Device capabilities** (Phone —
+set-default-assistant + SMS access + the per-tool `DeviceToolToggles.GROUPS` switches) · **Widgets**
+(AddCircle) · **Debug** (Build, debug-only). The header icon is decorative
+(`contentDescription = null`) and the Text carries `.semantics { heading }` for TalkBack
+section-jumps. Grouping is `SettingsScreen.kt`-local — `SettingsUiState`/`SettingsViewModel` carry no
+section concept.
 
 ## Laws / seams
 
@@ -30,7 +31,7 @@ carries `.semantics { heading() }` for TalkBack section-jumps. **Zero contract c
   `ChatIcons.TemporaryProjectScope` (Schedule/clock) glyph + a divider below it — chosen over an
   AutoDelete/trash glyph, which misreads as a delete affordance next to a selectable row. Real projects
   get `ChatIcons.ProjectScope` (Folder).
-- Icons come from `material-icons-extended` first (2026-07-14; app-root CLAUDE.md § Iconography). Section
+- Icons come from `material-icons-extended` first (app-root CLAUDE.md § Iconography). Section
   glyphs were rebuilt with semantically-correct FILLED weights (matching the drawer's Filled weight).
 - The Debug section's mock-backend toggle is debug-only ([`mock/CLAUDE.md`](../../mock/CLAUDE.md));
   `SlimTextField` (borderless, `accentPrimary` cursor) is the shared field idiom, reused by the rename

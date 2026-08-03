@@ -139,6 +139,7 @@ files = [
   "apps/mewbo_mcp/src/mewbo_mcp/**/*.py",
   "apps/mewbo_cli/src/mewbo_cli/**/*.py",
   "apps/mewbo_ha_conversation/**/*.py",
+  "demo/seeder/src/mewbo_demo_seeder/**/*.py",
 ]
 explicit_package_bases = true
 mypy_path = ["."]
@@ -154,6 +155,7 @@ testpaths = [
   "apps/mewbo_api/tests",
   "apps/mewbo_mcp/tests",
   "apps/mewbo_cli/tests",
+  "demo/seeder/tests",
 ]
 
 [tool.coverage.run]

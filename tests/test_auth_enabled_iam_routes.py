@@ -51,7 +51,7 @@ def _probe_env(root: Path) -> dict[str, str]:
         "PATH": os.environ.get("PATH", ""),
         "HOME": str(root / "userhome"),
         "MEWBO_HOME": str(root / "home"),
-        "MASTER_API_TOKEN": _MASTER_TOKEN,
+        "MEWBO_MASTER_API_TOKEN": _MASTER_TOKEN,
     }
 
 
@@ -84,7 +84,7 @@ import json
 import sys
 
 import mewbo_api.backend as backend
-from mewbo_core.key_store import create_key_store
+from mewbo_core.secrets.key_store import create_key_store
 
 MASTER = "%(master)s"
 client = backend.app.test_client()

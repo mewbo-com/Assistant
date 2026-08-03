@@ -146,6 +146,11 @@ class SubprocessScipProducer:
         self, project_root: Path, project_name: str, out: Path
     ) -> bool:
         """Run ``scip-python index`` from *project_root*; True on a non-empty output."""
+        # Deliberately UNCONFINED. Landlock scoping guards the shell tool's opaque,
+        # model-authored commands; this is a first-party read-only type-checker whose
+        # argv we build ourselves. Confined to the project root it cannot see the
+        # interpreter's site-packages, so scip-python's own ``pip list`` dependency
+        # probe fails, the run exits non-zero, and every cross-file edge disappears.
         try:
             proc = subprocess.run(
                 [
@@ -182,7 +187,11 @@ class SubprocessScipProducer:
         return out.exists() and out.stat().st_size > 0
 
     def _read_json(self, out: Path) -> dict[str, Any] | None:
-        """Convert the protobuf ``.scip`` to JSON via ``scip print --json``."""
+        """Convert the protobuf ``.scip`` to JSON via ``scip print --json``.
+
+        Unconfined for the same reason :meth:`_run_index` is, and it reads even
+        less: one first-party binary over the index file we just wrote.
+        """
         try:
             proc = subprocess.run(
                 [self._scip_bin, "print", "--json", str(out)],
@@ -482,11 +491,17 @@ class ScipPythonResolver:
             sym = ScipSymbol.parse(occ.get("symbol", ""))
             if sym.is_local:
                 continue
+            # Both drops below are SITE failures, not target failures: the
+            # reference is real but we cannot say where it sits (unreadable file
+            # / off-file range, or no node whose span encloses it). They are
+            # tallied so the stats account for every reference occurrence.
             byte = self._byte_of(repo_root, rel, occ)
             if byte is None:
+                counters.unresolved += 1
                 continue
             source = self._enclosing(rel, byte)
             if source is None:
+                counters.unresolved += 1
                 continue
             target = self._resolve_target(sym, symbols, externals, counters)
             if target is not None and target != source:

@@ -187,7 +187,6 @@ class EchoSearchRunner:
             related_questions=list(fixtures.DEMO_RELATED_QUESTIONS),
             related_people=related_people,
         )
-        # Persist the terminal snapshot + timing onto the record.
         store.update_run(
             run.run_id,
             status="completed",

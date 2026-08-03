@@ -6,7 +6,13 @@ import tempfile
 from pathlib import Path
 
 from mewbo_api import backend
-from mewbo_core.config import reset_config, set_app_config_path
+from mewbo_core.config import (
+    AppConfig,
+    ConfigWriteAccess,
+    ConfigWriteError,
+    reset_config,
+    set_app_config_path,
+)
 
 
 def _setup_temp_config(monkeypatch, payload: dict | None = None):
@@ -94,6 +100,47 @@ def test_config_get_omits_protected_and_secrets(monkeypatch):
         _teardown(path)
 
 
+def test_config_get_reports_storage_writable(monkeypatch):
+    """GET /api/config reports storage.writable True for an ordinary temp-dir store."""
+    path = _setup_temp_config(monkeypatch)
+    try:
+        client = backend.app.test_client()
+        resp = client.get("/api/config", headers={"X-API-Key": "test-token"})
+        assert resp.status_code == 200
+        storage = resp.get_json()["storage"]
+        assert storage["writable"] is True
+        assert storage["code"] is None
+        assert storage["reason"] is None
+    finally:
+        _teardown(path)
+
+
+def test_config_get_reports_storage_unwritable(monkeypatch):
+    """GET /api/config surfaces a read-only store BEFORE any edit is attempted."""
+    path = _setup_temp_config(monkeypatch)
+    try:
+        monkeypatch.setattr(
+            AppConfig,
+            "probe_write_access",
+            classmethod(
+                lambda cls, _path: ConfigWriteAccess(
+                    writable=False,
+                    code="read_only",
+                    reason="The configuration directory is mounted read-only.",
+                )
+            ),
+        )
+        client = backend.app.test_client()
+        resp = client.get("/api/config", headers={"X-API-Key": "test-token"})
+        assert resp.status_code == 200
+        storage = resp.get_json()["storage"]
+        assert storage["writable"] is False
+        assert storage["code"] == "read_only"
+        assert storage["reason"]
+    finally:
+        _teardown(path)
+
+
 # ---------- PATCH /api/config ----------
 
 
@@ -151,6 +198,49 @@ def test_config_get_omits_hooks_section(monkeypatch):
         resp = client.get("/api/config", headers={"X-API-Key": "test-token"})
         assert resp.status_code == 200
         assert "hooks" not in resp.get_json()["config"]
+    finally:
+        _teardown(path)
+
+
+def test_config_patch_updates_the_file_without_rewriting_it(monkeypatch):
+    """A save applies the patch to the operator's document and changes nothing else.
+
+    Persisting a re-render of the validated model instead would pin every unset
+    field to a default and resolve the ``runtime.*`` directories against the
+    saving process's environment — which makes a shared config file usable only
+    from whichever process last saved it.
+    """
+    path = _setup_temp_config(monkeypatch)
+    try:
+        with open(path, "w") as handle:
+            json.dump(
+                {
+                    "$schema": "./app.schema.json",
+                    "runtime": {"cache_dir": ""},
+                    "future_feature": {"enabled": True},
+                },
+                handle,
+            )
+
+        client = backend.app.test_client()
+        resp = client.patch(
+            "/api/config",
+            headers={"X-API-Key": "test-token"},
+            json={"llm": {"default_model": "anthropic/claude-sonnet-4-6"}},
+        )
+        assert resp.status_code == 200
+
+        with open(path) as f:
+            on_disk = json.load(f)
+        assert on_disk["llm"]["default_model"] == "anthropic/claude-sonnet-4-6"
+        # A key the model does not declare survives instead of being dropped.
+        assert on_disk["$schema"] == "./app.schema.json"
+        assert on_disk["future_feature"] == {"enabled": True}
+        # "Leave this to the runtime" stays that way rather than being resolved
+        # to an absolute path belonging to this process.
+        assert on_disk["runtime"]["cache_dir"] == ""
+        # Untouched sections are not materialized at their defaults.
+        assert set(on_disk) == {"$schema", "runtime", "future_feature", "llm"}
     finally:
         _teardown(path)
 
@@ -219,6 +309,48 @@ def test_config_patch_success(monkeypatch):
         _teardown(path)
 
 
+def test_config_patch_write_failure_returns_structured_500(monkeypatch):
+    """PATCH /api/config surfaces a write failure as a structured 500, not a traceback.
+
+    Stubs only the I/O boundary (``AppConfig.write_document``) with the typed
+    failure the persistence layer raises on a real read-only mount / permission
+    / disk-full error, per the repo's testing doctrine (stub I/O, not the thing
+    under test).
+    """
+    path = _setup_temp_config(monkeypatch)
+    try:
+
+        def _raise_write_error(cls, config_path, document, *, indent=2):
+            raise ConfigWriteError(
+                Path(config_path),
+                "read_only",
+                "The configuration directory is mounted read-only; settings cannot be saved "
+                "until the deployment grants write access.",
+            )
+
+        monkeypatch.setattr(AppConfig, "write_document", classmethod(_raise_write_error))
+
+        client = backend.app.test_client()
+        resp = client.patch(
+            "/api/config",
+            headers={"X-API-Key": "test-token"},
+            json={"llm": {"default_model": "anthropic/claude-sonnet-4-6"}},
+        )
+        assert resp.status_code == 500
+        body = resp.get_json()
+        assert body["code"] == "read_only"
+        assert body["message"]
+        # The server-side path must never ride in the response body.
+        assert path not in json.dumps(body)
+
+        # Nothing persisted — the file still holds the original empty payload.
+        with open(path) as f:
+            on_disk = json.load(f)
+        assert on_disk == {}
+    finally:
+        _teardown(path)
+
+
 def test_config_patch_empty_payload(monkeypatch):
     """PATCH /api/config with empty body returns 400."""
     path = _setup_temp_config(monkeypatch)
@@ -264,17 +396,27 @@ def test_projects_endpoint_includes_available(monkeypatch, tmp_path):
 
 
 def test_resolve_project_cwd_rejects_missing_dir(monkeypatch, tmp_path):
-    """_resolve_project_cwd raises ValueError for nonexistent project path."""
+    """_resolve_project_cwd raises ValueError for nonexistent project path.
+
+    Asserts the two properties a caller can rely on — it RAISES rather than
+    returning a path nothing can use, and the refusal NAMES the directory it
+    looked for — rather than a fragment of the sentence. The wording moved when
+    resolution moved onto ``ProjectCatalog``, and matching prose made a message
+    improvement read as a regression in a test whose actual subject is the
+    refusal.
+    """
+    missing = tmp_path / "nonexistent"
     config = {
         "projects": {
-            "phantom": {"path": str(tmp_path / "nonexistent"), "description": "gone"},
+            "phantom": {"path": str(missing), "description": "gone"},
         }
     }
     path = _setup_temp_config(monkeypatch, config)
     try:
         import pytest
 
-        with pytest.raises(ValueError, match="not found"):
+        with pytest.raises(ValueError) as excinfo:
             backend._resolve_project_cwd({"project": "phantom"})
+        assert str(missing) in str(excinfo.value)
     finally:
         _teardown(path)

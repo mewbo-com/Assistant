@@ -23,8 +23,16 @@ def _store(tmp_path: Path) -> JsonWikiStore:
     return store
 
 
-def _seed_graph(store: JsonWikiStore, slug: str) -> None:
-    """Persist one code-graph node so finalize's empty-graph guard passes."""
+def _seed_graph(
+    store: JsonWikiStore, slug: str, *, commit_sha: str | None = None
+) -> None:
+    """Persist one code-graph node so finalize's empty-graph guard passes.
+
+    ``commit_sha`` must match the job's when the job carries one: the gate asks
+    whether THIS commit built a graph, and `build_graph_core` stamps every node
+    with `job.commit_sha`, so an unstamped node beside a commit-bearing job is a
+    combination a real run never produces.
+    """
     from mewbo_graph.wiki.types import make_graph_node
 
     store.upsert_nodes(
@@ -35,6 +43,7 @@ def _seed_graph(store: JsonWikiStore, slug: str) -> None:
                 name="a.py", file="a.py", range=(0, 0),
             )
         ],
+        commit_sha=commit_sha,
     )
 
 
@@ -197,6 +206,8 @@ def test_finalize_propagates_branch_commit_and_maintainer_edited(
     store.create_job(_job("job-fin-meta", "org/repo"))
     # Mid-flight clone wrote these — finalize reads them off the job.
     store.update_job("job-fin-meta", branch="main", commit_sha="a1b2c3d4e5f6")
+    # The graph this job built carries the job's commit — see _seed_graph.
+    _seed_graph(store, "org/repo", commit_sha="a1b2c3d4e5f6")
     store.attach_job_session("job-fin-meta", "sess-fin-meta")
     _seed_submission(store, "job-fin-meta", slug="org/repo")
     _save_page(store, "org/repo", "home")
@@ -478,7 +489,7 @@ def test_finalize_supersedes_stale_nonterminal_sibling_jobs(tmp_path: Path) -> N
             current_file=None,
         )
     )
-    # A historical terminal job that must NOT be touched.
+    # An already-terminal job that must NOT be touched.
     store.create_job(
         IndexingJob(
             job_id="job-old-complete",

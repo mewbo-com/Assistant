@@ -17,7 +17,7 @@
 #                         (self-hosted Gitea/Mewbo behind an internal CA the
 #                         runner image does not trust)
 #
-# See docs/ci-agent-pickup.md for setup, token scopes, and the test plan.
+# See apps/mewbo_api/CLAUDE.md -> "Agent pickup" for the full behavioral contract.
 
 name: Agent Pickup
 

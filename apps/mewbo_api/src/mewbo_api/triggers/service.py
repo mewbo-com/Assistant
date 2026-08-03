@@ -40,7 +40,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Callable
 
     from mewbo_core.config import TriggersConfig
-    from mewbo_core.session_runtime import SessionRuntime
+    from mewbo_core.loop.session_runtime import SessionRuntime
     from mewbo_core.triggers.policy import TriggerPolicy
     from mewbo_core.triggers.store import TriggerStoreBase
 
@@ -60,7 +60,7 @@ class TriggerFireContext:
     rather than more positional creep.
 
     ``trigger_id`` lets the app side attribute the fire — the Mewbo Apps
-    pipeline-run ledger opens a run keyed on the firing trigger (spec §2.8).
+    pipeline-run ledger opens a run keyed on the firing trigger.
     """
 
     session_id: str

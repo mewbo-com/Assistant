@@ -1,11 +1,10 @@
 /**
  * Graph3DView — the ONE 3D "Code Galaxy" graph renderer, shared by every graph
  * surface in the console (the wiki Knowledge Graph AND the Agentic-Search SCG
- * workspace graph). It replaces the old 2D Cytoscape ``KnowledgeGraphRenderer``
- * that both surfaces forked — a main-thread fcose force-sim that choked past a
- * few thousand nodes. This is the GPU/WebGL path (``react-force-graph-3d`` /
- * three.js) and the SINGLE implementation: one engine, one toolbar grammar, one
- * collapse model — no per-domain renderer.
+ * workspace graph): one engine, one toolbar grammar, one collapse model — no
+ * per-domain renderer. This is the GPU/WebGL path (``react-force-graph-3d`` /
+ * three.js), which is what clears the wall a main-thread fcose force-sim hits
+ * past a few thousand nodes.
  *
  * It is deliberately THIN glue around the off-the-shelf ``<ForceGraph3D>`` (it
  * owns the three.js scene, camera, picking, force layout, hover labels and nav)
@@ -28,7 +27,7 @@ import { Loader2, Maximize2, RotateCcw } from "lucide-react";
 import { cardSurface } from "@/components/ui/card-surface";
 import { cn } from "@/lib/utils";
 
-import { CollapseModel } from "./collapseModel";
+import { CollapseModel, EXTERNAL_BUCKET_ID } from "./collapseModel";
 import { Graph3DToolbar } from "./Graph3DToolbar";
 import { cssVarColor, cssVarColorAlpha, nodeSize } from "./graphTheme";
 import type { KnowledgeGraph, KnowledgeGraphEdge } from "./api/types";
@@ -128,6 +127,11 @@ export interface Graph3DTheme {
   layerDot: Record<string, string>;
   /** Folder supernode fill token (hierarchy graphs only). */
   folderVar?: string;
+  /** Fill token for the synthetic ``EXTERNAL_BUCKET_ID`` folder specifically —
+   *  distinct from ``folderVar`` so the External bucket reads apart from a
+   *  real source folder at a glance, collapsed or expanded (hierarchy graphs
+   *  only; falls back to ``folderVar`` when unset). */
+  externalBucketVar?: string;
   /** Faint containment-backbone token (hierarchy graphs only). */
   edgeContainVar?: string;
   /** Optional rich hover label; default = ``node.label``. */
@@ -192,8 +196,8 @@ export function Graph3DView({
 
   // The ONE atomic class — pure collapse logic, rebuilt only when the graph
   // identity changes. A folderless graph (SCG) passes straight through. The
-  // cast is the same structural-compat seam both surfaces already used to feed
-  // the old shared renderer; CollapseModel reads only id/parentId/kind/endpoints.
+  // cast is a structural-compat seam: both wiki and SCG graphs share the same
+  // {nodes, edges} shape, and CollapseModel reads only id/parentId/kind/endpoints.
   const model = useMemo(
     () => (graph ? new CollapseModel(graph as unknown as KnowledgeGraph) : null),
     [graph],
@@ -352,14 +356,16 @@ export function Graph3DView({
   // wrap is what keeps the accessor prop itself from being a fresh closure
   // every render.
   const nodeColor = useCallback(
-    (n: Graph3DNode) =>
-      isFiltered(n)
-        ? cssVarColor("--muted-foreground")
-        : cssVarColor(
-            n.kind === "Folder" && theme.folderVar
-              ? theme.folderVar
-              : theme.kindVar[n.kind] ?? "--graph-edge-soft",
-          ),
+    (n: Graph3DNode) => {
+      if (isFiltered(n)) return cssVarColor("--muted-foreground");
+      if (n.kind === "Folder") {
+        if (n.id === EXTERNAL_BUCKET_ID && theme.externalBucketVar) {
+          return cssVarColor(theme.externalBucketVar);
+        }
+        if (theme.folderVar) return cssVarColor(theme.folderVar);
+      }
+      return cssVarColor(theme.kindVar[n.kind] ?? "--graph-edge-soft");
+    },
     [isFiltered, theme],
   );
   const nodeVal = useCallback(

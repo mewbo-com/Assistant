@@ -1,16 +1,35 @@
 """Tests for token budget calculations — anchored on LiteLLM + API usage_metadata."""
 
+from contextlib import contextmanager
 from unittest.mock import patch
 
-from mewbo_core import token_budget as token_budget_module
+from loguru import logger as loguru_logger
 from mewbo_core.config import set_config_override
-from mewbo_core.token_budget import (
+from mewbo_core.session import token_budget as token_budget_module
+from mewbo_core.session.token_budget import (
     _strip_provider_prefix,
     build_usage_numbers,
     get_model_max_input_tokens,
     get_token_budget,
     read_last_input_tokens,
 )
+
+
+@contextmanager
+def _capture_loguru(level: str = "WARNING"):
+    """Capture loguru records emitted inside the block.
+
+    `token_budget.py` logs through loguru (`mewbo_core.common.get_logger`),
+    not stdlib `logging`, so pytest's `caplog` fixture never sees these
+    records — it only hooks the stdlib logging module. A temporary sink is
+    loguru's own documented way to assert on emitted messages in a test.
+    """
+    messages: list[str] = []
+    sink_id = loguru_logger.add(lambda msg: messages.append(str(msg)), level=level)
+    try:
+        yield messages
+    finally:
+        loguru_logger.remove(sink_id)
 
 # -- Provider prefix stripping ----------------------------------------------
 
@@ -37,8 +56,15 @@ def test_get_model_max_input_tokens_uses_litellm_result():
         assert get_model_max_input_tokens("claude-sonnet-4-6") == 1_000_000
 
 
-def test_get_model_max_input_tokens_strips_prefix_before_litellm_lookup():
-    """The routing prefix must be stripped before handing to LiteLLM."""
+def test_get_model_max_input_tokens_tries_the_prefixed_name_first():
+    """The PREFIXED name is offered to LiteLLM before the stripped one.
+
+    ``register_proxy_model_capabilities`` hydrates the catalogue under
+    ``openai/<name>``, so a proxy-only route — a model LiteLLM's bundled map has
+    never heard of — is reachable ONLY under the prefixed spelling. Stripping
+    first queried the one key the bridge never writes, and those models silently
+    fell back to the default window with their real one already in the catalogue.
+    """
     set_config_override({"token_budget": {"model_context_windows": {}}}, replace=True)
     seen: list[str] = []
 
@@ -48,7 +74,25 @@ def test_get_model_max_input_tokens_strips_prefix_before_litellm_lookup():
 
     with patch.object(token_budget_module, "_litellm_max_input_tokens", side_effect=_fake_litellm):
         get_model_max_input_tokens("openai/claude-sonnet-4-6")
-    assert seen == ["claude-sonnet-4-6"], f"LiteLLM must see canonical name, got {seen}"
+    assert seen == ["openai/claude-sonnet-4-6"], f"prefixed name must be tried first, got {seen}"
+
+
+def test_get_model_max_input_tokens_falls_back_to_the_canonical_name():
+    """A miss on the prefixed spelling still tries the stripped one.
+
+    Models LiteLLM's bundled map DOES know are keyed bare, so dropping the
+    canonical lookup would trade one silent default for another.
+    """
+    set_config_override({"token_budget": {"model_context_windows": {}}}, replace=True)
+    seen: list[str] = []
+
+    def _fake_litellm(name: str) -> int | None:
+        seen.append(name)
+        return 1_000_000 if "/" not in name else None
+
+    with patch.object(token_budget_module, "_litellm_max_input_tokens", side_effect=_fake_litellm):
+        assert get_model_max_input_tokens("openai/claude-sonnet-4-6") == 1_000_000
+    assert seen == ["openai/claude-sonnet-4-6", "claude-sonnet-4-6"]
 
 
 def test_get_model_max_input_tokens_override_wins():
@@ -194,7 +238,7 @@ def _llm_end(
         "input_tokens": in_tok,
         "output_tokens": out_tok,
     }
-    # Only include cache/reasoning when set so legacy events (which never
+    # Only include cache/reasoning when set so stored events (which never
     # carried these keys) stay byte-identical to existing test fixtures.
     if cache_create:
         payload["cache_creation_input_tokens"] = cache_create
@@ -258,10 +302,10 @@ def test_build_usage_numbers_splits_root_vs_sub_by_depth():
 
 
 def test_build_usage_numbers_peak_is_max_not_sum_across_growing_prompt():
-    """Regression: in a real tool-use loop the root prompt grows across calls
-    as tool results stack on the same context. Summing input_tokens across
-    calls double-counts the baseline — use max. This is the bug that made
-    the frontend show ``120K in`` on a turn whose real context peak was 27K.
+    """In a real tool-use loop the root prompt grows across calls as tool
+    results stack on the same context. Summing input_tokens across calls
+    double-counts the baseline — use max. Summing renders ``120K in`` on a turn
+    whose real context peak is 27K.
     """
     set_config_override(
         {"token_budget": {"model_context_windows": {"m": 200_000}}},
@@ -577,3 +621,66 @@ def test_litellm_unknown_model_falls_through_to_default():
         return_value=None,
     ):
         assert get_model_max_input_tokens("some-exotic-model") == 50_000
+
+
+# -- Fallback-window observability (module-level warn-once guard) -----------
+
+
+def test_override_resolution_does_not_warn():
+    """A model resolved via an explicit override never hits the fallback path."""
+    token_budget_module._litellm_max_input_tokens.cache_clear()
+    token_budget_module._fallback_warned_models.clear()
+    set_config_override(
+        {"token_budget": {"model_context_windows": {"my-override-model": 200_000}}},
+        replace=True,
+    )
+    with _capture_loguru() as messages:
+        assert get_model_max_input_tokens("my-override-model") == 200_000
+    assert not messages, f"override resolution must never warn, got: {messages!r}"
+
+
+def test_unknown_model_warns_naming_model_and_fallback_number():
+    """A model unknown to both the override and the catalogue warns, and the
+    warning names the model plus the fallback number an operator can act on.
+    """
+    token_budget_module._litellm_max_input_tokens.cache_clear()
+    token_budget_module._fallback_warned_models.clear()
+    set_config_override(
+        {
+            "token_budget": {
+                "model_context_windows": {},
+                "default_context_window": 128_000,
+            }
+        },
+        replace=True,
+    )
+    with patch.object(token_budget_module, "_litellm_max_input_tokens", return_value=None):
+        with _capture_loguru() as messages:
+            result = get_model_max_input_tokens("anthropic-glm-5.2")
+    assert result == 128_000, "the returned value must be unchanged — this is observability only"
+    joined = "\n".join(messages)
+    assert "anthropic-glm-5.2" in joined
+    assert "128000" in joined
+    assert "token_budget.model_context_windows" in joined
+
+
+def test_unknown_model_warns_exactly_once_across_repeated_lookups():
+    """Repeated lookups of the same unresolved model warn only once — the
+    hot-path guard, since this function runs on every LLM call.
+    """
+    token_budget_module._litellm_max_input_tokens.cache_clear()
+    token_budget_module._fallback_warned_models.clear()
+    set_config_override(
+        {
+            "token_budget": {
+                "model_context_windows": {},
+                "default_context_window": 128_000,
+            }
+        },
+        replace=True,
+    )
+    with patch.object(token_budget_module, "_litellm_max_input_tokens", return_value=None):
+        with _capture_loguru() as messages:
+            for _ in range(5):
+                assert get_model_max_input_tokens("repeatedly-unresolved-model") == 128_000
+    assert len(messages) == 1, f"expected exactly one warning firing, got: {messages!r}"

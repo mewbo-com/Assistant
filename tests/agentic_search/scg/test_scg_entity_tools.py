@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from mewbo_core.agent_registry import parse_agent_def
+from mewbo_core.agents.agent_registry import parse_agent_def
 
 SCG_PLUGIN = Path("packages/mewbo_graph/src/mewbo_graph/plugins/scg")
 SCG_AGENTS = SCG_PLUGIN / "agents"

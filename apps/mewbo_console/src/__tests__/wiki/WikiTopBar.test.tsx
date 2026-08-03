@@ -63,10 +63,18 @@ describe("WikiTopBar — responsive chrome", () => {
       />,
     );
     await user.click(screen.getByRole("button", { name: /more wiki actions/i }));
-    expect(await screen.findByRole("menuitem", { name: /open graph/i })).toBeInTheDocument();
+    expect(await screen.findByRole("menuitem", { name: /open outline/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /open graph/i })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /wiki settings/i })).toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: /edit wiki/i })).toBeNull();
     expect(screen.queryByRole("menuitem", { name: /copy readme badge/i })).toBeNull();
+  });
+
+  it("offers the outline as a co-equal action beside the graph, desktop and mobile", async () => {
+    render(<WikiTopBar repo={SLUG} platform="gitea" />);
+    const outline = screen.getByRole("link", { name: /open code outline in new tab/i });
+    expect(outline).toHaveAttribute("href", "/wiki/outline?slug=git.example.com%2Facme%2Fwidgets&platform=gitea");
+    expect(outline).toHaveAttribute("target", "_blank");
   });
 
   it("renders the repo as a linked button carrying the provider glyph", () => {

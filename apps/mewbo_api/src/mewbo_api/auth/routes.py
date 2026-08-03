@@ -11,7 +11,7 @@ mutable module state: the controller is injected via the closure.
 
 Byte-identical-when-disabled: with auth off there is no ``OidcRuntime`` — the
 login/callback/logout routes answer a clean "not configured" and set NO cookie,
-and ``/me`` returns the legacy full-power principal shape so the console renders
+and ``/me`` returns the full-power principal shape so the console renders
 unconditionally.
 """
 
@@ -218,7 +218,7 @@ class AuthRoutesController:
     def me(self) -> Response:
         """Return the caller's profile (200); 401 only when auth is on and anonymous.
 
-        With auth disabled, ``current_principal`` is the legacy full-power
+        With auth disabled, ``current_principal`` is the full-power
         principal, so this returns that shape and the console renders as if a
         full-access user is signed in — the byte-identical-when-disabled contract.
         """

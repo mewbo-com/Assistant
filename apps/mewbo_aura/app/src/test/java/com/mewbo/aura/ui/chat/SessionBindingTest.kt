@@ -162,4 +162,32 @@ class ReseedProjectForBindTest {
         val reseeded = reseedProjectForBind(id = "session-abc", current = current, defaultProjectKey = "some-other-default")
         assertEquals("picked-in-this-chat", reseeded.selectedProjectKey)
     }
+
+    @Test
+    fun `a fresh chat reseeds the auto sentinel like any other default - it is a stored preference`() {
+        // "Auto" is an app-wide default a user can pick in Settings, so it reaches a new chat by the
+        // ordinary reseed path; nothing here needs to know what the key MEANS.
+        val reseeded = reseedProjectForBind(
+            id = null,
+            current = ComposerScope(selectedProjectKey = "some-stale-value"),
+            defaultProjectKey = ComposerScope.AUTO_PROJECT_KEY,
+        )
+        assertEquals(ComposerScope.AUTO_PROJECT_KEY, reseeded.selectedProjectKey)
+        assertTrue(reseeded.isAutoProject)
+    }
+
+    @Test
+    fun `an existing auto session that has already switched keeps the project it switched to`() {
+        // The revisit case the reseed exists for, in its auto-mode form: bind() hydrates
+        // selectedProjectKey from the transcript's newest context event - which after a
+        // switch_project is the project the session actually moved into, NOT the sentinel it opened
+        // with. Reseeding over it would send the next turn back to a scratch cwd mid-conversation.
+        val hydrated = ComposerScope(selectedProjectKey = "acme/beacon")
+        val reseeded = reseedProjectForBind(
+            id = "session-abc",
+            current = hydrated,
+            defaultProjectKey = ComposerScope.AUTO_PROJECT_KEY,
+        )
+        assertEquals("acme/beacon", reseeded.selectedProjectKey)
+    }
 }

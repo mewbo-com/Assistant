@@ -151,6 +151,28 @@ class DocPageNote(BaseModel):
     staleness_reason: str = "clean"
     generation_policy: DocGenerationPolicy = "keep"
     last_indexed_commit: str | None = None
+    # The EVIDENCE behind the verdict above, not a second copy of it.
+    #
+    # ``staleness_reason`` is one of four canned strings — a CATEGORY, which is
+    # all a human skimming a preview needs but not enough for anything to act
+    # on. A later pass cannot recover which anchors actually moved, because the
+    # run's ``ChangeSet``/``GraphDelta`` are in-memory only and discarded the
+    # moment the refresh returns; the page's own verdict was the only durable
+    # trace, and it names nothing.
+    #
+    # These two are the intersections ``_assess`` already computes and would
+    # otherwise discard, so they cost one store field rather than a second pass, and
+    # they are bounded by the PAGE's own anchor count rather than by repository
+    # size — a page with three anchors records at most three keys however large
+    # the change was. The changed FILES are deliberately not stored beside them:
+    # a doc note's anchor keys ARE bare file paths — ``DocStalenessPlanner``
+    # takes them verbatim from the page's frontmatter ``relevantSources`` — so
+    # the file list is already here and persisting it again would be one fact in
+    # two places. (The ``EntityKey`` type also spells ``path#Symbol`` elsewhere,
+    # which is why this reads as a prefix-split and is not one; a
+    # ``split("#")`` over these keys does nothing.)
+    stale_anchor_keys: list[EntityKey] = Field(default_factory=list)
+    deleted_anchor_keys: list[EntityKey] = Field(default_factory=list)
 
 
 # ── Incremental-refresh manifest ────────────────────────────────────────────

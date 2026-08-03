@@ -9,7 +9,7 @@ import androidx.compose.ui.graphics.Brush
 import com.mewbo.aura.ui.theme.AuraColors
 
 /**
- * Context-preserving scrim over the live app during overlay invocation [R4 2026-07-10] —
+ * Context-preserving scrim over the live app during overlay invocation [R4] —
  * supersedes the flat 60%-black Rev E fill: the underlying app stays legible (8–10% dim over its
  * top 60%), with one soft bottom-concentrated ramp (55% at the bottom edge) guaranteeing contrast
  * for the pill, companion chips, and the resting glow over arbitrary bright content. Static and

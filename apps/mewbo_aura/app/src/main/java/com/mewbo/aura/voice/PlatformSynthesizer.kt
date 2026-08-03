@@ -118,11 +118,11 @@ class PlatformSynthesizer @Inject constructor(
             if (tts?.isSpeaking != true) abandonAudioFocus()
         }
 
-        // onDone abandons focus when nothing else is speaking, but
-        // an error on the LAST queued utterance of a turn used to leave focus held (ducking other
-        // apps) until some unrelated later speak()/stop() call - voice/CLAUDE.md's own "abandon on
-        // stop/done" rule didn't cover the error path. Same guard as onDone, since an error means
-        // nothing more is coming for THIS utterance either.
+        // onDone abandons focus when nothing else is speaking; onError needs the SAME guard, or
+        // an error on the LAST queued utterance of a turn leaves focus held (ducking other apps)
+        // until some unrelated later speak()/stop() call - voice/CLAUDE.md's "abandon on
+        // stop/done" rule must cover the error path too, since an error means nothing more is
+        // coming for THIS utterance either.
         @Suppress("OVERRIDE_DEPRECATION")
         override fun onError(utteranceId: String) {
             _events.tryEmit(SynthEvent.Error(utteranceId))

@@ -10,7 +10,7 @@ boundary; the real Flask routes + serialisation run intact.
 
 from mewbo_api import backend
 from mewbo_api.responses import ApiResponseKit
-from mewbo_core.session_store import SessionStore
+from mewbo_core.session.session_store import SessionStore
 
 # The canonical terminated 410 body now lives on the response kit (the ONE home
 # both backend.py and triggers/routes.py import with no cycle — errors.py was
@@ -146,7 +146,7 @@ class TestTerminatedGuards:
     def test_command_fork_rejected_creates_no_session(self, client, auth_headers, tmp_path):
         """The /command route closes the fork-resurrection hole.
 
-        ``fork`` dispatches into ``mewbo_core.commands`` which copies the
+        ``fork`` dispatches into ``mewbo_core.session.commands`` which copies the
         transcript store-directly, bypassing the ``resolve_session`` kill switch —
         so the API-layer terminated guard is the ONLY thing stopping an agent
         from laundering a terminated session into a fresh one. It must 410 AND

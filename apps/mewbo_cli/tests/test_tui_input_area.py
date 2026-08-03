@@ -63,7 +63,7 @@ def test_overlay_shows_file_candidates_on_at():
 def test_overlay_hidden_when_empty():
     """The screen-mounted overlay must not render an empty box with no candidates.
 
-    Regression: its `.input--completion { display: none }` DEFAULT_CSS is scoped
+    Its `.input--completion { display: none }` DEFAULT_CSS is scoped
     to the widget subtree and never reaches the screen-mounted overlay, so
     `display` is driven imperatively. Empty input → hidden; candidates → shown;
     cleared → hidden again.
@@ -146,7 +146,7 @@ def test_escape_dismisses_overlay():
 
 
 def test_cursor_move_out_of_token_hides_stale_overlay():
-    # Regression: moving the caret out of the @token (home) fires no
+    # Moving the caret out of the @token (home) fires no
     # Input.Changed, but the overlay must hide rather than keep stale candidates.
     async def _run() -> None:
         app = _Host(engine=_engine())
@@ -166,7 +166,7 @@ def test_cursor_move_out_of_token_hides_stale_overlay():
 
 
 def test_typing_resets_history_navigation(tmp_path):
-    # Regression: after browsing history, typing must reset the browse
+    # After browsing history, typing must reset the browse
     # cursor so the next up starts fresh (not jump from the stale index) and a
     # later down doesn't discard the user's mid-browse edit.
     async def _run() -> None:

@@ -55,6 +55,16 @@ export interface VisibleGraph {
   edges: CollapsedEdge[];
 }
 
+/** The synthetic top-level bucket the backend mints to hold every ``External``
+ *  node (``folder_tree.py``, minted only when at least one exists — every
+ *  External node's ``parentId`` points here instead of ``null``). It is a
+ *  genuine ``Folder`` node structurally, so ``CollapseModel`` folds/re-points
+ *  it like any other supernode with no special-casing; the ONE thing that
+ *  needs to know its id is ``initialExpanded``, which keeps it collapsed by
+ *  default (see there) so third-party noise doesn't compete with real source
+ *  structure on first paint. */
+export const EXTERNAL_BUCKET_ID = "folder:__external__";
+
 export class CollapseModel {
   // ── State (immutable indices built once) ─────────────────────────
   private readonly nodes: Map<string, KnowledgeGraphNode>;
@@ -83,13 +93,25 @@ export class CollapseModel {
     this.containEdges = graph.edges.filter((e) => e.data.kind === "CONTAINS");
   }
 
-  /** The default expansion: top-level (depth 1) folders only — a folder whose
-   *  parent is null. Everything deeper starts collapsed so the first frame is
-   *  bounded. The screen seeds its ``expanded`` React state with this. */
+  /** The default expansion: top-level (depth 1) SOURCE folders only — a
+   *  folder whose parent is null. Everything deeper starts collapsed so the
+   *  first frame is bounded. The screen seeds its ``expanded`` React state
+   *  with this.
+   *
+   *  The synthetic ``EXTERNAL_BUCKET_ID`` folder is deliberately EXCLUDED
+   *  even though it sits at depth 1 (``parentId: null``) like any other
+   *  top-level folder: a naive depth-1 rule would auto-expand it on every
+   *  first paint, which is exactly the "renders almost nothing but External"
+   *  regression this bucket exists to fix. Real code structure should be
+   *  what a user sees first; third-party noise stays one click away. */
   static initialExpanded(graph: KnowledgeGraph): Set<string> {
     const out = new Set<string>();
     for (const n of graph.nodes) {
-      if (n.data.kind === "Folder" && (n.data.parentId ?? null) === null) {
+      if (
+        n.data.kind === "Folder" &&
+        (n.data.parentId ?? null) === null &&
+        n.data.id !== EXTERNAL_BUCKET_ID
+      ) {
         out.add(n.data.id);
       }
     }

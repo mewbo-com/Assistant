@@ -1,4 +1,4 @@
-.PHONY: bootstrap lint lint-fix typecheck precommit-install vendor-aider openapi docs docs-build aura-apk aura-release aura-install demo-build demo-up demo-seed demo-shots-web demo-down demo
+.PHONY: ssm-bootstrap redeploy bootstrap lint lint-fix typecheck precommit-install vendor-aider openapi docs docs-build aura-apk aura-release aura-install demo-build demo-up demo-seed demo-shots-web demo-down demo
 
 VENV ?= .venv
 DOCS_ADDR ?= 0.0.0.0:8000
@@ -6,6 +6,25 @@ ANDROID_HOME ?= $(HOME)/android-sdk
 AURA_DIR := apps/mewbo_aura
 AURA_SERIAL ?= localhost:5555
 DEMO_COMPOSE := docker compose -f demo/docker-compose.demo.yml --env-file demo/demo.env
+
+ssm-bootstrap:
+	@# Bind this checkout to the deployment's secrets project/configuration.
+	@# The binding is written to a gitignored .ssm/, which is the whole point:
+	@# the identifiers are supplied here, at run time, by whoever deploys — so
+	@# no project or configuration name is ever committed. Pass them in:
+	@#   make ssm-bootstrap SSM_PROJECT=<slug> SSM_CONFIG=<slug>
+	@test -n "$(SSM_PROJECT)" || { echo "SSM_PROJECT is required"; exit 1; }
+	@test -n "$(SSM_CONFIG)" || { echo "SSM_CONFIG is required"; exit 1; }
+	@command -v ssm >/dev/null || { echo "the ssm CLI is not on PATH"; exit 1; }
+	ssm setup --project "$(SSM_PROJECT)" --config "$(SSM_CONFIG)" --local-only
+	@echo "Bound. 'make redeploy' now resolves secrets without any flags."
+
+redeploy:
+	@# Rebuild + redeploy the stack. Secrets are fetched at run time from the
+	@# binding above; nothing is read out of the working tree.
+	@command -v ssm >/dev/null || { echo "the ssm CLI is not on PATH"; exit 1; }
+	@test -f .ssm/config.json || { echo "not bound yet — run 'make ssm-bootstrap' first"; exit 1; }
+	bash scripts/deploy/redeploy.sh
 
 bootstrap:
 	uv venv $(VENV)
@@ -32,11 +51,14 @@ vendor-aider:
 openapi:
 	uv run python scripts/ci/generate_openapi_spec.py
 
+# Serving is deliberately non-strict: mkdocs.yml sets strict, and an in-progress
+# link would otherwise abort the first build and exit the server while authoring.
 docs:
-	uv run --group docs mkdocs serve --dev-addr $(DOCS_ADDR)
+	uv run --group docs mkdocs serve --no-strict --dev-addr $(DOCS_ADDR)
 
+# Strictness comes from mkdocs.yml so every caller gets it, this one included.
 docs-build:
-	uv run --group docs mkdocs build --strict
+	uv run --group docs mkdocs build
 
 aura-apk:
 	cd $(AURA_DIR) && ANDROID_HOME=$(ANDROID_HOME) ./gradlew :app:assembleDebug

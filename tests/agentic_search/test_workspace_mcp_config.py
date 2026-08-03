@@ -59,7 +59,7 @@ def store() -> JsonAgenticSearchStore:
 def _stub_merged_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stub the merged-MCP-config read at the single binding in ``mcp_config``."""
     monkeypatch.setattr(
-        mcp_config_mod, "get_merged_mcp_config", lambda project=None: _MERGED
+        mcp_config_mod, "get_merged_mcp_config", lambda project=None, **_kw: _MERGED
     )
 
 

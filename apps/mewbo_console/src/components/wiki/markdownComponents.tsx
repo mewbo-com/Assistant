@@ -11,8 +11,9 @@
  *
  * The map is parameterised by callbacks (internal-page navigation, mermaid
  * zoom) so each consumer wires its own behaviour without forking the styles.
- * Mermaid is opt-in (`enableMermaid`) — Q&A answers never contain diagrams,
- * so `LiveBlocks` leaves it off and the mermaid module never loads there.
+ * Mermaid is opt-in (`enableMermaid`) — both the wiki page renderer and the
+ * streaming Q&A renderer turn it on; a QA diagram is validated at the
+ * backend `wiki_emit_answer` seam before it ever reaches this renderer.
  *
  * Citation chips: a `[label](src:path#L1-9)` link (or a `path:line` /
  * `path#L..` bare-text fallback) renders as an accent CHIP. Clicking it opens
@@ -22,7 +23,7 @@
  * matching `SourceCard` via the shared `CitationRef.domId` id.
  */
 
-import { createContext, useContext, useMemo, type ReactNode } from "react";
+import { createContext, isValidElement, useContext, useMemo, type ReactNode } from "react";
 import {
   defaultUrlTransform,
   type Components,
@@ -40,8 +41,8 @@ import type { PlatformId } from "./router";
  * Resolves a cited source to an external "open the file in its repo" URL
  * (host-aware blob link at the cited line range) — see
  * ``indexedSnapshot.ts:IndexedSnapshot.sourceUrl``. Returns ``null`` when the
- * project has no resolvable repo (legacy record, azure/generic-git host), in
- * which case the chip falls back to its scroll-to-card behaviour.
+ * project has no resolvable repo (azure/generic-git host, or none recorded),
+ * in which case the chip falls back to its scroll-to-card behaviour.
  *
  * Injected via context so the three SrcChip call sites (the markdown ``a``
  * renderer, the streaming inline-atom path, and the wiki-page sources block)
@@ -110,6 +111,24 @@ function stableId(src: string, prefix: string): string {
     h = ((h << 5) + h + src.charCodeAt(i)) | 0;
   }
   return `${prefix}-${(h >>> 0).toString(36)}`;
+}
+
+/**
+ * Recovers the raw source text behind a rendered children tree. rehype-
+ * highlight replaces a fenced block's single text child with an array of
+ * per-token `<span>` elements interleaved with plain strings, so
+ * `String(children)` stringifies each element to `[object Object]` instead
+ * of reading it. Only the string/number leaves carry real text; everything
+ * else is walked via its own `children` prop.
+ */
+function flattenToText(node: ReactNode): string {
+  if (node == null || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(flattenToText).join("");
+  if (isValidElement(node)) {
+    return flattenToText((node.props as { children?: ReactNode }).children);
+  }
+  return "";
 }
 
 export interface MarkdownComponentOptions {
@@ -212,7 +231,7 @@ export function buildMarkdownComponents(opts: MarkdownComponentOptions): Compone
     // ── Code: mermaid fences, fenced blocks, inline code ───────────────
     code({ className, children, ...rest }) {
       const lang = /language-(\w+)/.exec(className ?? "")?.[1];
-      const text = String(children ?? "").replace(/\n$/, "");
+      const text = flattenToText(children).replace(/\n$/, "");
       if (enableMermaid && lang === "mermaid") {
         const id = stableId(text, "wiki-d");
         return (
@@ -229,7 +248,7 @@ export function buildMarkdownComponents(opts: MarkdownComponentOptions): Compone
       if (isBlock) {
         return (
           <pre className="my-4 overflow-x-auto rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--code-body))] text-[hsl(var(--code-fg))] p-3 text-sm font-mono leading-[1.55] [&_code.hljs]:bg-transparent [&_code.hljs]:p-0">
-            <code className={cn("hljs", className)}>{text}</code>
+            <code className={cn("hljs", className)}>{children}</code>
           </pre>
         );
       }

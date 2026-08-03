@@ -53,7 +53,7 @@ object AuraType {
 
     /**
      * The payload line of a promoted-tool action card (`ui/chat/toolcards/`) - the alarm's "8:00 AM".
-     * Reference-measured on a GMS device 2026-07-12 (158px line box @560dpi ⇒ 45dp ⇒ 36/44).
+     * Reference-measured on a GMS device (158px line box @560dpi ⇒ 45dp ⇒ 36/44).
      *
      * Its own token rather than [greetingDisplay] (32/40) deliberately: that style was measured for
      * the full-screen landing greeting, and borrowing it here would silently couple the card's
@@ -84,13 +84,13 @@ object AuraType {
     val wordmark = titleBar.copy(fontSize = 24.sp)
 
     /**
-     * Compact scale (user directive 2026-07-04): 16sp / 23sp — supersedes the Rev F/181 measured
+     * Compact scale (user directive): 16sp / 23sp — supersedes the Rev F/181 measured
      * value of 18sp / 26sp (itself the product of a round-3 multi-line re-measurement, 14 line
      * transitions, ink+leading = 26.0dp exact, against the reference app). The user found the
      * resulting type too large with no hierarchy and asked for a smaller, denser scale; do not
      * chase reference parity back up.
      *
-     * Breathability retune, user directive 2026-07-04 round 2: lineHeight 23sp → 24sp (16sp size
+     * Breathability retune, user directive round 2: lineHeight 23sp → 24sp (16sp size
      * stays) — line height a "tiny tad bit more spacious", font sizes are right and untouched.
      */
     val bodyMessage = TextStyle(
@@ -100,18 +100,18 @@ object AuraType {
         lineHeight = 24.sp,
     )
 
-    /** Overlay composer field + "Ask Mewbo" invitation [R4 2026-07-10]: the invitation is set
+    /** Overlay composer field + "Ask Mewbo" invitation [R4]: the invitation is set
      * comfortably title-scale so the pill reads as a conversation surface; the typed text shares
      * it so placeholder→text never jumps size. Overlay-only — the docked composer stays
      * [bodyMessage] (16sp). */
     val composerOverlay = bodyMessage.copy(fontSize = 20.sp, lineHeight = 26.sp)
 
     /**
-     * Compact scale (user directive 2026-07-04): 16sp / 22sp — supersedes the Rev F/181 measured
+     * Compact scale (user directive): 16sp / 22sp — supersedes the Rev F/181 measured
      * value of 18sp / 24sp, part of the same across-the-board type-scale reduction as
      * [bodyMessage]. Do not chase reference parity back up.
      *
-     * Breathability retune, user directive 2026-07-04 round 2: lineHeight 22sp → 23sp (16sp size
+     * Breathability retune, user directive round 2: lineHeight 22sp → 23sp (16sp size
      * stays) — line height a "tiny tad bit more spacious", font sizes are right and untouched.
      */
     val listItem = TextStyle(
@@ -122,8 +122,8 @@ object AuraType {
     )
 
     /**
-     * Markdown heading ramp for assistant responses — compact scale (user directive 2026-07-04):
-     * this ramp is the reference-app-measured ramp (2026-07-03 GMS redroid cap-height parity
+     * Markdown heading ramp for assistant responses — compact scale (user directive):
+     * this ramp is the reference-app-measured ramp (GMS redroid cap-height parity
      * capture, 28/24/20sp) scaled down one step per the compact-scale directive, landing at
      * 24/20/18sp. That measured capture is no longer the governing source for the absolute
      * values — do not chase reference parity back up. H2/H3 still carry Medium (the measured
@@ -151,7 +151,7 @@ object AuraType {
     )
 
     /**
-     * Compact scale (user directive 2026-07-04): 14sp / 18sp — supersedes the previous 16sp /
+     * Compact scale (user directive): 14sp / 18sp — supersedes the previous 16sp /
      * 20sp value as part of the across-the-board type-scale reduction. Do not chase reference
      * parity back up.
      */
@@ -164,7 +164,7 @@ object AuraType {
     )
 
     /**
-     * Compact scale (user directive 2026-07-04): 14sp — supersedes the previous 16sp value as
+     * Compact scale (user directive): 14sp — supersedes the previous 16sp value as
      * part of the across-the-board type-scale reduction. Do not chase reference parity back up.
      */
     val metaTrailing = TextStyle(
@@ -175,11 +175,11 @@ object AuraType {
     )
 
     /**
-     * Compact scale (user directive 2026-07-04): 12sp / 16sp — supersedes the previous 14sp /
+     * Compact scale (user directive): 12sp / 16sp — supersedes the previous 14sp /
      * 18sp value as part of the across-the-board type-scale reduction. Do not chase reference
      * parity back up.
      *
-     * Breathability retune, user directive 2026-07-04 round 2: lineHeight 16sp → 17sp (12sp size
+     * Breathability retune, user directive round 2: lineHeight 16sp → 17sp (12sp size
      * stays) — line height a "tiny tad bit more spacious", font sizes are right and untouched.
      */
     val caption = TextStyle(
@@ -193,7 +193,7 @@ object AuraType {
     /** Spec §6.11: activity chip labels default to `textSecondary`; other chip-family uses (e.g.
      * §6.2 C5's context chip) may override via `Text(style = AuraType.chipLabel, color = ...)`.
      *
-     * Compact scale (user directive 2026-07-04): 13sp — supersedes the spec §4 value of 15sp as
+     * Compact scale (user directive): 13sp — supersedes the spec §4 value of 15sp as
      * part of the across-the-board type-scale reduction. Do not chase reference parity back up. */
     val chipLabel = TextStyle(
         fontFamily = FigtreeFamily,

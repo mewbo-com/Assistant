@@ -3,7 +3,7 @@ import { SEED } from "./shots";
 
 /**
  * Shot 07 — a session with an inline rendered widget: the trending
- * agent-harness-repositories card grid, booted from a seeded `widget_ready`
+ * acme-repositories card grid, booted from a seeded `widget_ready`
  * event (files inlined in the bundle — no LLM, no network, no live stlite
  * fetch). The widget is built from NATIVE Streamlit components
  * (st.container(border=True) cards in st.columns, native st.markdown / st.caption
@@ -20,14 +20,18 @@ import { SEED } from "./shots";
  * AND the staleness signal (a repository added or removed in the bundle, or the
  * progress bar dropped, breaks this test by design).
  *
- * The grid is 6 (2 rows x 3 cols) of UNIFORM `height=200` bordered containers
- * ON PURPOSE: the widget renders at natural scale (no zoom — fractional zoom
- * made every glyph land on fractional pixels and janked the text), and the
- * console caps a widget card at min(600px, 70vh) with internal scroll beyond
- * it. Fixed-height cards keep the rows even despite per-description wrap
- * differences, and the whole app (~548px + chrome) fits the cap with slack,
- * so nothing scrolls or clips and the grid paints as one deterministic block.
- * See demo/CLAUDE.md.
+ * The grid is 6 (2 rows x 3 cols) of NATURAL-height `st.container(border=True)`
+ * cards ON PURPOSE — `st.container(height=N)` was tried and rejected (it
+ * reserves a scrollbar gutter that narrows content by ~10px, wrapping the
+ * longest bold title and clipping its progress bar; see demo/CLAUDE.md's
+ * Phase-3 trap table). Even row heights instead come from every card
+ * rendering the SAME line counts (titles clip to fit one line, descriptions
+ * always two caption lines). The widget renders at natural scale (no zoom —
+ * fractional zoom made every glyph land on fractional pixels and janked the
+ * text), and the console caps a widget card at min(600px, 70vh) with
+ * internal scroll beyond it; the whole app (~548px + chrome) fits the cap
+ * with slack, so nothing scrolls or clips and the grid paints as one
+ * deterministic block. See demo/CLAUDE.md.
  *
  * Viewport is 1280x960 (4:3), matching this shot's aspect ratio — distinct from
  * the console closeups above, which follow the reference raster's own ratio.
@@ -49,6 +53,14 @@ test("widgets — inline stlite widget with repo cards", async ({
   // sidebar row (the strict-mode multi-match trap in demo/CLAUDE.md).
   const bars = page.locator('[data-testid="stProgress"]');
   await expect(bars).toHaveCount(6, { timeout: 60_000 });
+
+  // The bar COUNT alone only proves 6 cards exist — a data.json swapped to 6
+  // DIFFERENT repositories (or re-ranked so a different one leads) still
+  // passes. Anchor on the rank-#1 card's own title text too. Unlike the
+  // widget/session TITLE (documented strict-mode trap in demo/CLAUDE.md — it
+  // also matches the sidebar row and the session h2), the repo name is
+  // unique to this one rendered card.
+  await expect(page.getByText(SEED.session.widgetTopRepo, { exact: false })).toBeVisible();
 
   // Park the pointer in the corner so no card is left in a :hover state
   // (openSession leaves the pointer wherever it clicked the row).

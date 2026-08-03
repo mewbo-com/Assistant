@@ -29,7 +29,7 @@ def store(tmp_path: Path):
 
 @pytest.fixture()
 def client(monkeypatch, store):
-    monkeypatch.setenv("MASTER_API_TOKEN", API_KEY)
+    monkeypatch.setenv("MEWBO_MASTER_API_TOKEN", API_KEY)
     monkeypatch.setattr("mewbo_api.backend.MASTER_API_TOKEN", API_KEY, raising=False)
 
     import mewbo_api.wiki.routes as routes_mod
@@ -190,7 +190,7 @@ def test_get_settings_without_a_credential(client, store) -> None:
 
 
 def test_get_settings_reconstructs_for_a_legacy_project(client, store) -> None:
-    """A project onboarded before the record existed still shows real settings —
+    """A project first indexed before the record existed still shows real settings —
     read off the newest job submission, which is what a refresh would replay."""
     c, st = client
     st.create_project(

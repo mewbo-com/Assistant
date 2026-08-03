@@ -2,7 +2,7 @@
 
 ``init_structured`` wires the namespace and captures the session runtime. See
 ``routes.py`` for the wire contract; the engine is
-``mewbo_core.structured_response.StructuredResponder`` (down-only compose).
+``mewbo_core.loop.structured_response.StructuredResponder`` (down-only compose).
 """
 from .routes import init_structured, structured_ns
 

@@ -18,7 +18,7 @@ from __future__ import annotations
 from mewbo_api import backend
 from mewbo_api.repo_identity import RepoIdentity
 from mewbo_core.config import get_config
-from mewbo_core.session_store import SessionStore
+from mewbo_core.session.session_store import SessionStore
 
 
 def _reset_backend(tmp_path, monkeypatch):
@@ -361,7 +361,7 @@ class TestResolveByAlias:
             if path == p1.path:
                 return [RepoIdentity(host="github.com", owner="bearlike", repo="Assistant")]
             if path == p2.path:
-                return [RepoIdentity(host="git.example.com", owner="kk", repo="Assistant")]
+                return [RepoIdentity(host="git.example.com", owner="acme", repo="Assistant")]
             return []
 
         monkeypatch.setattr(RepoIdentity, "for_path", staticmethod(fake_for_path))

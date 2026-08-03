@@ -37,7 +37,7 @@ from mewbo_api.agentic_search.scg.run_streamer import (
 )
 from mewbo_api.agentic_search.schemas import RunRecord, Workspace, utc_now_iso
 from mewbo_api.agentic_search.store import JsonAgenticSearchStore
-from mewbo_core.session_event_bus import SessionEventBus
+from mewbo_core.session.session_event_bus import SessionEventBus
 from mewbo_graph.plugins.scg.results import ScgResultsArgs, ScgResultsTool
 
 # ---------------------------------------------------------------------------

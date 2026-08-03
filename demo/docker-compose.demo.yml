@@ -45,7 +45,7 @@ services:
     environment:
       - MEWBO_MONGODB_URI=mongodb://mongo:27017
       - MEWBO_MONGODB_DATABASE=${DEMO_MONGODB_DATABASE}
-      - MASTER_API_TOKEN=${DEMO_API_KEY}
+      - MEWBO_MASTER_API_TOKEN=${DEMO_API_KEY}
       - MEWBO_HOME=/app/data
       # Render the fixture source catalog on GET /api/agentic_search/sources so
       # seeded workspaces resolve their integration chips (the store's own

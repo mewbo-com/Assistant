@@ -321,9 +321,9 @@ def test_injected_context_file_is_never_read_into_the_spec(apps_root):
 
 
 # ---------------------------------------------------------------------------
-# Pipeline schedule / on_demand — Phase 1 (platform-armed, agent never
-# sets trigger_ref). Unit-level: exercises SubmitPipelineArgs/PipelineSchedule
-# directly, independent of AppSpec/PipelineSpec (the models agent's surface).
+# Pipeline schedule / on_demand — platform-armed; the agent never sets
+# trigger_ref. Unit-level: exercises SubmitPipelineArgs/PipelineSchedule
+# directly, independent of AppSpec/PipelineSpec.
 # ---------------------------------------------------------------------------
 
 
@@ -589,10 +589,10 @@ def test_pipeline_timeout_seconds_defaults_and_bounds():
 
 
 # ---------------------------------------------------------------------------
-# Code-pipeline entrypoint existence + lint routing (Phase 2) — exercised
-# at the tool level BEFORE AppSpec/PipelineSpec construction, since that model
-# (workstream C) doesn't carry mode/entrypoint/params_schema/cache_ttl_seconds
-# yet — see SubmitAppTool._missing_pipeline_entrypoints / _lint_frontend.
+# Code-pipeline entrypoint existence + lint routing — exercised at the tool
+# level BEFORE AppSpec/PipelineSpec construction, since that model does not
+# carry mode/entrypoint/params_schema/cache_ttl_seconds; see
+# SubmitAppTool._missing_pipeline_entrypoints / _lint_frontend.
 # ---------------------------------------------------------------------------
 
 

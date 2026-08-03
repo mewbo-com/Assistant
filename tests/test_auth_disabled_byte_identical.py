@@ -90,7 +90,7 @@ def _clean_probe_env(mewbo_home: Path, *, master_token: str = _TEST_MASTER_TOKEN
         "PATH": os.environ.get("PATH", ""),
         "HOME": str(mewbo_home.parent / "userhome"),
         "MEWBO_HOME": str(mewbo_home),
-        "MASTER_API_TOKEN": master_token,
+        "MEWBO_MASTER_API_TOKEN": master_token,
     }
 
 

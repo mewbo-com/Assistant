@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 from mewbo_core.config import StorageConfig
-from mewbo_core.session_store import SessionStore, SessionStoreBase, create_session_store
+from mewbo_core.session.session_store import SessionStore, SessionStoreBase, create_session_store
 from pydantic import ValidationError
 
 
@@ -129,7 +129,7 @@ def test_append_event_dropped_after_terminate(tmp_path):
 
     store.terminate_session(session_id)
 
-    with patch("mewbo_core.session_store.logging") as mock_logging:
+    with patch("mewbo_core.session.session_store.logging") as mock_logging:
         store.append_event(session_id, {"type": "user", "payload": {"text": "after-1"}})
         store.append_event(session_id, {"type": "user", "payload": {"text": "after-2"}})
         # Two dropped appends, one structured-log call.
@@ -160,7 +160,7 @@ def test_session_store_terminate_isolated(tmp_path):
 
 def test_create_session_store_default_json(tmp_path):
     """Factory returns SessionStore (json) when no driver is configured."""
-    with patch("mewbo_core.session_store.get_config_value", return_value="json"):
+    with patch("mewbo_core.session.session_store.get_config_value", return_value="json"):
         store = create_session_store(root_dir=str(tmp_path))
     assert isinstance(store, SessionStore)
     assert isinstance(store, SessionStoreBase)
@@ -169,11 +169,11 @@ def test_create_session_store_default_json(tmp_path):
 def test_create_session_store_mongodb(tmp_path):
     """Factory returns MongoSessionStore when driver is 'mongodb'."""
     import mongomock
-    from mewbo_core.session_store_mongo import MongoSessionStore
+    from mewbo_core.session.session_store_mongo import MongoSessionStore
 
     with (
-        patch("mewbo_core.session_store.get_config_value", return_value="mongodb"),
-        patch("mewbo_core.session_store_mongo.MongoClient", mongomock.MongoClient),
+        patch("mewbo_core.session.session_store.get_config_value", return_value="mongodb"),
+        patch("mewbo_core.session.session_store_mongo.MongoClient", mongomock.MongoClient),
     ):
         store = create_session_store(root_dir=str(tmp_path))
     assert isinstance(store, MongoSessionStore)
@@ -229,7 +229,7 @@ def test_fork_session_at(tmp_path):
 
 def test_last_attestation_hash_defaults_genesis(tmp_path):
     """No attestation events yet -> genesis hash."""
-    from mewbo_core.attestation import GENESIS_HASH
+    from mewbo_core.agents.attestation import GENESIS_HASH
 
     store = SessionStore(root_dir=str(tmp_path))
     session_id = store.create_session()
@@ -253,7 +253,7 @@ def test_last_attestation_hash_reads_most_recent_record(tmp_path):
 
 def test_last_attestation_hash_reseeds_chain_continuously(tmp_path):
     """A chain re-seeded from a pre-existing tail links continuously (recovery)."""
-    from mewbo_core.attestation import AttestationChain
+    from mewbo_core.agents.attestation import AttestationChain
 
     store = SessionStore(root_dir=str(tmp_path))
     session_id = store.create_session()
@@ -317,9 +317,9 @@ def test_unknown_storage_driver_raises():
 def test_create_session_store_mongodb_unreachable(tmp_path):
     """Factory raises RuntimeError when MongoDB is unreachable."""
     with (
-        patch("mewbo_core.session_store.get_config_value", return_value="mongodb"),
+        patch("mewbo_core.session.session_store.get_config_value", return_value="mongodb"),
         patch(
-            "mewbo_core.session_store_mongo.MongoClient",
+            "mewbo_core.session.session_store_mongo.MongoClient",
             side_effect=Exception("connection refused"),
         ),
     ):

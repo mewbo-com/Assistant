@@ -9,6 +9,7 @@ on:
       - "apps/mewbo_mcp/**"
       - "apps/mewbo_ha_conversation/**"
       - "tests/**"
+      - "demo/seeder/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/coverage.yml"

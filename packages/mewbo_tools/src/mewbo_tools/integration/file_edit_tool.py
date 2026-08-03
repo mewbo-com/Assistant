@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from mewbo_core.classes import AbstractTool, ActionStep
 from mewbo_core.common import get_mock_speaker
-from mewbo_core.errors import ToolInputError
+from mewbo_core.contracts.errors import ToolInputError
 
 from mewbo_tools.integration.edit_common import (
     build_unified_diff,
@@ -47,7 +47,7 @@ class FileEditTool(AbstractTool):
     def set_state(self, action_step: ActionStep | None = None):
         """Apply the replacement and return a diff."""
         request = _parse_request(action_step)
-        abs_path = resolve_and_validate_path(request.file_path, request.root)
+        abs_path = resolve_and_validate_path(request.file_path, request.root, write=True)
         targets = {request.file_path: abs_path}
         before_map = read_file_contents(targets)
         new_content = _apply_edit(before_map[request.file_path], request)

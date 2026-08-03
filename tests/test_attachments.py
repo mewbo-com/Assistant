@@ -1,16 +1,16 @@
-"""Tests for ``mewbo_core.attachments`` and context loading of attachments."""
+"""Tests for ``mewbo_core.session.attachments`` and context loading of attachments."""
 
 from __future__ import annotations
 
 import os
 
-from mewbo_core import attachments
-from mewbo_core.context import (
+from mewbo_core.session import attachments
+from mewbo_core.session.context import (
     ContextBuilder,
     _load_attachment_images,
     _load_attachment_texts,
 )
-from mewbo_core.session_store import SessionStore
+from mewbo_core.session.session_store import SessionStore
 
 
 def test_is_image_and_is_supported():
@@ -140,12 +140,12 @@ def test_load_attachment_images_only_for_vision_models(tmp_path, monkeypatch):
 
     # Force the vision check so the test is hermetic against LiteLLM's catalogue.
     monkeypatch.setattr(
-        "mewbo_core.context.model_supports_vision", lambda _m: False
+        "mewbo_core.session.context.model_supports_vision", lambda _m: False
     )
     assert _load_attachment_images(store.session_dir(session_id), events, "any") == []
 
     monkeypatch.setattr(
-        "mewbo_core.context.model_supports_vision", lambda _m: True
+        "mewbo_core.session.context.model_supports_vision", lambda _m: True
     )
     parts = _load_attachment_images(store.session_dir(session_id), events, "vision-model")
     assert len(parts) == 1
@@ -164,7 +164,7 @@ def test_context_builder_populates_attachments(tmp_path, monkeypatch):
         raw_bytes=b"\x89PNG\r\n\x1a\n" + b"\x00" * 16,
     )
     monkeypatch.setattr(
-        "mewbo_core.context.model_supports_vision", lambda _m: True
+        "mewbo_core.session.context.model_supports_vision", lambda _m: True
     )
     builder = ContextBuilder(store)
     snap = builder.build(session_id, user_query="describe", model_name="vision-model")

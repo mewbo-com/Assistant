@@ -2,8 +2,8 @@
 
 Centrepiece: a structured run that binds a *search workspace* should go
 **graph-first** — route → spawn a probe per pathway → aggregate → emit — instead
-of the wiki-grounded single-agent default. Per ``docs/features-structured-outputs.md``
-the run stays an ORDINARY agentic session (the same ``StructuredResponder`` /
+of the wiki-grounded single-agent default. The run stays an ORDINARY agentic
+session (the same ``StructuredResponder`` /
 ``ToolUseLoop`` — NOT a separate execution path); the graph-first discipline is a
 schema constraint + a capability grant + a playbook layered on top.
 
@@ -13,7 +13,7 @@ This atomic class is the thin app-side composition seam. Given a resolved
 * builds the ONE workspace-binding seam (:class:`WorkspaceGraphBinding`) — the
   ``scg`` capability advertisement, the connector grant ∪ traversal verbs, the
   quarantined untrusted instructions, and the ``ScgScope`` source scope;
-* injects them into a :class:`~mewbo_core.structured_response.StructuredResponder`
+* injects them into a :class:`~mewbo_core.loop.structured_response.StructuredResponder`
   via its additive graph-first seam (``capabilities`` / ``context_events`` /
   ``extra_instructions`` / ``scope_factory``) plus the ``scg-search-structured``
   playbook so the terminal is the schema-validated ``emit_result``;
@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mewbo_core.common import get_logger
-from mewbo_core.structured_response import StructuredResponder, StructuredResponseError
+from mewbo_core.loop.structured_response import StructuredResponder, StructuredResponseError
 
 from ..catalog import SourceCatalog
 from ..mcp_config import WorkspaceMcpConfig

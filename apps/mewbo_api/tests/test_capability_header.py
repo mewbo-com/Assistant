@@ -2,7 +2,7 @@
 
 # mypy: ignore-errors
 from mewbo_api import backend
-from mewbo_core.session_store import SessionStore
+from mewbo_core.session.session_store import SessionStore
 
 
 def _reset_backend(tmp_path, monkeypatch):

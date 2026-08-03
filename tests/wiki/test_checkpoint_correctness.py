@@ -1,11 +1,10 @@
 """Checkpoint correctness — fail-closed resume, commit pinning, honest finalize.
 
-Each test here pins a specific way the indexing pipeline used to lose or fake
-work: a store read failure read as "nothing is built" (and rebuilt everything), a
-commit pin that erased its own record, a resume that re-cloned a tree it already
-had, a clone directory nothing ever reaped, and a finalize that reported success
-with no pages. Only I/O is stubbed — the real ``ResumePlan`` / tool / store code
-paths run.
+Each test here pins a specific way the indexing pipeline can lose or fake work:
+a store read failure read as "nothing is built" (and rebuilding everything), a
+commit pin erasing its own record, a resume re-cloning a tree it already had, a
+clone directory nothing reaps, and a finalize reporting success with no pages.
+Only I/O is stubbed — the real ``ResumePlan`` / tool / store code paths run.
 """
 from __future__ import annotations
 
@@ -128,9 +127,9 @@ def _run_clone(store: JsonWikiStore, session: str, tool_input: dict, recorder):
 def test_resume_refuses_when_graph_count_read_fails(tmp_path: Path) -> None:
     """A store read that RAISES must not be read as "nothing is built".
 
-    The regression this pins: the count swallowed every exception and returned 0,
-    so a transient read failure selected the full-rebuild branch — a complete
-    re-index plus a re-embedding pass — silently and with no log line.
+    A count that swallows every exception and returns 0 makes a transient read
+    failure select the full-rebuild branch — a complete re-index plus a
+    re-embedding pass — silently and with no log line.
     """
 
     class _RaisingGraph(JsonWikiStore):
@@ -577,7 +576,7 @@ def test_fallback_ladder_survives_submission_settings_submission() -> None:
     """``refresh`` rebuilds its submission from the settings record.
 
     So a ladder the record cannot carry is dropped from every index after the
-    first — silently, and for a project that WAS onboarded with one.
+    first — silently, and for a project that WAS first indexed with one.
     """
     from mewbo_graph.wiki.types import ProjectSettings, WizardSubmission
 
@@ -632,7 +631,7 @@ def test_agentic_search_declares_the_poll_exemption() -> None:
     via ``getattr``; this reproduces that read + the guard's matching decision,
     so the declaration can never silently drop off the class.
     """
-    from mewbo_core.llm_resilience import PollClassRule
+    from mewbo_core.llm.llm_resilience import PollClassRule
     from mewbo_graph.plugins.scg.search import AgenticSearchTool
 
     when_args = tuple(getattr(AgenticSearchTool, "poll_when_args", ()) or ())

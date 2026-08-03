@@ -8,15 +8,11 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from langchain_core.messages import AIMessage, AIMessageChunk, SystemMessage
-from mewbo_core.agent_context import AgentContext
+from mewbo_core.agents.agent_context import AgentContext
+from mewbo_core.agents.hypervisor import AgentHandle, AgentHypervisor, DelegationContract
 from mewbo_core.classes import ActionStep, OrchestrationState, Plan, PlanStep
-from mewbo_core.context import ContextSnapshot
 from mewbo_core.hooks import HookManager
-from mewbo_core.hypervisor import AgentHandle, AgentHypervisor, DelegationContract
-from mewbo_core.permissions import PermissionDecision, PermissionPolicy
-from mewbo_core.token_budget import TokenBudget
-from mewbo_core.tool_registry import ToolRegistry, ToolSpec
-from mewbo_core.tool_use_loop import (
+from mewbo_core.loop.tool_use_loop import (
     _ANSI_ESCAPE_RE,
     ToolUseLoop,
     _CachedFileRead,
@@ -24,6 +20,10 @@ from mewbo_core.tool_use_loop import (
     _infer_operation,
     _session_tool_error_envelope,
 )
+from mewbo_core.permissions import PermissionDecision, PermissionPolicy
+from mewbo_core.session.context import ContextSnapshot
+from mewbo_core.session.token_budget import TokenBudget
+from mewbo_core.tooling.tool_registry import ToolRegistry, ToolSpec
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -126,16 +126,16 @@ def _tool_call_response(tool_id: str, args: dict, call_id: str = "call_1") -> AI
 class TestSpawnScopedByAllowlist:
     """A leaf agent scoped without spawn_agent must not be able to delegate.
 
-    Regression for the widget-builder recursion storm (mobile session
-    8c04e341…): the st-widget-builder's ``tools:`` allowlist omits spawn_agent,
-    yet spawn was injected on depth alone (``can_spawn``), bypassing the
-    allowlist — so each builder spawned another builder into copies of itself,
-    stopped only by the depth cap. Spawning must honour the tool scope: an
-    explicit allowlist that omits spawn_agent means no delegation.
+    The widget-builder recursion storm this closes: the st-widget-builder's
+    ``tools:`` allowlist omits spawn_agent, so injecting spawn on depth alone
+    (``can_spawn``) bypasses the allowlist — each builder then spawns another
+    builder into copies of itself, stopped only by the depth cap. Spawning must
+    honour the tool scope: an explicit allowlist that omits spawn_agent means
+    no delegation.
     """
 
     def _build_loop(self, allowed_tools, *, strict_tool_scope=False):
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
             mock_build.return_value = MagicMock()
             mock_build.return_value.bind_tools.return_value = MagicMock()
             return ToolUseLoop(
@@ -164,7 +164,7 @@ class TestSpawnScopedByAllowlist:
         assert loop._spawn_agent_tool is not None
 
     def test_permissive_allowlist_without_spawn_agent_keeps_spawning(self):
-        # FE regression (session 04ea546e…): the console/Aura pass
+        # The console/Aura pass
         # ``allowed_tools = context.mcp_tools`` — a PERMISSIVE ceiling that only
         # scopes MCP tools (built-ins stay) and never lists the internal
         # spawn_agent. Treating that ceiling as an authoritative allowlist
@@ -284,7 +284,7 @@ class TestToolUseLoopTextResponse:
         bound = MagicMock()
         bound.ainvoke = fake_model.ainvoke
 
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
             mock_build.return_value = MagicMock()
             mock_build.return_value.bind_tools.return_value = bound
 
@@ -328,7 +328,7 @@ class TestToolUseLoopToolCall:
         mock_tool.run.return_value = mock_speaker
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
             patch.object(registry, "get", return_value=mock_tool),
         ):
             mock_build.return_value = MagicMock()
@@ -377,7 +377,7 @@ class TestToolUseLoopNaturalCompletion:
         mock_tool.run.return_value = mock_speaker
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
             patch.object(registry, "get", return_value=mock_tool),
         ):
             mock_build.return_value = MagicMock()
@@ -423,7 +423,7 @@ class TestToolUseLoopNaturalCompletion:
         mock_tool.run.return_value = mock_speaker
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
             patch.object(registry, "get", return_value=mock_tool),
         ):
             mock_build.return_value = MagicMock()
@@ -474,7 +474,7 @@ class TestToolUseLoopPermissionDenied:
         deny_policy = MagicMock(spec=PermissionPolicy)
         deny_policy.decide.return_value = PermissionDecision.DENY
 
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
             mock_build.return_value = MagicMock()
             mock_build.return_value.bind_tools.return_value = bound
 
@@ -510,7 +510,7 @@ class TestToolUseLoopWithPlan:
         bound = MagicMock()
         bound.ainvoke = fake_model.ainvoke
 
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
             mock_build.return_value = MagicMock()
             mock_build.return_value.bind_tools.return_value = bound
 
@@ -544,7 +544,7 @@ class TestToolUseLoopCancel:
         bound = MagicMock()
         bound.ainvoke = fake_model.ainvoke
 
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
             mock_build.return_value = MagicMock()
             mock_build.return_value.bind_tools.return_value = bound
 
@@ -562,6 +562,116 @@ class TestToolUseLoopCancel:
         assert state.done is True
         assert state.done_reason == "canceled"
         assert fake_model.ainvoke.call_count == 0
+
+    def _run_cancelled_root(self) -> tuple[AgentHandle | None, OrchestrationState]:
+        """Drive a ROOT loop to a cooperative cancel; return its handle + state.
+
+        Only the model boundary is stubbed — registration, the shutdown sweep and
+        the terminal mark all run for real, which is the whole point: the defect
+        lived in the mark, so a test that stubbed it would prove nothing.
+        """
+        spec = _make_spec()
+        registry = _make_registry(spec)
+
+        bound = MagicMock()
+        bound.ainvoke = AsyncMock(return_value=_text_response("should not reach"))
+
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
+            mock_build.return_value = MagicMock()
+            mock_build.return_value.bind_tools.return_value = bound
+
+            ctx = _make_agent_context(should_cancel=lambda: True)
+            loop = ToolUseLoop(
+                agent_context=ctx,
+                tool_registry=registry,
+                permission_policy=_allow_all_policy(),
+                hook_manager=_make_hook_manager(),
+            )
+            _tq, state = asyncio.run(
+                loop.run("do stuff", tool_specs=[spec], context=_make_context())
+            )
+            handle = asyncio.run(ctx.registry.get(ctx.agent_id))
+        return handle, state
+
+    def test_cancelled_root_handle_reads_cancelled_not_completed(self):
+        """A stopped run must never leave a handle claiming it succeeded.
+
+        The root is marked exactly ONCE — there is no spawn path behind it to
+        correct the value later — so whatever the loop writes is what every
+        surface reporting on this run reads, permanently.
+        """
+        handle, _state = self._run_cancelled_root()
+
+        assert handle is not None, "the root registers itself before the cancel check"
+        assert handle.status == "cancelled"
+        assert handle.status != "completed", "a cancelled run reported a clean success"
+
+    def test_root_handle_agrees_with_the_projection(self):
+        """The mark IS the projection, not a second derivation that can drift.
+
+        This is also what closes a CHILD's transient window: the spawn path
+        re-marks the same handle through ``terminal_status()``, so once the loop
+        writes that same value there is no interval where a reader sees one
+        answer and the settled result says another.
+
+        The concrete value is pinned alongside the agreement deliberately.
+        Agreement ALONE is satisfied by both sides being wrong together, which
+        is exactly the state this seam was in: the handle said ``completed`` and
+        so did the projection, because the projection had no way to say
+        ``cancelled``. Asserting only that they match would have passed against
+        the very bug it claims to cover.
+        """
+        handle, state = self._run_cancelled_root()
+
+        assert handle is not None
+        assert handle.status == state.terminal_status() == "cancelled"
+
+    def test_shutdown_sweep_settles_a_child_that_never_started(self):
+        """A child still at ``submitted`` is owed a terminal too.
+
+        ``submitted`` with a live task is the real window between a spawn
+        registering its handle and the child's own loop flipping it to
+        ``running`` — a sweep filtering on ``running`` alone walked straight
+        past it and left the child pinned non-terminal for every reader that
+        derives liveness from status.
+        """
+        spec = _make_spec()
+        registry = _make_registry(spec)
+
+        bound = MagicMock()
+        bound.ainvoke = AsyncMock(return_value=_text_response("should not reach"))
+
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
+            mock_build.return_value = MagicMock()
+            mock_build.return_value.bind_tools.return_value = bound
+
+            ctx = _make_agent_context(should_cancel=lambda: True)
+            loop = ToolUseLoop(
+                agent_context=ctx,
+                tool_registry=registry,
+                permission_policy=_allow_all_policy(),
+                hook_manager=_make_hook_manager(),
+            )
+
+            child = AgentHandle(
+                agent_id="child_never_started",
+                parent_id=ctx.agent_id,
+                depth=1,
+                model_name="test-model",
+                task_description="deferred",
+            )
+
+            async def _drive():
+                await ctx.registry.register(child)
+                child.status = "submitted"
+                child.asyncio_task = asyncio.create_task(asyncio.sleep(999))
+                await loop.run("do stuff", tool_specs=[spec], context=_make_context())
+                return await ctx.registry.get(child.agent_id)
+
+            settled = asyncio.run(_drive())
+
+        assert settled is not None
+        assert settled.status == "cancelled", f"{settled.status} left non-terminal"
 
 
 class TestToolUseLoopToolError:
@@ -586,7 +696,7 @@ class TestToolUseLoopToolError:
         mock_tool.run.side_effect = RuntimeError("Connection refused")
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
             patch.object(registry, "get", return_value=mock_tool),
         ):
             mock_build.return_value = MagicMock()
@@ -632,7 +742,7 @@ class TestToolUseLoopToolError:
         )
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
             patch.object(registry, "get", return_value=mock_tool),
         ):
             mock_build.return_value = MagicMock()
@@ -785,8 +895,7 @@ class TestEnvironmentSectionInSystemPrompt:
 
 
 class TestDepthGuidance:
-    """Ref: [CoA §3.2], [DeepMind-Delegation §4.1], [Aletheia §3]
-    Lifecycle-aware prompting for root/sub/leaf agents."""
+    """Lifecycle-aware prompting for root/sub/leaf agents."""
 
     def test_root_agent_is_orchestrator(self):
         ctx = _make_agent_context(max_depth=5)  # depth=0 root
@@ -840,7 +949,7 @@ class TestDepthGuidance:
         assert "report" in guidance.lower()
 
     def test_delegation_boundary_warning(self):
-        """Ref: [DeepMind-Delegation §4.7] Liability firebreaks at chain boundaries."""
+        """Liability firebreaks at chain boundaries."""
         ctx = _make_agent_context(max_depth=3)
         c1 = ctx.child()  # depth=1
         c2 = c1.child()  # depth=2, remaining=1
@@ -890,7 +999,7 @@ class TestThinkingOnlyContentPlaceholder:
         emitted_events: list[dict] = []
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
             patch.object(registry, "get", return_value=mock_tool),
         ):
             mock_build.return_value = MagicMock()
@@ -940,7 +1049,7 @@ class TestThinkingOnlyContentPlaceholder:
         emitted_events: list[dict] = []
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
             patch.object(registry, "get", return_value=mock_tool),
         ):
             mock_build.return_value = MagicMock()
@@ -994,7 +1103,7 @@ class TestLlmCallTimeoutCeiling:
         bound.ainvoke = _hang
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
             # RetryStrategy.from_config reads knobs via mewbo_core.config.
             patch(
                 "mewbo_core.config.get_config_value",
@@ -1025,17 +1134,16 @@ class TestLlmCallTimeoutCeiling:
 class TestCheckAgentsWaitTimeout:
     """A wait tool's requested ``timeout`` must not be clipped by the flat ceiling.
 
-    Regression: ``check_agents`` has no registry spec, so
-    ``_get_tool_timeout`` returned the 120s fallback and the outer
-    ``asyncio.wait_for`` aborted a ``wait=true, timeout=300`` call at 120s —
-    "Tool 'check_agents' timed out after 120.0s" (seen three times in
-    production). The wait tool self-bounds on ``timeout``; the ceiling must sit
-    above it plus render headroom.
+    ``check_agents`` has no registry spec, so a ``_get_tool_timeout`` falling
+    back to 120s makes the outer ``asyncio.wait_for`` abort a
+    ``wait=true, timeout=300`` call at 120s — "Tool 'check_agents' timed out
+    after 120.0s". The wait tool self-bounds on ``timeout``; the ceiling must
+    sit above it plus render headroom.
     """
 
     def _loop(self) -> ToolUseLoop:
         registry = _make_registry(_make_spec())
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
             mock_build.return_value = MagicMock()
             mock_build.return_value.bind_tools.return_value = MagicMock()
             return ToolUseLoop(
@@ -1110,7 +1218,7 @@ class TestFileReadDedupCache:
         """Create a minimal ToolUseLoop for cache testing."""
         spec = _make_spec()
         registry = _make_registry(spec)
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
             mock_build.return_value = MagicMock()
             mock_build.return_value.bind_tools.return_value = MagicMock()
             loop = ToolUseLoop(
@@ -1339,7 +1447,7 @@ class TestBudgetWarningStillFires:
         mock_tool.run.return_value = mock_speaker
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
             patch.object(registry, "get", return_value=mock_tool),
         ):
             mock_build.return_value = MagicMock()
@@ -1367,7 +1475,7 @@ class TestBudgetWarningStillFires:
         assert len(budget_warnings) >= 1
 
     def test_budget_exhaustion_runs_one_wrapup_turn(self):
-        """At budget exhaustion the loop no longer bare-halts: a model
+        """At budget exhaustion the loop does not bare-halt: a model
         that always returns a tool call would loop forever, but the budget
         check forces exactly ONE unbound wrap-up turn, then stops with
         ``done_reason == "budget_exhausted"`` and a non-empty task_result. If
@@ -1395,7 +1503,7 @@ class TestBudgetWarningStillFires:
         wrapup_invoke = AsyncMock(return_value=_text_response("Wrapping up: partial progress."))
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
             patch.object(registry, "get", return_value=mock_tool),
         ):
             mock_build.return_value = MagicMock()
@@ -1472,7 +1580,7 @@ def _run_write_progress_agent(events: list) -> tuple[OrchestrationState, list]:
     mock_tool.run.side_effect = _tool_run
 
     with (
-        patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+        patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
         patch.object(registry, "get", return_value=mock_tool),
     ):
         mock_build.return_value = MagicMock()
@@ -1596,7 +1704,7 @@ class TestDelegationContractStepBudget:
         wrapup_invoke = AsyncMock(return_value=_text_response("Agent wrap-up."))
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
             patch.object(registry, "get", return_value=mock_tool),
         ):
             mock_build.return_value = MagicMock()
@@ -1647,7 +1755,7 @@ class TestDelegationContractStepBudget:
         wrapup_invoke = AsyncMock(return_value=_text_response("Session wrap-up."))
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
             patch.object(registry, "get", return_value=mock_tool),
         ):
             mock_build.return_value = MagicMock()
@@ -1689,7 +1797,7 @@ class TestAtomicDelegationFirebreak:
         atomic_ctx = root.child(atomic=True)
         assert atomic_ctx.can_spawn is True  # depth alone would allow it
 
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
             mock_build.return_value = MagicMock()
             mock_build.return_value.bind_tools.return_value = MagicMock()
             loop = ToolUseLoop(
@@ -1709,7 +1817,7 @@ class TestAtomicDelegationFirebreak:
         root = AgentContext.root(model_name="test-model", max_depth=5)
         open_ctx = root.child(atomic=False)
 
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
             mock_build.return_value = MagicMock()
             mock_build.return_value.bind_tools.return_value = MagicMock()
             loop = ToolUseLoop(
@@ -1789,7 +1897,7 @@ class TestWallDeadlineWatchdog:
                 if call_n["i"] > 1:
                     raise asyncio.CancelledError()
 
-            with patch("mewbo_core.tool_use_loop.asyncio.sleep", side_effect=_fake_sleep):
+            with patch("mewbo_core.loop.tool_use_loop.asyncio.sleep", side_effect=_fake_sleep):
                 await loop._watchdog()
 
             assert warn_handle.status == "running"  # warn alone never cancels
@@ -1842,8 +1950,8 @@ class TestModelFallback:
                 return fallback_response
 
             with (
-                patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
-                patch("mewbo_core.llm_resilience.RetryStrategy.backoff", return_value=0.0),
+                patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
+                patch("mewbo_core.llm.llm_resilience.RetryStrategy.backoff", return_value=0.0),
             ):
                 mock_model = MagicMock()
                 mock_model.bind_tools.return_value.ainvoke = AsyncMock(side_effect=_side_effect)
@@ -1863,12 +1971,14 @@ class TestModelFallback:
         asyncio.run(_test())
 
     def test_sticky_pin_uses_rescue_client_next_turn(self):
-        """Regression: after a sticky escalation pins a rescue model, the
-        NEXT turn must invoke the RESCUE model's client — not silently re-call the
-        dead primary. Guards the ``tool_use_loop._invoke`` discriminant (key off
-        the model NAME, not ``is_fallback``: a pinned rescue reorders to idx 0
-        where ``is_fallback`` is False). The unit-level RetryStrategy tests can't
-        catch this — only the real driver closure rebinds the client per model."""
+        """After a sticky escalation pins a rescue model, the NEXT turn must
+        invoke the RESCUE model's client — not silently re-call the dead primary.
+
+        Guards the ``tool_use_loop._invoke`` discriminant: key off the model
+        NAME, not ``is_fallback`` (a pinned rescue reorders to idx 0 where
+        ``is_fallback`` is False). The unit-level RetryStrategy tests cannot
+        catch this — only the real driver closure rebinds the client per model.
+        """
 
         async def _test():
             ctx = _make_agent_context(model_name="primary-model")
@@ -1908,8 +2018,8 @@ class TestModelFallback:
                 return client
 
             with (
-                patch("mewbo_core.tool_use_loop.build_chat_model", side_effect=_factory),
-                patch("mewbo_core.llm_resilience.RetryStrategy.backoff", return_value=0.0),
+                patch("mewbo_core.loop.tool_use_loop.build_chat_model", side_effect=_factory),
+                patch("mewbo_core.llm.llm_resilience.RetryStrategy.backoff", return_value=0.0),
             ):
                 tq, state = await loop.run(
                     "test query",
@@ -1945,7 +2055,7 @@ class TestModelFallback:
             # ValueError classifies as FATAL (deterministic) — no retry, no
             # fallback, fail fast.
             bad_request = ValueError("bad request")
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_model = MagicMock()
                 mock_model.bind_tools.return_value.ainvoke = AsyncMock(side_effect=bad_request)
                 mock_build.return_value = mock_model
@@ -1977,8 +2087,8 @@ class TestModelFallback:
             )
 
             with (
-                patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
-                patch("mewbo_core.llm_resilience.RetryStrategy.backoff", return_value=0.0),
+                patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
+                patch("mewbo_core.llm.llm_resilience.RetryStrategy.backoff", return_value=0.0),
             ):
                 mock_model = MagicMock()
                 mock_model.bind_tools.return_value.ainvoke = AsyncMock(
@@ -2002,9 +2112,9 @@ class TestModelFallback:
 class TestRootInjection:
     """``_tool_call_to_action_step`` injects ``root`` only for registered non-MCP tools.
 
-    Regression: session tools with strict Pydantic schemas (e.g. ``submit_widget``
-    uses ``ConfigDict(extra='forbid')``) rejected the injected ``root`` key,
-    causing repeated validation failures in sub-agents.
+    Session tools with strict Pydantic schemas (e.g. ``submit_widget`` uses
+    ``ConfigDict(extra='forbid')``) reject an injected ``root`` key, which
+    surfaces as repeated validation failures in sub-agents.
     """
 
     def _make_loop(self, registry: ToolRegistry) -> ToolUseLoop:
@@ -2084,7 +2194,7 @@ class TestDoomLoopHaltEvent:
         emitted: list[dict] = []
 
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
             patch.object(registry, "get", return_value=mock_tool),
         ):
             mock_build.return_value = MagicMock()
@@ -2164,7 +2274,7 @@ class TestSessionToolErrorEnvelope:
 
     def _run_with_envelope_tool(self, envelope_content: str):
         """Drive one tool call to the envelope tool, then a text completion."""
-        from mewbo_core.tool_use_loop import ToolUseLoop as _Loop
+        from mewbo_core.loop.tool_use_loop import ToolUseLoop as _Loop
 
         events: list[dict] = []
         nudges: list[str] = []
@@ -2184,7 +2294,7 @@ class TestSessionToolErrorEnvelope:
         registry = _make_registry()
         env_tool = _EnvelopeSessionTool(content=envelope_content)
 
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
             mock_build.return_value = MagicMock()
             mock_build.return_value.bind_tools.return_value = bound
 
@@ -2270,7 +2380,7 @@ class TestEnableSkillsOptOut:
     """``enable_skills=False`` suppresses the ``activate_skill`` schema."""
 
     def _skill_registry_with_auto_skill(self):
-        from mewbo_core.skills import SkillRegistry, SkillSpec
+        from mewbo_core.tooling.skills import SkillRegistry, SkillSpec
 
         reg = SkillRegistry()
         spec = SkillSpec(
@@ -2293,7 +2403,7 @@ class TestEnableSkillsOptOut:
             captured["schemas"] = schemas
             return MagicMock()
 
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
             model = MagicMock()
             model.bind_tools.side_effect = _capture_bind_tools
             mock_build.return_value = model
@@ -2366,7 +2476,7 @@ class TestToolUseLoopBatchFanOut:
 
         events: list[dict] = []
 
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
             mock_build.return_value = MagicMock()
             mock_build.return_value.bind_tools.return_value = bound
 
@@ -2445,7 +2555,7 @@ class TestToolUseLoopStreaming:
         # ainvoke must NOT be used when a usable stream exists.
         bound.ainvoke = AsyncMock(return_value=_text_response("BUFFERED — should not appear"))
 
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
             mock_build.return_value = MagicMock()
             mock_build.return_value.bind_tools.return_value = bound
 
@@ -2487,7 +2597,7 @@ class TestToolUseLoopStreaming:
         bound = MagicMock()  # default MagicMock.astream yields an empty async iter
         bound.ainvoke = AsyncMock(return_value=_text_response("Fallback answer 99."))
 
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
             mock_build.return_value = MagicMock()
             mock_build.return_value.bind_tools.return_value = bound
 

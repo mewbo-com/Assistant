@@ -35,7 +35,7 @@ from mewbo_core.classes import ActionStep
 from mewbo_core.common import MockSpeaker, get_mock_speaker
 
 if TYPE_CHECKING:
-    from mewbo_core.tool_registry import ToolRegistry, ToolSpec
+    from mewbo_core.tooling.tool_registry import ToolRegistry, ToolSpec
 
 
 _DEFAULT_MAX_RESULTS = 5
@@ -211,7 +211,7 @@ class ToolSearchRunner:
             return speaker(content=_FALLBACK_PROMPT_HINT)
         max_results = max(1, min(max_results, 25))
 
-        from mewbo_core.tool_registry import is_deferred
+        from mewbo_core.tooling.tool_registry import is_deferred
 
         population = [
             _Searchable.from_spec(s) for s in self._registry.list_specs() if is_deferred(s)

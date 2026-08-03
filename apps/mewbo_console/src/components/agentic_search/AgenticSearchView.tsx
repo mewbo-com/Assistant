@@ -179,7 +179,7 @@ export function AgenticSearchView() {
     [openRun]
   )
 
-  // ROUND-TRIP FIX #2: switching workspaces changes selection ONLY (REPLACE the
+  // Switching workspaces changes selection ONLY (REPLACE the
   // `ws` param). It must not auto-re-run the last query — the user submits
   // explicitly.
   const handlePickWorkspace = (next: Workspace) => {

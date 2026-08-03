@@ -11,9 +11,9 @@ from rich.console import Console
 from mewbo_core.classes import ActionStep, Plan, TaskQueue
 from mewbo_core.common import get_mock_speaker
 from mewbo_core.config import get_config, set_config_override, set_mcp_config_path
-from mewbo_core.session_runtime import SessionRuntime
-from mewbo_core.session_store import SessionStore
-from mewbo_core.tool_registry import ToolRegistry, ToolSpec
+from mewbo_core.loop.session_runtime import SessionRuntime
+from mewbo_core.session.session_store import SessionStore
+from mewbo_core.tooling.tool_registry import ToolRegistry, ToolSpec
 
 from mewbo_cli.cli_context import CliState
 from mewbo_cli.cli_master import (
@@ -530,8 +530,8 @@ def test_derive_task_outcome_blocked_code_outranks_completed_done_reason():
     """A ``blocked_code`` completion never reads as a clean success.
 
     The loop leaves ``done_reason`` at ``"completed"`` for a run that hit an
-    unrecovered wall, carrying the wall separately as ``blocked_code`` — this
-    is the exact shape that used to render green everywhere it was checked.
+    unrecovered wall, carrying the wall separately as ``blocked_code`` — the
+    shape that renders green anywhere ``done_reason`` alone is checked.
     """
     assert _derive_task_outcome("completed", "repo_access") == "blocked"
     assert _derive_task_outcome("completed", "network") == "blocked"
@@ -1047,7 +1047,7 @@ def test_run_query_no_pending_plan(monkeypatch, tmp_path):
         q.task_result = "done"
         return q
 
-    monkeypatch.setattr("mewbo_core.session_runtime.orchestrate_session", fake_orchestrate)
+    monkeypatch.setattr("mewbo_core.loop.session_runtime.orchestrate_session", fake_orchestrate)
     _run_query(
         console,
         store,
@@ -1097,7 +1097,7 @@ def test_run_cli_no_fallback_flag(monkeypatch, tmp_path):
         q.task_result = "done"
         return q
 
-    monkeypatch.setattr("mewbo_core.session_runtime.orchestrate_session", fake_orchestrate)
+    monkeypatch.setattr("mewbo_core.loop.session_runtime.orchestrate_session", fake_orchestrate)
     monkeypatch.setattr("mewbo_cli.cli_master.load_registry", lambda: ToolRegistry())
     result = run_cli(args)
     assert result == 0
@@ -1173,7 +1173,7 @@ def test_run_cli_fallback_models_comma_split(monkeypatch, tmp_path):
         q.task_result = "done"
         return q
 
-    monkeypatch.setattr("mewbo_core.session_runtime.orchestrate_session", fake_orchestrate)
+    monkeypatch.setattr("mewbo_core.loop.session_runtime.orchestrate_session", fake_orchestrate)
     monkeypatch.setattr("mewbo_cli.cli_master.load_registry", lambda: ToolRegistry())
     run_cli(args)
     assert captured.get("fallback") == ("gpt-5.4", "gemini-2.5-pro")
@@ -1334,9 +1334,9 @@ def test_run_cli_skill_invocation(monkeypatch, tmp_path):
     monkeypatch.setattr("mewbo_cli.cli_master._textual_enabled", lambda: False)
     monkeypatch.setattr("mewbo_cli.cli_master.FileHistory", DummyHistory)
     monkeypatch.setattr("mewbo_cli.cli_master.PromptSession", lambda *a, **kw: DummySession())
-    monkeypatch.setattr("mewbo_core.skills.SkillRegistry", DummySkillRegistry)
+    monkeypatch.setattr("mewbo_core.tooling.skills.SkillRegistry", DummySkillRegistry)
     monkeypatch.setattr(
-        "mewbo_core.skills.activate_skill",
+        "mewbo_core.tooling.skills.activate_skill",
         lambda skill, args: ("skill instructions", {}),
     )
     monkeypatch.setattr("mewbo_cli.cli_master._run_query", fake_run_query)

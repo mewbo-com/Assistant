@@ -11,9 +11,10 @@ from unittest.mock import patch
 
 import mongomock
 import pytest
-from mewbo_core.session_runtime import SessionRuntime
-from mewbo_core.session_store import SessionStore
-from mewbo_core.session_store_mongo import MongoSessionStore
+from mewbo_core.loop.session_runtime import SessionRuntime
+from mewbo_core.session.session_query import SessionQuery
+from mewbo_core.session.session_store import SessionStore
+from mewbo_core.session.session_store_mongo import MongoSessionStore
 
 ALICE = "user:alice"
 BOB = "user:bob"
@@ -29,7 +30,7 @@ def store(tmp_path):
 def mongo_store(tmp_path):
     """A Mongo-backed store on mongomock, mirroring ``test_session_store_mongo``."""
     with patch(
-        "mewbo_core.session_store_mongo.MongoClient",
+        "mewbo_core.session.session_store_mongo.MongoClient",
         mongomock.MongoClient,
     ):
         return MongoSessionStore(
@@ -75,7 +76,7 @@ def test_the_stamp_is_set_once(any_store):
 
 
 def test_an_unowned_session_cannot_be_claimed_later(any_store):
-    """Set-once cuts both ways: a legacy session stays unowned, not claimable.
+    """Set-once cuts both ways: an unowned session stays unowned, not claimable.
 
     Were this to succeed, the first caller to touch any pre-existing session
     would take it over — and because the filter treats unowned as visible to
@@ -92,7 +93,7 @@ def test_an_unowned_session_cannot_be_claimed_later(any_store):
 
 
 def test_unfiltered_listing_returns_every_session(any_store):
-    """``owner=None`` is the read-all authority — and the historical behaviour."""
+    """``owner=None`` is the read-all authority."""
     mine = any_store.create_session(ALICE)
     theirs = any_store.create_session(BOB)
     legacy = any_store.create_session()
@@ -202,7 +203,7 @@ def test_runtime_list_sessions_narrows_by_owner(store):
     theirs = _with_user_turn(runtime, BOB)
     legacy = _with_user_turn(runtime, None)
 
-    listed = {str(s["session_id"]) for s in runtime.list_sessions(owner=ALICE)}
+    listed = {str(s["session_id"]) for s in runtime.list_sessions(SessionQuery(owner=ALICE))}
 
     assert listed == {mine, legacy}
     assert theirs not in listed

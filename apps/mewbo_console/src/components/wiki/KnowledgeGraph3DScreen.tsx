@@ -59,10 +59,17 @@ const WIKI_GRAPH_THEME: Graph3DTheme = {
   layerLabel: LAYER_LABEL,
   layerDot: LAYER_DOT,
   folderVar: FOLDER_VAR,
+  // The synthetic External bucket carries an EMPTY folderPath (`""`, per the
+  // backend wire shape) rather than a directory path — so its color reads
+  // apart from a real source folder even before a user expands it.
+  externalBucketVar: KIND_VAR.External,
   edgeContainVar: EDGE_CONTAIN_VAR,
   nodeLabel: (n, folded) =>
     n.kind === "Folder"
-      ? `${n.folderPath ?? n.label} · ${folded} items`
+      // ``||`` (not ``??``): the External bucket's ``folderPath`` is ``""``,
+      // which must fall through to its label ("External"), not render as a
+      // bare " · N items".
+      ? `${n.folderPath || n.label} · ${folded.toLocaleString()} items`
       : n.file
         ? `${n.label} — ${n.file}`
         : n.label,

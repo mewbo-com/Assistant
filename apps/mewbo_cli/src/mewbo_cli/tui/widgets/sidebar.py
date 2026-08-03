@@ -19,8 +19,8 @@ from mewbo_cli.tui.seams import SidebarSlotRegistry
 class SidebarSection(VerticalScroll):
     """A titled sidebar facet: a bold header rule over one body widget.
 
-    Phase 4 splits the cramped sidebar into clearly delineated sections (Fleet ·
-    Plan · Context). Each registered slot wraps its widget in one of these so the
+    The sidebar splits into clearly delineated sections (Fleet · Plan ·
+    Context). Each registered slot wraps its widget in one of these so the
     section reads as its own block — an uppercased ``$accent`` header with a thin
     rule, then the body — instead of a wall of undifferentiated lines.
     """

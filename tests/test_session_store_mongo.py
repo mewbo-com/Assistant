@@ -4,15 +4,15 @@ from unittest.mock import patch
 
 import mongomock
 import pytest
-from mewbo_core.session_store import SessionStoreBase
-from mewbo_core.session_store_mongo import MongoSessionStore
+from mewbo_core.session.session_store import SessionStoreBase
+from mewbo_core.session.session_store_mongo import MongoSessionStore
 
 
 @pytest.fixture()
 def mongo_store(tmp_path):
     """Create a MongoSessionStore backed by mongomock."""
     with patch(
-        "mewbo_core.session_store_mongo.MongoClient",
+        "mewbo_core.session.session_store_mongo.MongoClient",
         mongomock.MongoClient,
     ):
         store = MongoSessionStore(
@@ -149,7 +149,7 @@ def test_terminate_roundtrip(mongo_store):
 
 def test_last_attestation_hash_defaults_genesis(mongo_store):
     """No attestation events yet -> genesis hash."""
-    from mewbo_core.attestation import GENESIS_HASH
+    from mewbo_core.agents.attestation import GENESIS_HASH
 
     session_id = mongo_store.create_session()
     assert mongo_store.last_attestation_hash(session_id) == GENESIS_HASH
@@ -171,7 +171,7 @@ def test_last_attestation_hash_targeted_query(mongo_store):
 
 def test_last_attestation_hash_reseeds_chain_continuously(mongo_store):
     """A chain re-seeded from a pre-existing tail links continuously (recovery)."""
-    from mewbo_core.attestation import AttestationChain
+    from mewbo_core.agents.attestation import AttestationChain
 
     session_id = mongo_store.create_session()
     mongo_store.append_event(
@@ -206,7 +206,7 @@ def test_append_event_dropped_after_terminate(mongo_store):
     # _guard_append is inherited from SessionStoreBase (session_store.py), so
     # its logger call resolves against THAT module's namespace regardless of
     # which concrete backend is calling it.
-    with patch("mewbo_core.session_store.logging") as mock_logging:
+    with patch("mewbo_core.session.session_store.logging") as mock_logging:
         mongo_store.append_event(session_id, {"type": "user", "payload": {"text": "after-1"}})
         mongo_store.append_event(session_id, {"type": "user", "payload": {"text": "after-2"}})
         # Two dropped appends, one structured-log call.

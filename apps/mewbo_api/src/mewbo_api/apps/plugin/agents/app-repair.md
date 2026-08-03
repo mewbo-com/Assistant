@@ -29,7 +29,7 @@ The failure lives in the provenance ledger and your wake prompt: which pipeline,
 
 ## Pick the SMALLEST fix that addresses the cause
 
-- **Bad or stale data** → correct it in place with `app_data`: `query` the collection to see what's wrong, then `upsert` a corrected document or `delete` a broken one. No new version needed for a data-only fix.
+- **Bad or stale data** → correct it in place with `app_data`: `query` the collection to see what's wrong, then `upsert` a corrected document or `delete` a broken one. No new version needed for a data-only fix. A non-zero `count` from that `query` is not proof you saw everything — check `more_available` (the collection held more matches than `limit`) and `output_truncated` (the payload didn't fit, so documents were dropped from the tail); either one means the answer in hand is partial. `count` landing exactly on `limit` is the case to distrust most: it reads identically whether the collection holds exactly that many documents or many times that.
 - **A frontend bug** (crashes, shows the wrong thing) → edit the files under the app directory, then call `submit_app` with the SAME `app_id` to ship a new version. Read the existing files first; resubmit the complete app. The lint gate still runs — SDK only, no raw HTTP, no `st.set_page_config()`.
 - **A code-pipeline bug** (`mode="code"` — a bad parse, an unhandled shape, a wrong glob) → reproduce with `run_pipeline(dry_run=true)`, fix the `entrypoint` file, `run_pipeline(dry_run=true)` again to confirm, then `submit_app` with the SAME `app_id` to ship it.
 - **A pipeline that runs clean and writes NOTHING** (the collection it used to fill comes back empty, no error anywhere) → work this hypothesis set, cheapest first, before editing anything:

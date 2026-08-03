@@ -17,6 +17,7 @@ from mewbo_tools.integration.exception_unwrap import (
     describe_exception_group,
     unwrap_exception_group,  # noqa: F401 - re-exported for mcp_pool.<name> callers/tests
 )
+from mewbo_tools.integration.sandbox_launcher import SandboxLauncher
 
 logger = get_logger(__name__)
 
@@ -69,7 +70,7 @@ _WARNED_SKIP: set[tuple[str, str]] = set()
 
 # ``_is_config_kwarg_error`` / ``unwrap_exception_group`` /
 # ``classify_connect_failure`` live in ``exception_unwrap`` (the single shared
-# home reused by the legacy ``mcp`` path too) and are re-exported here via the
+# home the one-shot ``mcp`` path reuses too) and are re-exported here via the
 # module import above, so existing ``mcp_pool.<name>`` callers/tests keep working.
 
 
@@ -139,9 +140,13 @@ class MCPConnectionPool:
         except Exception as exc:  # pragma: no cover - runtime dependency
             raise RuntimeError("langchain-mcp-adapters is required for MCP tools.") from exc
 
-        client = MultiServerMCPClient({name: config})  # type: ignore[dict-item]
+        client = MultiServerMCPClient({name: self._sandboxed(config)})  # type: ignore[dict-item]
         tools = await client.get_tools(server_name=name)
         state = ServerState(
+            # The ORIGINAL config, never the sandboxed launch form:
+            # ``refresh_if_config_changed`` compares this against the config it
+            # is handed, so storing the wrapped one would make every refresh
+            # see a difference and reconnect the whole fleet.
             name=name,
             config=config,
             client=client,
@@ -151,6 +156,45 @@ class MCPConnectionPool:
         )
         logger.info("Connected to MCP server '{}' ({} tools)", name, len(tools))
         return state
+
+    @staticmethod
+    def _sandboxed(config: dict[str, Any]) -> dict[str, Any]:
+        """Route a stdio server's spawn through the confining launcher shim.
+
+        Returned unchanged — the same object, so an unsandboxed launch is
+        byte-identical to before — for anything that spawns no process here: a
+        streamable-HTTP or SSE server, a config whose ``command`` is not a plain
+        string, and any deployment with ``agent.server_sandbox`` off.
+
+        **Scope: the server's OWN configured ``cwd``, never the calling
+        session's project.** This pool is process-wide and a connection outlives
+        the tool call that opened it, so a session-keyed scope would let the
+        first session to dial a server pin the confinement every later session
+        inherits — a boundary that reports healthy and enforces the wrong thing.
+        A server that names no ``cwd`` is therefore denied every configured
+        project, which is the honest answer for a process-wide server: it has no
+        one project to serve. An operator who needs otherwise names the ``cwd``.
+
+        The scope travels in the config's own ``env`` because the MCP stdio
+        transport does NOT hand the child the parent's environment — it merges a
+        fixed inherited subset with whatever the config names, so a variable set
+        in ``os.environ`` would simply not arrive.
+
+        Cost: O(configured projects).
+        """
+        command = config.get("command")
+        if config.get("transport") not in (None, "stdio") or not isinstance(command, str):
+            return config
+        cwd = config.get("cwd")
+        launcher = SandboxLauncher.for_root(str(cwd) if cwd else None)
+        if launcher is None:
+            return config
+        prefixed = launcher.command([command, *(str(a) for a in config.get("args") or [])])
+        wrapped = dict(config)
+        wrapped["command"] = prefixed[0]
+        wrapped["args"] = prefixed[1:]
+        wrapped["env"] = launcher.environ(config.get("env") or {})
+        return wrapped
 
     async def _disconnect_server(self, state: ServerState) -> None:
         """Best-effort close of a single server client."""
@@ -287,7 +331,13 @@ class MCPConnectionPool:
         # Not connected yet -- try to connect
         servers = self._mcp_config.get("servers", {})
         if server_name not in servers:
-            # Try loading config fresh
+            # Try loading config fresh. Deliberately broad: an unset path, a
+            # vanished file, and a malformed one should all degrade to "not
+            # found" below rather than raise out of a connect attempt. A
+            # malformed file is diagnosed loudly at the read site
+            # (`mcp._read_json_config`, deduped + surfaced via
+            # `mcp.get_last_config_error` / `status_snapshot`) before this
+            # swallows it, so nothing is lost here -- only degraded.
             try:
                 from mewbo_tools.integration.mcp import _load_mcp_config, _normalize_mcp_config
 
@@ -301,6 +351,10 @@ class MCPConnectionPool:
 
         config = servers.get(server_name)
         if config is None:
+            from mewbo_tools.integration.mcp import disabled_servers
+
+            if server_name in disabled_servers():
+                raise ValueError(f"MCP server '{server_name}' is disabled.")
             raise ValueError(f"MCP server '{server_name}' not found in configuration.")
 
         try:
@@ -422,11 +476,9 @@ class MCPConnectionPool:
         old_names = set(self._servers.keys())
         new_names = set(new_servers.keys())
 
-        # Disconnect removed servers
         for removed in old_names - new_names:
             await self.invalidate_server(removed)
 
-        # Reconnect changed or new servers
         to_connect: dict[str, dict[str, Any]] = {}
         for name in new_names:
             cfg = new_servers[name]
@@ -506,7 +558,11 @@ class MCPConnectionPool:
         """Per-server lifecycle snapshot for surfacing in ``/mcp``.
 
         Returns ``{name: {status, tools, reason?, retry_in?}}`` where status is
-        one of connected/quarantined/backoff/failed/pending.
+        one of connected/quarantined/backoff/failed/pending/disabled.
+        Additionally includes a ``"_config_error"`` entry (status ``"error"``)
+        when the MCP config FILE itself last failed to parse -- distinct from
+        any single server's connect state, since a broken file takes every
+        server down at once rather than just one.
         """
         now = _monotonic()
         snapshot: dict[str, dict[str, Any]] = {}
@@ -518,6 +574,23 @@ class MCPConnectionPool:
             if state.next_retry_at and state.next_retry_at > now:
                 entry["retry_in"] = round(state.next_retry_at - now)
             snapshot[name] = entry
+
+        from mewbo_tools.integration.mcp import disabled_servers, get_last_config_error
+
+        # A switched-off server is absent from ``self._servers`` by design — it is
+        # dropped before anything discovers or dials it. Report it anyway: the
+        # operator who opens this surface is asking why a tool is missing, and
+        # "off on purpose" is the answer that ends the search.
+        for name in sorted(disabled_servers()):
+            snapshot.setdefault(name, {"status": "disabled", "tools": 0})
+
+        config_error = get_last_config_error()
+        if config_error is not None:
+            snapshot["_config_error"] = {
+                "status": "error",
+                "tools": 0,
+                "reason": f"{config_error['path']}: {config_error['detail']}",
+            }
         return snapshot
 
 

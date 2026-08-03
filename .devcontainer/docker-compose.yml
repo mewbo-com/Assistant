@@ -1,0 +1,96 @@
+# The dev stack. Self-contained by design: everything an engineer (human or
+# agent) needs to build, run and test this monorepo lives in here, so no step
+# reaches for the host's Docker daemon or the host's Mongo.
+#
+# The ONE deliberate exception is egress to the LLM gateway and the tracing
+# service. Those are reached over ordinary LAN DNS from the default bridge —
+# no external network join, so nothing host-specific is committed here. If you
+# ever need this stack ON a specific external docker network, add it in
+# docker-compose.override.yml (gitignored) rather than here.
+
+services:
+  workspace:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    # `privileged` is what makes the nested daemon possible; the
+    # docker-in-docker feature starts dockerd inside THIS container, so the
+    # host socket is never mounted and sibling containers never appear on the
+    # host. Everything this stack starts is a child of this container.
+    privileged: true
+
+    # tini as PID 1. Without it `sleep infinity` becomes PID 1, and a non-
+    # reaping PID 1 leaks a zombie per orphaned process until the pid limit is
+    # hit — a slow, confusing death for a long-lived dev container.
+    init: true
+    command: sleep infinity
+
+    volumes:
+      # Relative to THIS file, so it resolves correctly in any git worktree
+      # rather than being pinned to one checkout path.
+      - ..:/workspaces/Assistant:cached
+      # NOTE: the nested daemon's image store (/var/lib/docker) is deliberately
+      # NOT declared here. The docker-in-docker feature contributes its own
+      # per-container volume for that target; declaring a second one would put
+      # two volumes on the same mount point.
+      - uv-cache:/caches/uv
+      - npm-cache:/caches/npm
+      - playwright-cache:/caches/playwright
+
+    environment:
+      # Point the app at the Mongo in THIS stack, not at any host instance.
+      MEWBO_MONGODB_URI: mongodb://mongo:27017
+      UV_CACHE_DIR: /caches/uv
+      npm_config_cache: /caches/npm
+      PLAYWRIGHT_BROWSERS_PATH: /caches/playwright
+
+    depends_on:
+      - mongo
+
+    # A workspace is one of many running concurrently, so an unbounded container
+    # lets one test run or image build starve every sibling and the host.
+    #
+    # `mem_limit`/`cpus` are the service-level Compose Spec keys, NOT
+    # `deploy.resources.limits` — the deploy block is honoured by swarm and was
+    # historically ignored by plain `docker compose up`, so a limit written
+    # there reads as applied while the container runs unbounded.
+    #
+    # `memswap_limit` equals `mem_limit` on purpose: with a memory limit alone
+    # docker still grants swap up to twice it, making the effective cap double
+    # what the file says. Equal values mean 8g total and no swap.
+    cpus: 1.5
+    mem_limit: 8g
+    memswap_limit: 8g
+
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+
+    # Deliberately smaller than the workspace: this is a dev-scale Mongo backing
+    # one developer's stack, and every megabyte here is one the workspace cannot
+    # use. The pair still fits inside a single 8g budget per workspace family.
+    cpus: 0.5
+    mem_limit: 2g
+    memswap_limit: 2g
+
+volumes:
+  # Per-stack, NOT shared. Two mongod processes over one volume corrupt it, and
+  # concurrent workspaces each run their own stack. Left unnamed on purpose so
+  # compose scopes each to its own project — see README for why an explicit
+  # name would be actively dangerous here.
+  mongo-data:
+
+  # Shared across this repo's workspaces. Safe because each is content-
+  # addressed and written idempotently; unlike node_modules or .venv, a
+  # concurrent writer cannot leave a neighbour with a torn tree. Explicitly
+  # named so every workspace hits the SAME cache instead of a project-scoped
+  # copy — that sharing is the entire point.
+  uv-cache:
+    name: devc-assistant-uv
+  npm-cache:
+    name: devc-assistant-npm
+  playwright-cache:
+    name: devc-assistant-playwright

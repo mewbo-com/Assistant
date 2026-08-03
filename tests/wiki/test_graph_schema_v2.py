@@ -1,7 +1,7 @@
 """Schema v2 ``CodeGraph`` validation tests.
 
 Drives the discriminated-union node models + whole-graph ``CodeGraph`` validator
-from the CALLER site: legacy-shape rehydration (no ``subkind``/``attributes``),
+from the CALLER site: bare-shape rehydration (no ``subkind``/``attributes``),
 the four rejection paths (duplicate id, dangling non-synthetic endpoint,
 non-namespaced attribute key, endpoint-rule violation), and a real fixture-repo
 ``build_graph_core`` round-trip that assembles + validates before persisting.
@@ -17,6 +17,7 @@ from mewbo_graph.wiki.store import JsonWikiStore
 from mewbo_graph.wiki.types import (
     ClassNode,
     CodeGraph,
+    CommitScope,
     FileNode,
     FunctionNode,
     GraphEdge,
@@ -41,7 +42,7 @@ _LEGACY_NODE = {
 }
 
 
-# ── (a) legacy compatibility ────────────────────────────────────────────────
+# ── (a) bare-shape compatibility ────────────────────────────────────────────
 
 
 def test_legacy_node_dict_validates_through_union():
@@ -55,7 +56,7 @@ def test_legacy_node_dict_validates_through_union():
 
 
 def test_legacy_graph_validates_through_codegraph():
-    """A whole graph of legacy-shape nodes + edges validates unchanged."""
+    """A whole graph of bare-shape nodes + edges validates unchanged."""
     f = GraphNodeAdapter.validate_python(_LEGACY_NODE)
     fn = make_graph_node(
         slug=SLUG, node_id="fn", type="Function", name="foo", file="a.py", range=(1, 9)
@@ -209,7 +210,7 @@ def test_build_graph_core_validates_and_persists_fixture(tmp_path, monkeypatch):
     result = bg.build_graph_core(ctx)
 
     assert result["nodeCount"] > 0
-    nodes = store.query_graph(SLUG)
+    nodes = store.query_graph(SLUG, scope=CommitScope.every())
     # Persisted nodes rehydrate through the union (per-kind subclasses) and carry
     # the new schema-v2 fields at their defaults.
     assert nodes

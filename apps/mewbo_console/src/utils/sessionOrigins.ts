@@ -31,9 +31,8 @@ export interface OriginMeta {
 
 /**
  * The ONE per-origin registry. Label, colour and glyph live together because
- * every surface that names an origin needs all three, and two of them were
- * previously spelled twice (the filter menu owned labels, the badge owned
- * labels + colours) — which is how "My tasks" and "Manual" came to describe the
+ * every surface that names an origin needs all three — spelling any of them
+ * in two places is how "My tasks" and "Manual" could come to describe the
  * same origin with no shared home.
  *
  * Exhaustive by construction: a new member of the core `SessionOrigin` union
@@ -86,7 +85,8 @@ export const ORIGIN_FILTERS: { origin: SessionOrigin; label: string; icon: Lucid
 export const DEFAULT_VISIBLE_ORIGINS: SessionOrigin[] = ['user', 'channel'];
 
 /** Whether an origin is shown by default. Missing origin falls back to 'user'
- *  (matches core's default provenance), so legacy rows stay visible. */
+ *  (matches core's default provenance), so rows with no recorded origin stay
+ *  visible. */
 export function isDefaultVisibleOrigin(origin?: SessionOrigin): boolean {
   return DEFAULT_VISIBLE_ORIGINS.includes(origin ?? 'user');
 }

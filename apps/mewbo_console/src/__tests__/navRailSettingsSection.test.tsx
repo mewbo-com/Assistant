@@ -99,6 +99,7 @@ describe("NavRail settings facet section", () => {
       "Agent & Tools",
       "Plugins",
       "Security & Access",
+      "Repositories",
       "Workspace",
     ]) {
       expect(screen.getByRole("button", { name: title })).toBeTruthy();

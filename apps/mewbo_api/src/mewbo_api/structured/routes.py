@@ -1,7 +1,7 @@
 """Structured-response REST routes — ``/v1/structured``.
 
 Schema-constrained, tool-using, workspace-grounded synthesis over the core
-:class:`~mewbo_core.structured_response.StructuredResponder`. Mirrors the
+:class:`~mewbo_core.loop.structured_response.StructuredResponder`. Mirrors the
 ``agentic_search`` mount pattern: a module-global runtime injected by
 :func:`init_structured`; the namespace is mounted at ``/v1/structured``. Auth is
 declared ON each view with ``@guard.requires``, never injected here.
@@ -23,7 +23,7 @@ from typing import Any
 from flask import request
 from flask_restx import Namespace, Resource, fields
 from mewbo_core.common import get_logger
-from mewbo_core.structured_response import (
+from mewbo_core.loop.structured_response import (
     STRUCTURED_OUTPUT_EVENT,
     StructuredResponder,
     StructuredResponseError,
@@ -640,8 +640,8 @@ class StructuredRunResource(Resource):
             # A permanently terminated backing session is an absorbing
             # kill state, not a schema failure: its run can never produce an
             # output, so stop the poll with the canonical 410 Gone envelope (the
-            # ONE home, ApiResponseKit) rather than the generic 422 unprocessable
-            # or the old still-running 200 that looped forever.
+            # ONE home, ApiResponseKit) rather than a generic 422 unprocessable
+            # or a still-running 200 the caller would poll forever.
             body, code = ApiResponseKit.terminated_response()
             return {"run_id": run_id, **body}, code
 

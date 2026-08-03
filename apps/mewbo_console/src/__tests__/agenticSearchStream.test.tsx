@@ -33,7 +33,7 @@ function result(id: string): SearchResult {
     title: id,
     url: `github.com/${id}`,
     snippet: "x",
-    author: "kk",
+    author: "acme-dev",
     timestamp: "2d",
   }
 }

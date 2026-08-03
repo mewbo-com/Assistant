@@ -10,8 +10,8 @@ other egress exists.
 
 The SDK is READ-first: the served frontend reads business data (``data.query``)
 and read-only introspection (``system`` / ``pipelines.list`` / ``pipelines.run``)
-over GETs. The ONE write path is ``pipelines.submit(name, params)`` (spec §2.2
-write flows) — a POST that flows a frontend form's user input into a
+over GETs. The ONE write path is ``pipelines.submit(name, params)`` — a POST
+that flows a frontend form's user input into a
 ``user_writable`` ``mode="code"`` pipeline. It needs a WRITE-scoped render token,
 which the platform mints only for an app that DECLARES such a pipeline; the token's
 scope arrives in the render context (``scope``, defaulting to ``"read"``), so the
@@ -46,6 +46,7 @@ from typing import Any
 _CONTEXT_FILE = "_app_context.json"
 _TOKEN_HEADER = "X-Mewbo-App-Token"
 _TOKEN_QUERY_PARAM = "token"
+_PAGE_SIZE = 500
 
 
 class AppError(RuntimeError):
@@ -96,7 +97,7 @@ class MewboApp:
             self._api_base = str(context["api_base"]).rstrip("/")
             self._app_id = str(context["app_id"])
             # The token's scope, injected by the host beside the token. Absent on
-            # a legacy/read-only context ⇒ "read" (the only scope that ever
+            # a context with no scope key ⇒ "read" (the only scope that ever
             # existed before write-back). Drives the client-side ``submit`` guard.
             self._scope = str(context.get("scope", "read"))
         except (OSError, KeyError, ValueError, TypeError) as exc:
@@ -224,29 +225,45 @@ class _AppData:
     ) -> list[dict[str, Any]]:
         """Read documents from *collection* (optional equality *filter*, capped by *limit*).
 
+        Pages transparently: the route caps a single page at ``_PAGE_SIZE``
+        documents, so a *limit* above that is satisfied by fetching successive
+        pages (via ``offset``) until *limit* is reached, the server reports no
+        more documents (``truncated`` false), or a page comes back empty (the
+        safety stop against an infinite loop).
+
         Returns a list of document BODIES (each the ``doc`` the pipeline wrote),
         with the storage envelope (``app_id``/``collection``/``key``/``updated_at``)
         unwrapped so app code renders its own schema directly.
         """
-        params: dict[str, str] = {"limit": str(limit)}
-        if filter:
-            params["filter"] = json.dumps(filter, separators=(",", ":"))
-        result = self._app._get(f"data/{collection}", params)
-        rows = _as_list(result, "documents")
+        rows: list[dict[str, Any]] = []
+        offset = 0
+        while len(rows) < limit:
+            page_limit = min(_PAGE_SIZE, limit - len(rows))
+            params: dict[str, str] = {"limit": str(page_limit), "offset": str(offset)}
+            if filter:
+                params["filter"] = json.dumps(filter, separators=(",", ":"))
+            result = self._app._get(f"data/{collection}", params)
+            page = _as_list(result, "documents")
+            if not page:
+                break
+            rows.extend(page)
+            offset += len(page)
+            if not (isinstance(result, dict) and result.get("truncated")):
+                break
         # The read route returns AppDataDoc envelopes ({app_id, collection, key,
         # doc, updated_at}); expose just the doc body. A row that is already bare
         # (no nested ``doc``) passes through unchanged.
-        return [row["doc"] if isinstance(row.get("doc"), dict) else row for row in rows]
+        return [row["doc"] if isinstance(row.get("doc"), dict) else row for row in rows[:limit]]
 
 
 class _AppPipelines:
-    """The app's declared code-pipeline namespace (Phase 2).
+    """The app's declared code-pipeline namespace.
 
     ``list`` / ``run`` / ``refresh`` ride the read-scoped render token — the same
     auth as ``data``/``system``. ``run`` invokes a declared `mode="code"` pipeline
     over a GET (scalar query params only) and returns its result. ``refresh``
     triggers an on-demand refresh of ANY pipeline (both modes) via the ``/fire``
-    seam. ``submit`` is the ONE write path (spec §2.2 write flows): a POST that
+    seam. ``submit`` is the ONE write path: a POST that
     flows a frontend form's user input into a `user_writable` pipeline, needing a
     WRITE-scoped token the platform mints only for an app that declares such a
     pipeline.
@@ -276,7 +293,7 @@ class _AppPipelines:
         object/array-typed `params_schema` property can't be sent this way — a
         query string carries only scalars, coerced as integer/number/boolean/
         string; such a pipeline is only invocable via the write-scoped POST
-        path, which this read-only SDK never uses (spec §2.2: v1 has no write
+        path, which this read-only SDK never uses (v1 has no write
         path here at all). A dict/list value is rejected HERE, client-side,
         before any network call — a `str()` of it would silently become a
         confusing repr string the server would then reject with a much less
@@ -320,7 +337,7 @@ class _AppPipelines:
     def submit(self, name: str, params: dict[str, Any] | None = None) -> Any:
         """Submit user-input *params* to a `user_writable` `mode="code"` pipeline.
 
-        Returns the pipeline's `output`. The write-back path (spec §2.2 write
+        Returns the pipeline's `output`. The write-back path (the write
         flows). Unlike :meth:`run` (a GET
         whose scalar params ride the query string), this POSTs *params* as the
         JSON request body, so object/array-typed properties are fully supported —

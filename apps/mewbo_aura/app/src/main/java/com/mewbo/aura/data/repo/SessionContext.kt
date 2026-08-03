@@ -19,6 +19,15 @@ import kotlinx.serialization.json.buildJsonObject
  * ONLY [RunRepository.sendQuery] passes it - `device_tools` isn't part of session-creation's own
  * context (task brief scopes it to "re-enumerated FRESH on every `/query`" specifically), so
  * [deviceTools] defaults to `null`/omitted for [SessionRepository.createSession]'s call site.
+ *
+ * **[project] carries a RESERVED value as well as real keys**, and this function is the one place
+ * that decision reaches the wire. Three states, all expressed through this one field:
+ * `null`/blank omits it entirely (a throwaway temp-dir cwd),
+ * [com.mewbo.aura.data.model.ComposerScope.AUTO_PROJECT_KEY] sends the auto-select sentinel (no
+ * project fixed - Mewbo picks one, and may move the session between projects mid-run), and anything
+ * else is a catalogue key (bare name or `managed:<id>`). The sentinel needs no arm of its own here
+ * BY DESIGN: it travels as an ordinary non-blank string, so the resolver on the far side owns the
+ * whole meaning of it and this side cannot develop a second opinion about what "auto" resolves to.
  */
 internal fun buildSessionContext(
     model: String?,

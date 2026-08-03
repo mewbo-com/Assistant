@@ -1,4 +1,4 @@
-"""GraphOnlyIndexer tests — deterministic, zero-LLM repository onboarding.
+"""GraphOnlyIndexer tests — deterministic, zero-LLM repository indexing.
 
 The indexer must: clone → scan → build the AST graph → finalize, producing a
 populated graph + ZERO pages + ``graph_only=True``, invoking NO LLM. We stub the
@@ -17,7 +17,7 @@ from mewbo_graph.plugins.wiki import build_graph as build_graph_mod, graph_only 
 from mewbo_graph.plugins.wiki.graph_only import GraphOnlyIndexer, build_graph_only_ctx
 from mewbo_graph.wiki.errors import DocumentationUnavailableError
 from mewbo_graph.wiki.store import JsonWikiStore
-from mewbo_graph.wiki.types import IndexingJob, WizardSubmission
+from mewbo_graph.wiki.types import CommitScope, IndexingJob, WizardSubmission
 
 FIXTURE = Path(__file__).parent / "fixtures" / "tiny_python_repo"
 
@@ -104,7 +104,7 @@ def test_graph_only_builds_graph_zero_pages_and_flag(setup):
     GraphOnlyIndexer(ctx, _submission()).run()
 
     # Graph populated (AST nodes from the fixture).
-    assert len(store.query_graph(slug)) > 0
+    assert len(store.query_graph(slug, scope=CommitScope.every())) > 0
     # Zero documentation pages.
     assert store.list_pages(slug) == []
     # Job complete, project stamped graph_only.
@@ -121,7 +121,7 @@ def test_graph_only_invokes_no_llm(setup):
     store, slug = setup
     ctx = build_graph_only_ctx(job_id="j1", slug=slug, store=store)
     # If any of these were touched, the run took the LLM path — fail loudly.
-    with patch("mewbo_core.llm.build_chat_model", side_effect=AssertionError("LLM used")):
+    with patch("mewbo_core.llm.llm.build_chat_model", side_effect=AssertionError("LLM used")):
         GraphOnlyIndexer(ctx, _submission()).run()
     assert store.get_job("j1").status == "complete"
 
@@ -199,7 +199,7 @@ def test_graph_only_cancel_mid_run_stops_indexer(setup, monkeypatch):
 
     # Graph WAS built (the phase ran), but finalize was skipped: cancel survives,
     # no project published, no complete/failed clobber.
-    assert len(store.query_graph(slug)) > 0
+    assert len(store.query_graph(slug, scope=CommitScope.every())) > 0
     assert store.get_job("j1").status == "cancelled"
     assert store.get_project(slug) is None
     # A "cancelled — stopping" log marks the cooperative stop.

@@ -6,9 +6,9 @@ import types
 from mewbo_core.classes import ActionStep, Plan, PlanStep, TaskQueue, set_available_tools  # noqa: E402
 from mewbo_core.common import get_mock_speaker  # noqa: E402
 from mewbo_core.config import get_config_value, set_mcp_config_path  # noqa: E402
-from mewbo_core.session_runtime import SessionRuntime  # noqa: E402
-from mewbo_core.session_store import SessionStore  # noqa: E402
-from mewbo_core.tool_registry import ToolRegistry, ToolSpec, load_registry  # noqa: E402
+from mewbo_core.loop.session_runtime import SessionRuntime  # noqa: E402
+from mewbo_core.session.session_store import SessionStore  # noqa: E402
+from mewbo_core.tooling.tool_registry import ToolRegistry, ToolSpec, load_registry  # noqa: E402
 from rich.console import Console  # noqa: E402
 
 from mewbo_cli.cli_commands import get_registry  # noqa: E402
@@ -198,7 +198,7 @@ def test_run_query(monkeypatch, tmp_path):
         return task_queue
 
     monkeypatch.setattr("mewbo_cli.cli_master.generate_action_plan", fake_generate)
-    monkeypatch.setattr("mewbo_core.session_runtime.orchestrate_session", fake_orchestrate)
+    monkeypatch.setattr("mewbo_core.loop.session_runtime.orchestrate_session", fake_orchestrate)
 
     _run_query(
         console,
@@ -239,7 +239,7 @@ def test_run_query_auto_approves_in_headless(monkeypatch, tmp_path):
         return task_queue
 
     monkeypatch.setattr("mewbo_cli.cli_master._build_approval_callback", fake_build)
-    monkeypatch.setattr("mewbo_core.session_runtime.orchestrate_session", fake_orchestrate)
+    monkeypatch.setattr("mewbo_core.loop.session_runtime.orchestrate_session", fake_orchestrate)
 
     _run_query(
         console,
@@ -287,7 +287,7 @@ def test_run_query_headless_auto_approves_set_tool(monkeypatch, tmp_path):
         task_queue.task_result = "ok"
         return task_queue
 
-    monkeypatch.setattr("mewbo_core.session_runtime.orchestrate_session", fake_orchestrate)
+    monkeypatch.setattr("mewbo_core.loop.session_runtime.orchestrate_session", fake_orchestrate)
 
     _run_query(
         console,
@@ -332,7 +332,7 @@ def test_run_query_renders_tool_output_and_response(monkeypatch, tmp_path):
         task_queue.task_result = "final response"
         return task_queue
 
-    monkeypatch.setattr("mewbo_core.session_runtime.orchestrate_session", fake_orchestrate)
+    monkeypatch.setattr("mewbo_core.loop.session_runtime.orchestrate_session", fake_orchestrate)
 
     _run_query(
         console,
@@ -380,7 +380,7 @@ def test_run_query_renders_diff_tool_output(monkeypatch, tmp_path):
         task_queue.task_result = "final response"
         return task_queue
 
-    monkeypatch.setattr("mewbo_core.session_runtime.orchestrate_session", fake_orchestrate)
+    monkeypatch.setattr("mewbo_core.loop.session_runtime.orchestrate_session", fake_orchestrate)
 
     _run_query(
         console,
@@ -433,7 +433,7 @@ def test_run_query_renders_shell_tool_output(monkeypatch, tmp_path):
         task_queue.task_result = "final response"
         return task_queue
 
-    monkeypatch.setattr("mewbo_core.session_runtime.orchestrate_session", fake_orchestrate)
+    monkeypatch.setattr("mewbo_core.loop.session_runtime.orchestrate_session", fake_orchestrate)
 
     _run_query(
         console,
@@ -478,7 +478,7 @@ def test_run_query_hides_output_when_not_verbose(monkeypatch, tmp_path):
         step.result = get_mock_speaker()(content={"foo": "bar"})
         return TaskQueue(action_steps=[step])
 
-    monkeypatch.setattr("mewbo_core.session_runtime.orchestrate_session", fake_orchestrate)
+    monkeypatch.setattr("mewbo_core.loop.session_runtime.orchestrate_session", fake_orchestrate)
 
     _run_query(
         console,
@@ -536,7 +536,7 @@ def test_run_query_renders_partial_tool_results(monkeypatch, tmp_path):
         queue.task_result = "final response"
         return queue
 
-    monkeypatch.setattr("mewbo_core.session_runtime.orchestrate_session", fake_orchestrate)
+    monkeypatch.setattr("mewbo_core.loop.session_runtime.orchestrate_session", fake_orchestrate)
 
     _run_query(
         console,
@@ -578,7 +578,7 @@ def test_run_query_dims_tool_panels_after_response(monkeypatch, tmp_path):
     def fake_render(*_args, **kwargs):
         captured["highlight_latest"] = kwargs.get("highlight_latest")
 
-    monkeypatch.setattr("mewbo_core.session_runtime.orchestrate_session", fake_orchestrate)
+    monkeypatch.setattr("mewbo_core.loop.session_runtime.orchestrate_session", fake_orchestrate)
     monkeypatch.setattr("mewbo_cli.cli_master._render_results_with_registry", fake_render)
 
     _run_query(
@@ -653,7 +653,7 @@ def test_run_cli_single_query(monkeypatch, tmp_path):
         return task_queue
 
     monkeypatch.setattr("mewbo_cli.cli_master._print_plain_header", lambda *a, **kw: None)
-    monkeypatch.setattr("mewbo_core.session_runtime.orchestrate_session", fake_orchestrate)
+    monkeypatch.setattr("mewbo_core.loop.session_runtime.orchestrate_session", fake_orchestrate)
     monkeypatch.setattr("mewbo_cli.cli_master.load_registry", lambda: ToolRegistry())
     assert run_cli(args) == 0
 
@@ -810,7 +810,7 @@ def test_run_query_renders_resilience_events(monkeypatch, tmp_path):
         task_queue.task_result = "final response"
         return task_queue
 
-    monkeypatch.setattr("mewbo_core.session_runtime.orchestrate_session", fake_orchestrate)
+    monkeypatch.setattr("mewbo_core.loop.session_runtime.orchestrate_session", fake_orchestrate)
 
     _run_query(
         console,

@@ -10,14 +10,14 @@ fires due triggers — is a separate concern, built elsewhere; this tool only
 owns the agent-facing admission surface: arm, list, cancel).
 
 Follows the ``update_todos.py`` / ``exit_plan_mode.py`` pattern: a class
-satisfying the :class:`~mewbo_core.session_tools.SessionTool` Protocol,
+satisfying the :class:`~mewbo_core.tooling.session_tools.SessionTool` Protocol,
 terminal-free (:meth:`should_terminate_run` always ``False`` — arming a
 trigger is a normal step, not a plan-mode-style exit). Unlike those two
 internal tools it is NOT hand-attached inline at root depth 0 by default — it
-is built through the ordinary :class:`~mewbo_core.session_tools.SessionToolRegistry`
+is built through the ordinary :class:`~mewbo_core.tooling.session_tools.SessionToolRegistry`
 plugin path, which feeds a constructor only ``session_id`` + ``event_logger``.
 ``agent_id`` is therefore an OPTIONAL constructor kwarg (default ``None``,
-mirroring :class:`~mewbo_core.update_todos.UpdateTodosTool`'s DI shape
+mirroring :class:`~mewbo_core.tooling.update_todos.UpdateTodosTool`'s DI shape
 exactly) so a caller that DOES want live agent attribution on the
 ``trigger_armed`` event can still inline-attach this tool the same way
 ``UpdateTodosTool`` is attached. There is currently no per-step turn counter
@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from mewbo_core.common import MockSpeaker, get_logger, pydantic_to_openai_tool
-from mewbo_core.session_tools import (
+from mewbo_core.tooling.session_tools import (
     DEFAULT_SESSION_TOOL_MODES,
     EventLogger,
     SessionTool,
@@ -58,7 +58,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mewbo_core.classes import ActionStep
-    from mewbo_core.types import Event
+    from mewbo_core.contracts.types import Event
 
 logging = get_logger(name="core.triggers.session_tool")
 
@@ -461,13 +461,12 @@ class ScheduleTriggerTool:
 # owned by the app. So the app pushes them ONCE at startup and core builds the
 # registry factory closing over them — mirroring ``plugins.register_builtin_root``
 # and ``mewbo_api.apps.plugin.runtime.register_app_submitter``. Registering it as
-# an ordinary factory (rather than the old root-only ``extra_session_tools``
-# injection) is what finally lets a SPAWNED sub-agent hold the tool: children
-# already receive the shared ``SessionToolRegistry``, so an agent whose
-# ``allowed_tools`` names ``schedule_trigger`` (the app-builder AgentDef) now
-# actually binds it. ``None`` until the app pushes ⇒ a deployment without the
-# trigger subsystem (CLI, tests) never surfaces the tool — byte-identical to
-# before, where only the API's ``extra_session_tools`` seam injected it.
+# an ordinary factory — rather than through the root-only
+# ``extra_session_tools`` injection — is what lets a SPAWNED sub-agent hold the
+# tool: children already receive the shared ``SessionToolRegistry``, so an agent
+# whose ``allowed_tools`` names ``schedule_trigger`` (the app-builder AgentDef)
+# binds it. ``None`` until the app pushes ⇒ a deployment without the trigger
+# subsystem (CLI, tests) never surfaces the tool.
 
 _TRIGGER_TOOL_PROVIDER: tuple[TriggerStoreBase, TriggerPolicy] | None = None
 
@@ -491,7 +490,7 @@ def schedule_trigger_factory() -> SessionToolFactory | None:
     Marked ``unconditional`` so it surfaces to any un-scoped session (the
     always-on-at-root shape it had as an ``extra_session_tools`` injection),
     while an explicit ``allowed_tools`` still admits it by id for a scoped
-    sub-agent — see :class:`~mewbo_core.session_tools.SessionToolFactory`.
+    sub-agent — see :class:`~mewbo_core.tooling.session_tools.SessionToolFactory`.
     """
     if _TRIGGER_TOOL_PROVIDER is None:
         return None

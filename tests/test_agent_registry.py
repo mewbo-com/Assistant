@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for agent_registry.py — AgentDef, AgentRegistry, parse_agent_file, map_cc_tool_names."""
 
-from mewbo_core.agent_registry import (
+from mewbo_core.agents.agent_registry import (
     CC_TOOL_MAP,
     AgentDef,
     AgentRegistry,
@@ -226,7 +226,7 @@ def test_agent_def_frozen():
 
 
 def test_spawn_agent_schema_has_agent_type():
-    from mewbo_core.spawn_agent import SPAWN_AGENT_SCHEMA
+    from mewbo_core.agents.spawn_agent import SPAWN_AGENT_SCHEMA
 
     props = SPAWN_AGENT_SCHEMA["function"]["parameters"]["properties"]
     assert "agent_type" in props

@@ -245,8 +245,9 @@ class RunRepositoryTest {
     // errorFor is the ONE seam where both send routes read a non-2xx body; like buildMulticastLiveFlow
     // it's a top-level function so these drive it with a synthetic Response.error(...) rather than a
     // full RunRepository (whose SSE collaborators aren't JVM-constructible). This is the regression
-    // guard for the bug: send()/sendQuery() used to `throw HttpException(response)` and discard the
-    // structured envelope, so a permanently-terminated session read as a generic retryable error.
+    // guard: a bare `throw HttpException(response)` in send()/sendQuery() would discard the
+    // structured envelope, so a permanently-terminated session would read as a generic retryable
+    // error instead.
 
     private val json = Json { ignoreUnknownKeys = true }
 

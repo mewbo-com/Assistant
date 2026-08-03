@@ -16,13 +16,13 @@ import pytest
 from jinja2 import ChainableUndefined
 from jinja2.sandbox import SandboxedEnvironment
 from langchain_core.messages import SystemMessage
+from mewbo_core.agents.spawn_agent import SpawnAgentTool
 from mewbo_core.classes import OrchestrationState, TaskQueue
-from mewbo_core.orchestrator import Orchestrator
-from mewbo_core.prompt_registry import get_prompt_registry
-from mewbo_core.session_provenance import KNOWN_SURFACES, SessionOrigin
-from mewbo_core.session_store import SessionStore
-from mewbo_core.session_tools import SessionToolFactory, SessionToolRegistry
-from mewbo_core.spawn_agent import SpawnAgentTool
+from mewbo_core.llm.prompt_registry import get_prompt_registry
+from mewbo_core.loop.orchestrator import Orchestrator
+from mewbo_core.loop.tool_use_loop import ToolUseLoop
+from mewbo_core.session.session_provenance import KNOWN_SURFACES, SessionOrigin
+from mewbo_core.session.session_store import SessionStore
 from mewbo_core.system_instructions import (
     INSTRUCTION_SANDBOX,
     KNOWN_PLATFORMS,
@@ -36,8 +36,8 @@ from mewbo_core.system_instructions import (
     SystemInstructionsStoreBase,
     ValuesKind,
 )
-from mewbo_core.tool_registry import ToolRegistry
-from mewbo_core.tool_use_loop import ToolUseLoop
+from mewbo_core.tooling.session_tools import SessionToolFactory, SessionToolRegistry
+from mewbo_core.tooling.tool_registry import ToolRegistry
 from pydantic import ValidationError
 from test_tool_use_loop import (
     _allow_all_policy,
@@ -264,7 +264,7 @@ class TestOriginTyping:
     """
 
     def test_origin_enum_renders_as_its_plain_value(self) -> None:
-        """The regression this refactor exists to prevent."""
+        """A ``SessionOrigin`` renders as its plain value, never its repr."""
         rendered = _doc("{{ origin }}").render(_ctx(origin=SessionOrigin.WIKI))
 
         assert rendered.text == "wiki"
@@ -460,7 +460,7 @@ class TestLoopPromptAssembly:
         bound = MagicMock()
         bound.ainvoke = AsyncMock(return_value=_text_response("hi"))
 
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as build:
             build.return_value = MagicMock()
             build.return_value.bind_tools.return_value = bound
             task_queue, state = asyncio.run(
@@ -526,7 +526,7 @@ def _run_orchestrator(tmp_path, store, *, source_platform: str | None = None) ->
         session_store=SessionStore(root_dir=str(tmp_path)),
         system_instructions_store=store,
     )
-    with patch("mewbo_core.orchestrator.ToolUseLoop", _LoopSpy):
+    with patch("mewbo_core.loop.orchestrator.ToolUseLoop", _LoopSpy):
         asyncio.run(orchestrator.arun("hello", source_platform=source_platform))
     return _LoopSpy.last_kwargs
 
@@ -542,8 +542,8 @@ class TestOrchestratorResolution:
         assert kwargs["user_instructions"] == "Always run the tests."
 
     def test_the_surface_reaches_the_template(self, tmp_path) -> None:
-        """``source_platform`` used to dead-end at the Langfuse seam; it must now
-        reach the operator's template so a per-client branch actually branches."""
+        """``source_platform`` must reach the operator's template, not dead-end
+        at the Langfuse seam, or a per-client branch never branches."""
         store = _FakeStore(SystemInstructionsDoc(template=SURFACE_TEMPLATE))
 
         android = _run_orchestrator(tmp_path, store, source_platform="android")
@@ -666,7 +666,7 @@ class TestDescribeTheVariableReference:
         assert platform is not None and platform.values == KNOWN_PLATFORMS
 
     def test_home_assistant_is_a_real_surface_and_must_stay_branchable(self) -> None:
-        """Regression guard, and it is NOT cosmetic.
+        """Dropping this value is NOT cosmetic.
 
         Home Assistant genuinely stamps its surface: the HA conversation agent
         sends ``X-Mewbo-Surface: home-assistant`` (``mewbo_ha_conversation/
@@ -723,7 +723,7 @@ class TestKnownIsASupersetClaimNotAnExhaustiveOne:
             )
         )
 
-        with patch("mewbo_core.orchestrator.ToolUseLoop", _LoopSpy):
+        with patch("mewbo_core.loop.orchestrator.ToolUseLoop", _LoopSpy):
             asyncio.run(orchestrator.arun("hello"))
 
         rendered = _LoopSpy.last_kwargs["user_instructions"] or ""
@@ -801,12 +801,12 @@ class TestInstructionToolsAreHonest:
         assert InstructionValueCatalog().candidates_for("model_config") is None
 
     def test_session_tools_reach_the_template(self, tmp_path) -> None:
-        """The bug this task exists to kill.
+        """``tools`` carries session tools, not only ``ToolRegistry`` specs.
 
-        ``tools`` used to carry the ``ToolRegistry`` specs ONLY, so every session
-        tool the agent genuinely had (``wiki_*``, ``scg_*``, ``submit_widget``,
-        ``schedule_trigger``) was missing and an operator's
-        ``{% if 'wiki_search_pages' in tools %}`` branch silently never fired.
+        Carrying the registry specs alone omits every session tool the agent
+        genuinely has (``wiki_*``, ``scg_*``, ``submit_widget``,
+        ``schedule_trigger``), so an operator's
+        ``{% if 'wiki_search_pages' in tools %}`` branch silently never fires.
 
         Driven through the REAL orchestrator seam with a template that dumps
         ``tools``, so it asserts on what an operator's template actually receives.
@@ -825,7 +825,7 @@ class TestInstructionToolsAreHonest:
             )
         )
 
-        with patch("mewbo_core.orchestrator.ToolUseLoop", _LoopSpy):
+        with patch("mewbo_core.loop.orchestrator.ToolUseLoop", _LoopSpy):
             asyncio.run(orchestrator.arun("hello", allowed_tools=["wiki_search_pages"]))
 
         rendered = _LoopSpy.last_kwargs["user_instructions"] or ""
@@ -850,7 +850,7 @@ class TestInstructionToolsAreHonest:
             ),
         )
 
-        with patch("mewbo_core.orchestrator.ToolUseLoop", _LoopSpy):
+        with patch("mewbo_core.loop.orchestrator.ToolUseLoop", _LoopSpy):
             asyncio.run(orchestrator.arun("hello"))
 
         tools = {t for t in (_LoopSpy.last_kwargs["user_instructions"] or "").split(",") if t}

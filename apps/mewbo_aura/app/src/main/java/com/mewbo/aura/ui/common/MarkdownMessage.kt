@@ -33,7 +33,7 @@ import org.intellij.markdown.MarkdownTokenTypes
 
 /**
  * Thin wrapper over mikepenz's m3 `Markdown`, rendering BOTH streaming and finalized assistant text
- * (user directive 2026-07-04 - retires the old `WordFadeText` word-fade comet-tail that used to
+ * (user directive - retires the old `WordFadeText` word-fade comet-tail that used to
  * carry the streaming case; ui/CLAUDE.md). Callers (`AssistantMessageRow` in `ui/chat`) MUST run the
  * buffer through [MarkdownBuffer.sanitize] first - that guard exists precisely for half-open
  * mid-stream markdown (an unclosed fence/bracket that would otherwise explode layout), as much as
@@ -46,9 +46,9 @@ import org.intellij.markdown.MarkdownTokenTypes
  * mid-stream (that blank-flash was the reported flicker); (2) [rememberStreamedText] (applied at the
  * `AssistantMessageRow` call site) bounds the reparse to ~20 Hz so the growing tree isn't relaid-out
  * per token. No per-word reveal animation — that `WordFadeText` path was retired by the same
- * 2026-07-04 directive; smoothness comes from removing churn, not adding motion.
+ * directive; smoothness comes from removing churn, not adding motion.
  *
- * Headings match the reference capture (2026-07-03, GMS redroid; provenance on [AuraType.markdownH1]
+ * Headings match the reference capture (GMS redroid; provenance on [AuraType.markdownH1]
  * and [AuraSpacing.Markdown]): the library's m3 defaults put h1..h5 on the Material
  * display/headline scale (57/45/36/28/24sp - a 3-4x jump over the 18sp body that read as
  * billboard-sized in chat), where the reference app uses a compressed 28/24/20sp ramp, renders h4+ as body

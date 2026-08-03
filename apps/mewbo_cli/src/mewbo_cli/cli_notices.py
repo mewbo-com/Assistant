@@ -14,9 +14,9 @@ passes the real stdout console.
 from __future__ import annotations
 
 from mewbo_core.config import get_config_value
-from mewbo_core.session_runtime import _STATUS_BY_DONE_REASON, SessionRuntime
-from mewbo_core.session_store import SessionStoreBase
-from mewbo_core.types import BLOCKED_CODES
+from mewbo_core.contracts.types import BLOCKED_CODES
+from mewbo_core.loop.session_runtime import _STATUS_BY_DONE_REASON, SessionRuntime
+from mewbo_core.session.session_store import SessionStoreBase
 from rich.console import Console
 from rich.text import Text
 
@@ -34,7 +34,7 @@ def derive_task_outcome(done_reason: str | None, blocked_code: object) -> str:
     carrying the wall separately, so trusting ``done_reason`` alone would
     still read as a clean success. A reason absent from the table (including
     ``"completed"`` itself, which the table intentionally does not name) is
-    trusted as-is — the historical behaviour for an unnamed reason.
+    trusted as-is, which is what an unnamed reason gets.
     """
     if isinstance(blocked_code, str) and blocked_code in BLOCKED_CODES:
         return "blocked"
@@ -163,7 +163,7 @@ def print_usage_footer(
     the one ``build_usage_numbers`` helper — no duplicate aggregation here.
     """
     try:
-        from mewbo_core.token_budget import build_usage_numbers
+        from mewbo_core.session.token_budget import build_usage_numbers
 
         effective_model = model_name or str(
             get_config_value("llm", "default_model", default="") or ""

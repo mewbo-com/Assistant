@@ -26,19 +26,19 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from langchain_core.messages import AIMessage
-from mewbo_core.agent_context import AgentContext
-from mewbo_core.context import ContextSnapshot
+from mewbo_core.agents.agent_context import AgentContext
+from mewbo_core.agents.hypervisor import AgentHypervisor
 from mewbo_core.hooks import HookManager
-from mewbo_core.hypervisor import AgentHypervisor
-from mewbo_core.permissions import PermissionDecision, PermissionPolicy
-from mewbo_core.structured_response import (
+from mewbo_core.loop.structured_response import (
     EmitStructuredResponseTool,
     StructuredResponder,
     StructuredResponseError,
 )
-from mewbo_core.token_budget import TokenBudget
-from mewbo_core.tool_registry import ToolRegistry
-from mewbo_core.tool_use_loop import ToolUseLoop
+from mewbo_core.loop.tool_use_loop import ToolUseLoop
+from mewbo_core.permissions import PermissionDecision, PermissionPolicy
+from mewbo_core.session.context import ContextSnapshot
+from mewbo_core.session.token_budget import TokenBudget
+from mewbo_core.tooling.tool_registry import ToolRegistry
 
 # ── Person schema used across all tests ────────────────────────────────────
 
@@ -254,7 +254,7 @@ def test_B_emit_result_drives_done_reason_completed() -> None:
 
     registry = ToolRegistry()  # empty — emit_result is a SessionTool, not a registry tool
 
-    with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+    with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
         mock_build.return_value = MagicMock()
         mock_build.return_value.bind_tools.return_value = bound
 
@@ -339,7 +339,7 @@ def test_B2_ground_then_emit_yields_completed(tmp_path: Path) -> None:
     registry = ToolRegistry()
 
     with (
-        patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+        patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
         patch.object(search_pages_mod, "_resolve_runtime", return_value=runtime),
         patch.object(search_pages_mod, "_make_embedder", return_value=embedder),
     ):
@@ -442,7 +442,7 @@ class _RunWithRedriveRuntime:
         hm.run_post_tool_use.side_effect = lambda step, result: result
         hm.run_permission_request.side_effect = lambda step, decision: decision
 
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
             mock_build.return_value = MagicMock()
             mock_build.return_value.bind_tools.return_value = fake_bound
 

@@ -8,7 +8,9 @@ from pathlib import Path
 
 import pytest
 from mewbo_graph.wiki.types import (
+    CommitScope,
     Frontmatter,
+    IndexFingerprint,
     IndexingJob,
     NavEntry,
     Project,
@@ -103,6 +105,49 @@ def test_project_crud(tmp_path: Path) -> None:
     assert store.delete_project("org/repo") is False
     assert store.get_project("org/repo") is None
     assert len(store.list_projects()) == 1
+
+
+def test_project_crud_roundtrips_fingerprint(tmp_path: Path) -> None:
+    """The nested ``IndexFingerprint`` survives the REAL ``_save_json``/``_load_json``
+    path, not just ``model_validate`` in isolation — the round-trip proof this
+    field's design depends on."""
+    store = _store(tmp_path)
+    fp = IndexFingerprint(
+        embedding_model="openai/text-embedding-3-small",
+        graph_schema_version="1",
+        grammar_pack_version="1.12.2",
+        resolver_available=True,
+    )
+    p = _project("org/repo")
+    p = p.model_copy(update={"fingerprint": fp})
+    store.create_project(p)
+    got = store.get_project("org/repo")
+    assert got is not None
+    assert got.fingerprint == fp
+
+
+def test_project_crud_legacy_record_has_no_fingerprint(tmp_path: Path) -> None:
+    """A pre-migration Project JSON file (no ``fingerprint`` key at all) must
+    still load through the REAL disk path, with ``fingerprint`` reading
+    ``None`` rather than raising under ``extra="forbid"``.
+
+    Written by hand, bypassing ``create_project`` entirely, so this proves
+    the ``_load_json``/``model_validate_json`` path specifically — the model
+    layer alone (``test_types.py``) can't prove the on-disk shape agrees.
+    """
+    import json
+
+    store = _store(tmp_path)
+    legacy = _project("org/repo").model_dump(by_alias=True, mode="json")
+    assert "fingerprint" not in legacy or legacy["fingerprint"] is None
+    legacy.pop("fingerprint", None)
+    path = store._project_path("org/repo")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    got = store.get_project("org/repo")
+    assert got is not None
+    assert got.fingerprint is None
 
 
 # ── 2. Page CRUD ───────────────────────────────────────────────────────────────
@@ -308,16 +353,18 @@ def test_upsert_and_query_nodes(tmp_path: Path) -> None:
     store.upsert_nodes("x/y", nodes)
 
     # No filter
-    all_nodes = store.query_graph("x/y")
+    all_nodes = store.query_graph("x/y", scope=CommitScope.every())
     assert len(all_nodes) == 3
 
     # Filter by type
-    only_fns = store.query_graph("x/y", node_type="Function")
+    only_fns = store.query_graph("x/y", scope=CommitScope.every(), node_type="Function")
     assert len(only_fns) == 1
     assert only_fns[0].name == "foo"
 
     # Filter by name_match (substring, case-insensitive)
-    matched = store.query_graph("x/y", name_match="ba")  # matches "Bar"
+    matched = store.query_graph(
+        "x/y", scope=CommitScope.every(), name_match="ba"
+    )  # matches "Bar"
     assert len(matched) == 1
     assert matched[0].name == "Bar"
 
@@ -332,7 +379,7 @@ def test_upsert_nodes_overwrites_existing(tmp_path: Path) -> None:
     n2 = make_graph_node(slug="x/y", node_id="n1", type="File", name="a.py",
                    file="a.py", range=(0, 100), docstring="v2")
     store.upsert_nodes("x/y", [n2])
-    result = store.query_graph("x/y")
+    result = store.query_graph("x/y", scope=CommitScope.every())
     assert len(result) == 1
     assert result[0].docstring == "v2"
 
@@ -354,7 +401,7 @@ def test_upsert_and_neighbors_via_edges(tmp_path: Path) -> None:
         GraphEdge(slug="x/y", source="n1", target="n2", type="CONTAINS"),
         GraphEdge(slug="x/y", source="n2", target="n3", type="CALLS"),
     ])
-    neighbors = store.query_graph("x/y", neighbors_of="n2")
+    neighbors = store.query_graph("x/y", scope=CommitScope.every(), neighbors_of="n2")
     # neighbors_of returns nodes that have an edge with n2 as endpoint (either direction)
     names = sorted([n.name for n in neighbors])
     assert names == ["a.py", "bar"]
@@ -391,10 +438,10 @@ def test_graph_isolated_by_slug(tmp_path: Path) -> None:
                                          name="a", file="a", range=(0, 1))])
     store.upsert_nodes("c/d", [make_graph_node(slug="c/d", node_id="x", type="File",
                                          name="c", file="c", range=(0, 1))])
-    assert len(store.query_graph("a/b")) == 1
-    assert store.query_graph("a/b")[0].name == "a"
-    assert len(store.query_graph("c/d")) == 1
-    assert store.query_graph("c/d")[0].name == "c"
+    assert len(store.query_graph("a/b", scope=CommitScope.every())) == 1
+    assert store.query_graph("a/b", scope=CommitScope.every())[0].name == "a"
+    assert len(store.query_graph("c/d", scope=CommitScope.every())) == 1
+    assert store.query_graph("c/d", scope=CommitScope.every())[0].name == "c"
 
 
 # ── 10. attach_job_session / get_job_session ──────────────────────────────────

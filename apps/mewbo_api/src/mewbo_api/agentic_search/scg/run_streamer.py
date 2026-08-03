@@ -1,9 +1,9 @@
 """RunEventStreamer — project a live session transcript onto the run event log.
 
-The root-cause fix for "the console sits on *Starting search…* for the whole
-run": the orchestrated runner used to drive ``run_sync`` to completion and
-then ``_settle`` batch-replayed EVERY ``agent_*`` event at the end, so a 2m42s
-run emitted a single ``run_started`` followed by 53 events in one burst.
+What keeps the console off "*Starting search…*" for the whole run: without it
+the orchestrated runner drives ``run_sync`` to completion and ``_settle`` batch-
+replays EVERY ``agent_*`` event at the end, so a multi-minute run emits a single
+``run_started`` followed by dozens of events in one burst.
 
 The mechanism reuses the existing streaming seam verbatim — the core
 ``SessionEventBus`` (``session_event_bus.py``), the same in-process per-session
@@ -27,13 +27,14 @@ the api glue, not in the core engine or the graph library.
 
 from __future__ import annotations
 
+import json
 import threading
 from dataclasses import dataclass
 from typing import Any, cast, get_args
 
 from mewbo_core.common import get_logger
-from mewbo_core.session_event_bus import SessionEventBus, Subscription
-from mewbo_core.types import EventRecord
+from mewbo_core.contracts.types import EventRecord
+from mewbo_core.session.session_event_bus import SessionEventBus, Subscription
 
 from .. import events
 from ..schemas import ResultKindLiteral, SearchResult, TraceAgent, TraceLine
@@ -83,12 +84,10 @@ class ProbeTrace:
         """The lane's display name — the probe's agent KIND (``scg-path-probe``).
 
         Reads the ``sub_agent`` payload's ``agent_type`` (the agent kind Lane A
-        threads onto the lifecycle event). The EVIDENCE: the old code returned
-        ``payload["model"]`` (e.g. ``claude-haiku-4-5``) so every lane was
-        labelled by its MODEL, not its role — its own docstring said it should
-        be the kind. ``model`` is now exposed SEPARATELY via :meth:`model`.
-        Falls back to the literal ``scg-path-probe`` (NEVER the model) when
-        ``agent_type`` is absent (a pre-Lane-A transcript).
+        threads onto the lifecycle event) — NOT ``payload["model"]``, which
+        would label every lane by its model rather than its role. The model is
+        exposed SEPARATELY via :meth:`model`. Falls back to the literal
+        ``scg-path-probe`` (NEVER the model) when ``agent_type`` is absent.
         """
         return str(payload.get("agent_type") or "scg-path-probe")
 
@@ -366,7 +365,7 @@ class ResultsProjection:
         """Map the emit's entries onto stable-id :class:`SearchResult`s.
 
         ``emitter`` is the probe ``agent_id`` when the emit came from a probe
-        lane (``None`` for the root / a legacy payload): it salts the stable id
+        lane (``None`` for the root, or a payload carrying no ``agent_id``): it salts the stable id
         so two agents' emits never collide — and because the same transcript
         event carries the same ``agent_id`` live and at settle, the ids agree
         across both reads (the dedup invariant).
@@ -446,6 +445,83 @@ class ResultsProjection:
         return out or None
 
 
+class SpawnAttempts:
+    """Count PERMANENT ``spawn_agent``/``spawn_agents`` refusals from a ``tool_result``.
+
+    A spawn ACCEPTED (whether it starts immediately or is deferred by the
+    ``AgentQueue`` scheduler for a free slot) always earns a ``sub_agent`` start
+    event — already counted via ``len(trace)``, see ``TraceAgent``/``ProbeTrace``.
+    Admission never refuses for capacity (an over-subscribed spawn WAITS,
+    dispatched later by the scheduler); the only refusals are
+    PERMANENT resolution failures the coordinator will get identically on a
+    retry: an unresolvable project, an unknown ``agent_type``, an unavailable
+    model (``SpawnRefusalCode`` in core ``hypervisor.py`` — ``"capacity"`` is
+    listed there but, per its own comment, is "TRANSIENT — deferred, never
+    refused", i.e. never actually reaches a refusal). A permanent refusal never
+    earns a ``sub_agent`` event (core `spawn_agent.py`'s ``_emit_event`` for the
+    "start" fires AFTER hypervisor registration, which only happens on
+    acceptance), so counting probes by ``sub_agent`` events alone silently
+    drops it — a run that intended more probes than actually resolved reports
+    exactly the resolved count, with no trace of the shortfall. This class
+    reads the ONE place a permanent refusal DOES leave a mark: the
+    coordinator's own spawn-call ``tool_result``.
+
+    **Classification is STRUCTURAL, never a string-shape/prefix heuristic.**
+    A refusal's ``content`` is reported through ``_SpawnOutcome.report()`` as
+    the shared structured-error envelope ``{"error": {"code", "message",
+    "permanence"}}`` — that ``code`` (one of ``unresolvable_project`` /
+    ``unknown_agent_type`` / ``model_unavailable``) is the ONLY signal this
+    class trusts. Everything else that can land in ``result`` — an accepted
+    ``{"agent_id", "status"}`` object, or a bare ``"ERROR: Tool 'spawn_agent'
+    timed out after 120.0s"`` string from the LOOP's own per-tool-call
+    ``asyncio.wait_for`` ceiling (a wholly different failure: the probe WAS
+    admitted and started, it just ran long — see ``tool_use_loop.py``'s
+    ``_get_tool_timeout``) — must NOT count as a refusal. An earlier version of
+    this classifier treated "doesn't parse as an accepted JSON object" as
+    "refused", which silently counted every such timeout as a rejection and
+    would have kept firing even after capacity stopped refusing anything,
+    quietly becoming a mislabelled timeout counter. ``spawn_agents`` (batch
+    fan-out) needs no such structural check: its envelope always carries an
+    honest ``rejected`` tally computed the same way (entries that never
+    resolved), read straight off.
+    """
+
+    _TOOL_IDS = frozenset({"spawn_agent", "spawn_agents"})
+
+    @staticmethod
+    def rejected_count(payload: dict[str, Any]) -> int:
+        """Permanently-refused spawn attempts this ONE ``tool_result`` represents.
+
+        ``0`` for any tool_result that isn't a spawn call, for one whose
+        result doesn't parse as JSON (a timeout or other unstructured failure
+        — never a refusal), and for an accepted spawn.
+        """
+        tool_id = str(payload.get("tool_id") or "")
+        if tool_id not in SpawnAttempts._TOOL_IDS:
+            return 0
+        parsed = SpawnAttempts._parse_json_object(payload.get("result"))
+        if parsed is None:
+            return 0
+        if tool_id == "spawn_agents":
+            return int(parsed.get("rejected") or 0)
+        # Single spawn: a refusal is reported ONLY as the structured
+        # {"error": {"code": ...}} envelope — never inferred from the absence
+        # of an accepted shape, which would also match an unstructured
+        # failure (a timeout) that is not a refusal at all.
+        error = parsed.get("error")
+        return 1 if isinstance(error, dict) and error.get("code") else 0
+
+    @staticmethod
+    def _parse_json_object(raw: Any) -> dict[str, Any] | None:
+        if not isinstance(raw, str):
+            return None
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+
 class RunEventStreamer:
     """Live transcript→run-event projector for one search/structured run.
 
@@ -484,7 +560,7 @@ class RunEventStreamer:
         # id-set above (which only catches a re-read of the SAME emit).
         self._result_keys: set[str] = set()
         # TRUE per-emitter KEPT card count — credited to each lane's agent_done so
-        # a probe that emitted 3 cards reports 3 (the old hardcoded 0 was blind).
+        # a probe that emitted 3 cards reports 3, not a hardcoded 0.
         self._results_by_emitter: dict[str, int] = {}
         # Per-emitter RAW emit count (before cross-emitter dedup). The
         # ``returned − kept`` delta is the lane's "N filtered" — how much it
@@ -568,8 +644,7 @@ class RunEventStreamer:
         The last class exists because a child loop INHERITS the parent's
         ``event_logger`` (core ``AgentContext.child``) — probe tool calls land
         on THIS session's transcript/bus stamped with the probe's ``agent_id``
-        (an earlier premise that they "live in the probes' own
-        sessions" was wrong, verified live). A probe ``tool_result`` must
+        — they do NOT live in the probes' own sessions. A probe ``tool_result`` must
         therefore be classified by ``payload.agent_id`` against the known probe
         lanes (the spawn's ``sub_agent`` ``start`` always precedes the child's
         first tool call, so the lane is known by the time its tools fire) —
@@ -592,8 +667,8 @@ class RunEventStreamer:
         """The probe ``agent_id`` when this tool_result came from a probe lane.
 
         ``None`` for the root's own tool calls (its ``agent_id`` never opens a
-        probe lane) and for legacy payloads with no ``agent_id`` — both keep
-        the historical coordinator-lane path.
+        probe lane) and for payloads carrying no ``agent_id`` — both render on
+        the coordinator lane.
         """
         agent_id = str(payload.get("agent_id") or "")
         if not agent_id:

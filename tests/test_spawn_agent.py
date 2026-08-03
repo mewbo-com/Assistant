@@ -9,13 +9,13 @@ from typing import Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from langchain_core.messages import AIMessage
-from mewbo_core.agent_context import AgentContext
+from mewbo_core.agents.agent_context import AgentContext
+from mewbo_core.agents.hypervisor import AgentHandle, AgentHypervisor, DelegationContract
+from mewbo_core.agents.spawn_agent import SpawnAgentTool
 from mewbo_core.classes import ActionStep
 from mewbo_core.hooks import HookManager
-from mewbo_core.hypervisor import AgentHandle, AgentHypervisor, DelegationContract
 from mewbo_core.permissions import PermissionDecision, PermissionPolicy
-from mewbo_core.spawn_agent import SpawnAgentTool
-from mewbo_core.tool_registry import ToolRegistry, ToolSpec
+from mewbo_core.tooling.tool_registry import ToolRegistry, ToolSpec
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -123,7 +123,7 @@ class TestSpawnAgentBasic:
             bound = MagicMock()
             bound.ainvoke = fake_model.ainvoke
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
 
@@ -166,7 +166,7 @@ class TestSpawnAgentBasic:
 
             bound = MagicMock()
             bound.ainvoke = AsyncMock(return_value=_text_response("Child says hello"))
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
                 await tool.run_async(ActionStep(
@@ -278,7 +278,7 @@ class TestSpawnAgentToolScoping:
         )
 
         with patch(
-            "mewbo_core.tool_registry.get_config_value",
+            "mewbo_core.tooling.tool_registry.get_config_value",
             side_effect=lambda *a, **kw: (
                 ["blocked_tool"] if a == ("agent", "default_denied_tools") else kw.get("default")
             ),
@@ -334,7 +334,7 @@ class TestSpawnAgentParentContainment:
         assert {s.tool_id for s in specs} == {"tool_a"}
 
     def test_unstamped_falls_back_to_registry(self):
-        """Unstamped (root/unscoped) keeps the historical registry-wide set."""
+        """Unstamped (root/unscoped) keeps the whole registry-wide set."""
         registry = _make_registry("tool_a", "tool_b", "tool_c")
         tool = self._tool(registry)
 
@@ -388,7 +388,7 @@ class TestSpawnAgentParentContainment:
 
             bound = MagicMock()
             bound.ainvoke = AsyncMock(return_value=_text_response("done"))
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
                 await tool.run_async(
@@ -480,7 +480,7 @@ class TestSpawnAgentCapabilityMode:
 
             bound = MagicMock()
             bound.ainvoke = AsyncMock(return_value=_text_response("done"))
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
                 await tool.run_async(
@@ -513,7 +513,7 @@ class TestSpawnAgentModelValidation:
             hook_manager=_make_hook_manager(),
         )
         with patch(
-            "mewbo_core.spawn_agent.get_config_value",
+            "mewbo_core.agents.spawn_agent.get_config_value",
             return_value=[],
         ):
             result = tool._resolve_model("custom-model")
@@ -528,7 +528,7 @@ class TestSpawnAgentModelValidation:
             hook_manager=_make_hook_manager(),
         )
         with patch(
-            "mewbo_core.spawn_agent.get_config_value",
+            "mewbo_core.agents.spawn_agent.get_config_value",
             side_effect=lambda *a, **kw: (
                 ["allowed-model"] if a == ("agent", "allowed_models") else kw.get("default", "")
             ),
@@ -545,7 +545,7 @@ class TestSpawnAgentModelValidation:
             hook_manager=_make_hook_manager(),
         )
         with patch(
-            "mewbo_core.spawn_agent.get_config_value",
+            "mewbo_core.agents.spawn_agent.get_config_value",
             side_effect=lambda *a, **kw: (
                 []
                 if a == ("agent", "allowed_models")
@@ -566,7 +566,7 @@ class TestSpawnAgentModelValidation:
             hook_manager=_make_hook_manager(),
         )
         with patch(
-            "mewbo_core.spawn_agent.get_config_value",
+            "mewbo_core.agents.spawn_agent.get_config_value",
             side_effect=lambda *a, **kw: (
                 []
                 if a == ("agent", "allowed_models")
@@ -584,7 +584,7 @@ class TestSpawnAgentDepthGate:
 
     def test_leaf_agent_has_no_spawn_tool(self):
         """ToolUseLoop at max_depth should not create a SpawnAgentTool."""
-        from mewbo_core.tool_use_loop import ToolUseLoop
+        from mewbo_core.loop.tool_use_loop import ToolUseLoop
 
         ctx = _make_context(max_depth=1, depth=1)
         assert ctx.can_spawn is False
@@ -604,7 +604,7 @@ class TestSpawnAgentDepthGate:
 
 
 class TestSpawnAgentApprovalCallback:
-    """Ref: [DeepMind-Delegation §4.7] Sub-agents inherit parent's approval policy."""
+    """Sub-agents inherit parent's approval policy."""
 
     def test_approval_callback_stored(self):
         ctx = _make_context()
@@ -630,7 +630,7 @@ class TestSpawnAgentApprovalCallback:
 
 
 class TestSpawnAgentResult:
-    """Ref: [CoA §3.1] Sub-agents return structured AgentResult (Communication Unit)."""
+    """Sub-agents return structured AgentResult (Communication Unit)."""
 
     def test_result_is_json_with_status(self):
         """Non-root spawn returns blocking JSON AgentResult."""
@@ -652,7 +652,7 @@ class TestSpawnAgentResult:
             bound = MagicMock()
             bound.ainvoke = fake_model.ainvoke
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
 
@@ -693,7 +693,7 @@ class TestSpawnAgentResult:
             bound = MagicMock()
             bound.ainvoke = fake_model.ainvoke
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
 
@@ -749,7 +749,7 @@ class TestSpawnAgentChildBudgetExhaustion:
                 return_value=_text_response("Wrap-up: partial work done, X remains.")
             )
 
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = MagicMock()
                 mock_build.return_value.ainvoke = wrapup_invoke
@@ -793,7 +793,7 @@ class TestSpawnAgentDelegationContract:
             )
             bound = MagicMock()
             bound.ainvoke = AsyncMock(return_value=_text_response("Done!"))
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
                 result = await tool.run_async(
@@ -863,7 +863,7 @@ class TestSpawnAgentDelegationContract:
             )
 
             with (
-                patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+                patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
                 patch.object(registry, "get", return_value=mock_tool),
             ):
                 mock_build.return_value = MagicMock()
@@ -918,8 +918,8 @@ class TestSpawnAgentDelegationContract:
                 return kwargs.get("default")
 
             with (
-                patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
-                patch("mewbo_core.spawn_agent.get_config_value", side_effect=_config),
+                patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
+                patch("mewbo_core.agents.spawn_agent.get_config_value", side_effect=_config),
             ):
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
@@ -975,7 +975,7 @@ class TestSpawnAgentDelegationContract:
             )
             bound = MagicMock()
             bound.ainvoke = AsyncMock(return_value=_text_response("Done!"))
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
 
@@ -1012,11 +1012,11 @@ class TestSpawnAgentDelegationContract:
 
 
 class TestSpawnAgentSummaryKind:
-    """Phase 1b — task-typed ``AgentResult.summary_kind`` (Ref: [CoA §3]).
+    """Task-typed ``AgentResult.summary_kind``.
 
     ``summary_kind`` is opt-in: unset (or unrecognised) must leave the child's
-    task text and the returned ``AgentResult`` byte-identical to the historical
-    untyped path. Declared, it appends ONE directive (a plain dict lookup on
+    task text and the returned ``AgentResult`` byte-identical to the untyped
+    path. Declared, it appends ONE directive (a plain dict lookup on
     ``SpawnAgentTask.SUMMARY_KIND_DIRECTIVES`` — never a per-kind branch in the
     spawn service) and is stamped onto the result and the ``stop`` event.
     """
@@ -1032,7 +1032,7 @@ class TestSpawnAgentSummaryKind:
         )
         bound = MagicMock()
         bound.ainvoke = AsyncMock(return_value=_text_response("Done!"))
-        with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+        with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
             mock_build.return_value = MagicMock()
             mock_build.return_value.bind_tools.return_value = bound
             result = await tool.run_async(
@@ -1057,7 +1057,7 @@ class TestSpawnAgentSummaryKind:
 
     def test_running_summary_and_code_signature_kinds_use_their_own_directive(self):
         """The directive text is looked up per kind, not one fixed string."""
-        from mewbo_core.spawn_agent import SpawnAgentTask
+        from mewbo_core.agents.spawn_agent import SpawnAgentTask
 
         async def _test():
             _, running_content = await self._spawn_blocking(
@@ -1119,7 +1119,7 @@ class TestSpawnAgentSummaryKind:
             )
             bound = MagicMock()
             bound.ainvoke = AsyncMock(return_value=_text_response("Done!"))
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
                 await tool.run_async(ActionStep(
@@ -1155,7 +1155,7 @@ class TestSpawnAgentSummaryKind:
             )
             bound = MagicMock()
             bound.ainvoke = AsyncMock(return_value=_text_response("Done!"))
-            with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+            with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
                 mock_build.return_value = MagicMock()
                 mock_build.return_value.bind_tools.return_value = bound
                 await tool.run_async(ActionStep(
@@ -1175,11 +1175,11 @@ class TestSpawnAgentSummaryKind:
 
 
 class TestSpawnAgentSchema:
-    """Ref: [DeepMind-Delegation §4.1] Contract-first decomposition with acceptance criteria."""
+    """Contract-first decomposition with acceptance criteria."""
 
     def test_schema_includes_max_steps_deprecated(self):
         """max_steps field is retained in schema for backward compatibility."""
-        from mewbo_core.spawn_agent import SPAWN_AGENT_SCHEMA
+        from mewbo_core.agents.spawn_agent import SPAWN_AGENT_SCHEMA
 
         props = SPAWN_AGENT_SCHEMA["function"]["parameters"]["properties"]
         assert "max_steps" in props
@@ -1187,16 +1187,16 @@ class TestSpawnAgentSchema:
         assert "deprecated" in props["max_steps"]["description"].lower()
 
     def test_schema_includes_acceptance_criteria(self):
-        from mewbo_core.spawn_agent import SPAWN_AGENT_SCHEMA
+        from mewbo_core.agents.spawn_agent import SPAWN_AGENT_SCHEMA
 
         props = SPAWN_AGENT_SCHEMA["function"]["parameters"]["properties"]
         assert "acceptance_criteria" in props
         assert props["acceptance_criteria"]["type"] == "string"
 
     def test_schema_includes_summary_kind(self):
-        """Phase 1b — optional task-typed CU shape, ``spawn_agents``
-        picks it up for free since its ``items`` schema IS this one (DRY)."""
-        from mewbo_core.spawn_agent import SPAWN_AGENT_SCHEMA, SPAWN_AGENTS_SCHEMA
+        """``summary_kind`` is optional, and ``spawn_agents`` picks it up for
+        free since its ``items`` schema IS this one (DRY)."""
+        from mewbo_core.agents.spawn_agent import SPAWN_AGENT_SCHEMA, SPAWN_AGENTS_SCHEMA
 
         props = SPAWN_AGENT_SCHEMA["function"]["parameters"]["properties"]
         assert "summary_kind" in props
@@ -1260,7 +1260,7 @@ async def _spawn_root_agent_and_wait(
     bound = MagicMock()
     bound.ainvoke = fake_model.ainvoke
 
-    with patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build:
+    with patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build:
         mock_build.return_value = MagicMock()
         mock_build.return_value.bind_tools.return_value = bound
 
@@ -1279,10 +1279,11 @@ async def _spawn_root_agent_and_wait(
 class TestNonBlockingLifecycle:
     """Non-blocking root spawns: handles persist after completion for check_agents visibility.
 
-    Regression suite for the three bugs identified via trace 8a63a463:
-    - Bug 1: premature unregister cleared completed handles before parent could read them
-    - Bug 2: send_to_parent fired after unregister so always failed silently
-    - Bug 3: notification contained only status string, not task description or result
+    Three failure modes are pinned here:
+    - a premature unregister clears completed handles before the parent reads them
+    - send_to_parent fired after unregister always fails silently
+    - a notification carrying only the status string drops the task description
+      and the result
     """
 
     def test_completed_handle_stays_in_registry_after_lifecycle(self):
@@ -1365,7 +1366,7 @@ class TestSubstituteAgentBody:
     """
 
     def test_direct_substitution_from_subs(self):
-        from mewbo_core.spawn_agent import substitute_agent_body
+        from mewbo_core.agents.spawn_agent import substitute_agent_body
 
         body = "root=${CLAUDE_PLUGIN_ROOT}\nsession=${SESSION_ID}"
         out = substitute_agent_body(
@@ -1376,14 +1377,14 @@ class TestSubstituteAgentBody:
         assert out == "root=/plugins/x\nsession=s1"
 
     def test_bash_default_when_env_unset(self):
-        from mewbo_core.spawn_agent import substitute_agent_body
+        from mewbo_core.agents.spawn_agent import substitute_agent_body
 
         body = "root=${MEWBO_WIDGET_ROOT:-/tmp/mewbo/widgets}"
         out = substitute_agent_body(body, {}, env={})
         assert out == "root=/tmp/mewbo/widgets"
 
     def test_bash_default_honours_env_when_set(self):
-        from mewbo_core.spawn_agent import substitute_agent_body
+        from mewbo_core.agents.spawn_agent import substitute_agent_body
 
         body = "root=${MEWBO_WIDGET_ROOT:-/tmp/mewbo/widgets}"
         out = substitute_agent_body(
@@ -1392,21 +1393,21 @@ class TestSubstituteAgentBody:
         assert out == "root=/custom/path"
 
     def test_plain_dollar_var_expands_from_env(self):
-        from mewbo_core.spawn_agent import substitute_agent_body
+        from mewbo_core.agents.spawn_agent import substitute_agent_body
 
         body = "home is $HOME"
         out = substitute_agent_body(body, {}, env={"HOME": "/root"})
         assert out == "home is /root"
 
     def test_unknown_plain_dollar_var_stays_literal(self):
-        from mewbo_core.spawn_agent import substitute_agent_body
+        from mewbo_core.agents.spawn_agent import substitute_agent_body
 
         body = "unset $NOT_A_REAL_VARIABLE"
         out = substitute_agent_body(body, {}, env={})
         assert out == "unset $NOT_A_REAL_VARIABLE"
 
     def test_all_three_passes_compose(self):
-        from mewbo_core.spawn_agent import substitute_agent_body
+        from mewbo_core.agents.spawn_agent import substitute_agent_body
 
         body = (
             "plugin=${CLAUDE_PLUGIN_ROOT} "

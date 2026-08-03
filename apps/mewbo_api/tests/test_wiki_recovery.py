@@ -89,8 +89,8 @@ def test_recover_caps_retries_per_slug(tmp_path):
 
     assert refreshed == []  # over the cap — not re-driven
     # A retry-exhausted job is moved to terminal ``failed`` so it stops being a
-    # zombie in the active-jobs surface (previously it was left ``interrupted``
-    # forever, which kept the project pinned as "still indexing").
+    # zombie in the active-jobs surface — left ``interrupted`` it would pin the
+    # project as "still indexing" forever.
     assert store.get_job("jl").status == "failed"
     assert any(e["type"] == "error" for e in store.load_job_events("jl"))
 
@@ -206,12 +206,18 @@ def test_init_wiki_calls_recovery(monkeypatch, tmp_path):
 
     called: dict = {}
 
-    def _fake_recover(s, rt):
+    def _fake_recover(s, rt, *, hook_manager=None):
         called["args"] = (s, rt)
+        called["hook_manager"] = hook_manager
         return ["host/a"]
 
     monkeypatch.setattr(wiki_pkg.JobRecovery, "recover_interrupted", staticmethod(_fake_recover))
-    wiki_pkg._run_recovery(runtime.wiki_store, runtime)
+    sentinel = object()
+    wiki_pkg._run_recovery(runtime.wiki_store, runtime, hook_manager=sentinel)
     assert called["args"] == (store, runtime)
+    # The shared hook manager has to travel all the way to the boot-time
+    # re-drives: a re-driven job that dies again is only handed back to
+    # recovery by a session-end hook the Orchestrator can actually see.
+    assert called["hook_manager"] is sentinel
     # The legacy reap helper is gone.
     assert not hasattr(wiki_pkg, "_reap_stranded_jobs")

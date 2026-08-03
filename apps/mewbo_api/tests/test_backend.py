@@ -10,7 +10,7 @@ import time
 from unittest.mock import patch
 
 from mewbo_api import backend
-from mewbo_core.session_store import SessionStore
+from mewbo_core.session.session_store import SessionStore
 
 
 class DummyQueue:
@@ -202,10 +202,22 @@ def _reset_backend(tmp_path, monkeypatch):
     )
 
 
-def _fake_run_sync(*, session_id: str, user_query: str, should_cancel=None, **_kwargs):
-    backend.session_store.append_event(
-        session_id, {"type": "user", "payload": {"text": user_query}}
-    )
+def _fake_run_sync(
+    *,
+    session_id: str,
+    user_query: str,
+    should_cancel=None,
+    user_turn_persisted=False,
+    **_kwargs,
+):
+    # ``user_turn_persisted`` is honoured for the same reason the sibling fakes
+    # in test_backend_sessions_flow.py honour it: the acceptance seam
+    # (``start_async``) writes the turn before handing off the run, so a stub
+    # that appends unconditionally reports TWO user events for one turn.
+    if not user_turn_persisted:
+        backend.session_store.append_event(
+            session_id, {"type": "user", "payload": {"text": user_query}}
+        )
     if should_cancel and should_cancel():
         backend.session_store.append_event(
             session_id,
@@ -265,6 +277,12 @@ def test_sessions_create_list_and_events(monkeypatch, tmp_path):
     assert payload["session_id"] == session_id
     assert payload["events"]
     assert payload["running"] is False
+    # The real acceptance seam (start_async) persists the turn before handing
+    # off to (the monkeypatched) run_sync — a fake that also writes its own
+    # user event, unconditionally, would double it silently, since nothing
+    # else here inspects individual event types.
+    user_events = [e for e in payload["events"] if e.get("type") == "user"]
+    assert len(user_events) == 1
 
     listing = client.get(
         "/api/sessions",
@@ -430,7 +448,7 @@ def test_regenerate_session_title(monkeypatch, tmp_path):
     async def fake_gen(_events):
         return "Debug CI Pipeline"
 
-    with patch("mewbo_core.title_generator.generate_session_title", fake_gen):
+    with patch("mewbo_core.session.title_generator.generate_session_title", fake_gen):
         resp = client.post(
             f"/api/sessions/{session_id}/title",
             headers={"X-API-KEY": backend.MASTER_API_TOKEN},
@@ -447,7 +465,7 @@ def test_regenerate_session_title(monkeypatch, tmp_path):
     async def null_gen(_events):
         return None
 
-    with patch("mewbo_core.title_generator.generate_session_title", null_gen):
+    with patch("mewbo_core.session.title_generator.generate_session_title", null_gen):
         resp = client.post(
             f"/api/sessions/{session_id}/title",
             headers={"X-API-KEY": backend.MASTER_API_TOKEN},
@@ -1018,6 +1036,11 @@ def _setup_nc_channel(tmp_path, monkeypatch):
     )
     ch_routes._runtime = backend.runtime
     ch_routes._hook_manager = backend._hook_manager
+    # Same hand-wiring as the two globals above: another test in the suite may
+    # have called ``init_channels`` without the project collaborators, which
+    # leaves the channel project context disarmed for the rest of the process.
+    ch_routes._projects.catalog_source = backend._catalog
+    ch_routes._projects.resolve_session_cwd = backend._resolve_session_cwd
     ch_routes._registry.register(adapter)
 
 
@@ -1271,21 +1294,16 @@ def test_webhook_switch_project_valid(monkeypatch, tmp_path):
     client = backend.app.test_client()
     from mewbo_api.channels import routes as ch_routes
     from mewbo_core.config import ProjectConfig
+    from mewbo_core.workspaces.project_catalog import ProjectCatalog
 
     project_dir = str(tmp_path / "my-project")
     os.makedirs(project_dir, exist_ok=True)
     monkeypatch.setattr(
-        ch_routes,
-        "get_config",
-        lambda: type(
-            "Cfg",
-            (),
-            {
-                "projects": {
-                    "test-proj": ProjectConfig(path=project_dir, description="Test"),
-                }
-            },
-        )(),
+        ch_routes._projects,
+        "catalog_source",
+        lambda: ProjectCatalog(
+            configured={"test-proj": ProjectConfig(path=project_dir, description="Test")}
+        ),
     )
 
     # Switch to the project
@@ -1293,16 +1311,17 @@ def test_webhook_switch_project_valid(monkeypatch, tmp_path):
     resp = client.post("/api/webhooks/nextcloud-talk", data=body, headers=_nc_sign(body))
     assert resp.status_code == 200
 
-    # Verify context event was written
+    # The switch writes the SHARED keys every other surface's cwd resolution
+    # reads, not a room-local pair.
     session_id = backend.session_store.resolve_tag("nextcloud-talk:room:room1")
     events = backend.session_store.load_transcript(session_id)
     project_ctx = [
         e
         for e in events
-        if e.get("type") == "context" and "active_project_cwd" in e.get("payload", {})
+        if e.get("type") == "context" and e.get("payload", {}).get("project") == "test-proj"
     ]
     assert len(project_ctx) == 1
-    assert project_ctx[0]["payload"]["active_project_cwd"] == project_dir
+    assert project_ctx[0]["payload"]["cwd"] == project_dir
 
     # Now send a real query — cwd should be read from the context event
     captured = {}

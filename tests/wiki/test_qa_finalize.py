@@ -13,7 +13,6 @@ from types import SimpleNamespace
 import mongomock
 import pytest
 from mewbo_api.wiki.jobs import QaSessionEndHook
-from mewbo_core.permissions import auto_approve
 from mewbo_graph.entities.types import Entity
 from mewbo_graph.plugins.wiki import emit_answer as emit_answer_mod
 from mewbo_graph.wiki.memory_types import MemoryFilter
@@ -127,14 +126,14 @@ def test_tag_page_citations_matches_title_form_refs(store):
 def test_accessed_trail_is_bounded_and_score_ordered():
     """The fold caps the trail to top-N, scores-first, so graph-nav bulk can't flood.
 
-    Regression: probes record ~dozens of unranked graph-navigation seeds
-    plus a few ranked search hits. The folded ``accessed_sources`` trail must be a
+    Probes record ~dozens of unranked graph-navigation seeds plus a few ranked
+    search hits. The folded ``accessed_sources`` trail must be a
     tight, score-ordered top-N — the high-signal scored hits FIRST (descending),
     the unscored navigation seeds AFTER, and the bulk capped out — not the full
     unranked navigation set recorded as if it were grounding.
     """
     events: list[dict] = []
-    # 30 graph-navigation seeds — the sprawl the old fold flooded with (unscored).
+    # 30 unscored graph-navigation seeds — the sprawl the fold must not flood with.
     for i in range(30):
         events.append(
             {"type": "access", "records": [{"ref": f"graph:nav{i}", "op": "nav"}]}
@@ -152,7 +151,7 @@ def test_accessed_trail_is_bounded_and_score_ordered():
     assert len(out) == ACCESS_TOPN
     # Scored hits lead, in descending score order.
     assert out[:3] == ["graph:hitA", "graph:hitB", "graph:hitC"]
-    # The graph-nav bulk no longer floods — only the cap-remainder survives.
+    # The graph-nav bulk does not flood — only the cap-remainder survives.
     assert sum(1 for r in out if r.startswith("graph:nav")) == ACCESS_TOPN - 3
 
 
@@ -170,7 +169,7 @@ def test_accessed_trail_dedupes_by_ref_keeping_best_score():
 
 
 def test_accessed_trail_folds_legacy_refs_events():
-    """A stored legacy ``access`` event (bare ``refs`` strings) still folds (back-compat)."""
+    """A stored ``access`` event carrying bare ``refs`` strings still folds."""
     events = [
         {"type": "access", "refs": ["graph:n1", "src/a.py#L1-9"]},
         {"type": "access", "refs": ["graph:n1", "wiki:lp"]},
@@ -248,7 +247,7 @@ def test_current_turn_events_scopes_to_last_meta():
 
 
 def test_current_turn_events_no_meta_returns_all():
-    """No ``meta`` event at all (malformed/legacy log) ⇒ scope to everything (safe fallback)."""
+    """No ``meta`` event at all (a malformed log) ⇒ scope to everything."""
     events = [{"type": "block_open", "index": 0, "block": {"kind": "p", "text": "x"}}]
     assert QaFinalizer.current_turn_events(events) == events
 
@@ -327,8 +326,9 @@ def test_summary_sources_prefers_explicit_summary_ready(store):
 def test_summary_sources_fold_file_graph_from_accessed_trail(store):
     """Cited sources represent file/graph evidence, not just pages.
 
-    Files are the most-read source but the LLM's curated block is ~100% page-slugs,
-    so provenance used to collapse to pages. The finalizer now folds the non-page
+    Files are the most-read source but the LLM's curated block is ~100%
+    page-slugs, so provenance collapses to pages unless the finalizer folds the
+    non-page
     refs off the deterministic accessed trail (already bounded + score-ranked by
     ``qa_access``) into ``summary_sources`` — curated pages first, then the files +
     graph symbols the answer actually grounded on, deduped; a ``wiki:`` trail ref is
@@ -412,7 +412,7 @@ def test_session_end_hook_finalizes_and_stamps_models(store):
     assert snap.accessed_sources == ["graph:n7", "src/app.py#L1-20", "wiki:landing-page"]
 
 
-# ── Backend-divergence regression (the JSON-only tests above missed this) ──────
+# ── Backend divergence (the JSON-only tests above cannot see this) ────────────
 
 
 def _seed_for_close(s):
@@ -601,7 +601,7 @@ def test_session_end_hook_deposits_qa_memory(deposit_store):
     assert notes[0].provenance.source == "qa"
 
 
-# ── No-emit failure honesty + the one-shot nudge rescue (gpt-oss-120b class) ──
+# ── No-emit failure honesty + the honest unmet-goal assertion (gpt-oss-120b class) ──
 
 
 def _empty_answer_store(tmp_path, answer_id="e1", session_id="sess-e"):
@@ -627,8 +627,8 @@ def test_close_no_blocks_no_error_is_error(tmp_path):
     assert "wiki_emit_answer" in last["error"]["message"]
 
 
-def _nudge_runtime(store, transcript=()):
-    """Fake runtime recording start_async re-drives (the nudge seam)."""
+def _hook_runtime(store, transcript=()):
+    """Fake runtime for the session-end hook — no re-drive machinery to fake anymore."""
     calls = []
     runtime = SimpleNamespace(
         wiki_store=store,
@@ -638,50 +638,189 @@ def _nudge_runtime(store, transcript=()):
     return runtime, calls
 
 
-def test_session_end_hook_nudges_once_on_empty_answer(tmp_path):
-    """No-error, zero-block end → ONE corrective re-drive; still empty → honest error."""
+def test_session_end_hook_closes_silent_answer_and_asserts_unmet_goal(tmp_path):
+    """No-error, zero-block end → close honestly AND report the mismatch upward.
+
+    No re-drive is ever attempted: ``on_session_end`` runs from inside the
+    run's own ``finally``, so a same-session re-drive could only ever refuse.
+    The completion seam's required-terminal gate catches this case in-band;
+    this hook is the net for whatever slips past it.
+    """
     s = _empty_answer_store(tmp_path)
-    runtime, calls = _nudge_runtime(s)
-    hook = QaSessionEndHook(runtime, hook_manager="hm")
+    runtime, calls = _hook_runtime(s)
+    hook = QaSessionEndHook(runtime)
 
-    hook("sess-e", None)  # first end: rescue, don't close
-    assert len(calls) == 1
-    drive = calls[0]
-    assert drive["session_id"] == "sess-e"
-    assert "wiki_emit_answer" in drive["user_query"]
-    assert drive["approval_callback"] is auto_approve
-    assert drive["strict_tool_scope"] is True
-    assert drive["hook_manager"] == "hm"
-    events = s.load_qa_events("e1")
-    assert any(ev.get("type") == "nudge" for ev in events)
-    assert not any(ev.get("type") in ("complete", "error") for ev in events)
+    assertion = hook("sess-e", None)
 
-    hook("sess-e", None)  # nudged run also emitted nothing: close honestly, no loop
-    assert len(calls) == 1  # no second re-drive — bounded to one
+    assert calls == []  # never attempts a re-drive
     assert s.get_qa("e1").status == "error"
+    assert s.load_qa_events("e1")[-1]["type"] == "error"
+    assert assertion is not None
+    assert assertion.reason == "qa_answer_not_emitted"
+    assert "e1" in assertion.detail
+
+    # Idempotent: the answer is already terminal, so a second session-end
+    # settles nothing new and reports no further assertion.
+    assert hook("sess-e", None) is None
 
 
-def test_session_end_hook_never_nudges_blocks_error_or_cancelled(tmp_path):
-    """The rescue only fires for the silent-empty case — never on blocks/error/cancel."""
-    # (a) blocks present → normal complete, no re-drive
+# ── Re-drive turn boundary: a re-open ARMs on block_open, not on meta alone ───
+
+
+def test_close_recovers_after_error_without_intervening_meta(tmp_path):
+    """A re-drive's blocks reconcile even though NO new ``meta`` opened them.
+
+    This is the production defect: run 1 ends without emitting (``close()``
+    stamps an ``error`` terminal), then a recovery run calls ``wiki_emit_answer``
+    successfully with NO intervening ``meta`` (a re-drive re-engages the same
+    turn). Under the OLD "strictly after the last meta" rule the recovery
+    run's ``block_open``s still shared a slice with run 1's ``error`` — the
+    idempotency guard matched that stale terminal and ``close()`` returned
+    False forever, discarding the recovered answer. Verified by hand against
+    the old rule (a slice scoped to "after the last meta" over this exact
+    event sequence still contains the ``error`` event): it returns False here.
+    """
+    s = _empty_answer_store(tmp_path, answer_id="r1", session_id="sess-r")
+    assert QaFinalizer.close(s, "r1") is True  # run 1: no blocks -> auto "error"
+    assert s.get_qa("r1").status == "error"
+    events_at_error = len(s.load_qa_events("r1"))
+
+    # Recovery run: block_opens land directly, no new meta.
+    s.append_qa_event("r1", {"type": "block_open", "index": 0,
+                             "block": {"kind": "p", "text": "Recovered answer."}})
+    s.append_qa_event("r1", {"type": "block_open", "index": 1, "block": {
+        "kind": "sources", "items": ["wiki:landing-page"]}})
+    assert len(s.load_qa_events("r1")) == events_at_error + 2  # sanity: no re-seed
+
+    assert QaFinalizer.close(s, "r1") is True
+    snap = s.get_qa("r1")
+    assert snap.status == "complete"
+    assert [b.root.kind for b in snap.blocks] == ["p", "sources"]
+    assert s.load_qa_events("r1")[-1]["type"] == "complete"
+
+
+def test_close_refuses_on_stray_access_after_complete(store):
+    """A straggler ``access`` after a clean ``complete`` must NOT re-open the turn.
+
+    Guards the specific safeguard the new rule adds: a terminal event ALONE
+    does not arm the reopen — only an actual ``block_open`` following one
+    does. Without that requirement, a straggler probe ``access`` landing
+    after a clean answer would form an "empty" current-turn slice (no
+    terminal in it), and ``close()`` would re-run — reconciling zero blocks,
+    finding neither blocks nor an explicit error, and re-stamping the
+    already-delivered answer as ``error``. Confirmed the guard is load-bearing
+    by hand-checking an eager alternative (reopen immediately after ANY
+    terminal, no ``block_open`` required): over this exact sequence it
+    returns True and corrupts the snapshot to ``status: "error"`` — this test
+    would fail against that alternative.
+    """
+    assert QaFinalizer.close(store, "a1") is True
+    snap_before = store.get_qa("a1").model_dump(by_alias=True)
+
+    store.append_qa_event("a1", {"type": "access", "refs": ["graph:strayNode"]})
+
+    assert QaFinalizer.close(store, "a1") is False
+    assert store.get_qa("a1").model_dump(by_alias=True) == snap_before
+    assert store.load_qa_events("a1")[-1]["type"] == "access"  # no new terminal appended
+
+
+def test_emit_atomicity_guard_admits_followup_turn(store, monkeypatch):
+    """A follow-up turn (a fresh ``meta``) is never refused by the emit guard,
+    and turn 2's own blocks — not turn 1's — are what gets reconciled.
+
+    An emit guard scanning the WHOLE cumulative log for any ``block_open``
+    makes a follow-up turn (which DOES write its own ``meta``) still see turn
+    1's blocks and refuse as "already emitted" — so no follow-up ever delivers
+    an answer. The guard asks
+    ``QaFinalizer.current_turn_events`` (the same seam ``close()`` uses), so
+    a fresh ``meta`` resets its view exactly as it resets ``close()``'s.
+    """
+    monkeypatch.setattr(
+        emit_answer_mod, "_resolve_runtime", lambda: SimpleNamespace(wiki_store=store)
+    )
+    # Turn 1 (seeded by the `store` fixture: meta + access + 2 block_opens) —
+    # close it the way the on_session_end net would, so it is terminal.
+    assert QaFinalizer.close(store, "a1") is True
+
+    # Turn 2: a genuine follow-up opens with a fresh meta.
+    store.append_qa_event("a1", {"type": "meta", "answerId": "a1"})
+
+    tool = emit_answer_mod.WikiEmitAnswerTool("sess-1")
+    step = SimpleNamespace(tool_input={"blocks": [
+        {"kind": "p", "text": "Turn 2's answer."},
+        {"kind": "sources", "items": ["wiki:x"]},
+    ]})
+    result = asyncio.run(tool.handle(step))
+
+    assert "already emitted" not in str(result.content)
+    assert tool.should_terminate_run() is True
+    snap = store.get_qa("a1")
+    assert snap.status == "complete"
+    # Turn 2's blocks, not turn 1's leftover "The answer." / "wiki:landing-page" pair.
+    assert len(snap.blocks) == 2
+    assert snap.blocks[0].root.text.root == "Turn 2's answer."
+
+
+def test_close_idempotency_still_short_circuits_current_turns_own_complete(store):
+    """The current turn's own ``complete`` still short-circuits a second ``close()``.
+
+    Unchanged contract carried forward under the new rule — a terminal that
+    belongs to the SAME turn (nothing re-opened it) must still make ``close()``
+    idempotent, exactly as before.
+    """
+    assert QaFinalizer.close(store, "a1") is True
+    n = len(store.load_qa_events("a1"))
+    assert QaFinalizer.close(store, "a1") is False
+    assert len(store.load_qa_events("a1")) == n
+
+
+def test_close_leaves_prior_error_standing_when_redrive_emits_nothing(tmp_path):
+    """A re-drive that itself emits no blocks leaves the prior ``error`` standing.
+
+    Mirrors the production scenario's OTHER outcome: if the recovery run
+    probes but never reaches ``wiki_emit_answer``, there is no ``block_open``
+    to arm the reopen, so the slice still contains run 1's ``error`` and
+    ``close()`` correctly refuses (idempotent no-op) rather than silently
+    reconciling an empty "complete".
+    """
+    s = _empty_answer_store(tmp_path, answer_id="r2", session_id="sess-r2")
+    assert QaFinalizer.close(s, "r2") is True  # run 1: no blocks -> auto "error"
+    snap_before = s.get_qa("r2").model_dump(by_alias=True)
+
+    # Re-drive probes something but never emits a block.
+    s.append_qa_event("r2", {"type": "access", "refs": ["graph:n9"]})
+
+    assert QaFinalizer.close(s, "r2") is False
+    assert s.get_qa("r2").model_dump(by_alias=True) == snap_before
+    assert s.load_qa_events("r2")[-1]["type"] == "access"
+
+
+def test_session_end_hook_returns_no_assertion_when_already_settled(tmp_path):
+    """The mismatch report only fires for the silent-empty case — never on
+    blocks/error/cancel, each of which already reached (or explains) its
+    terminal state through some other path."""
+    # (a) blocks present AND already closed (wiki_emit_answer's own close()
+    #     already ran, as it does on the real happy path), no assertion.
     s1 = _empty_answer_store(tmp_path, answer_id="b1", session_id="sess-b")
     s1.append_qa_event("b1", {"type": "block_open", "index": 0,
                               "block": {"kind": "p", "text": "x"}})
-    r1, c1 = _nudge_runtime(s1)
-    QaSessionEndHook(r1)("sess-b", None)
+    assert QaFinalizer.close(s1, "b1") is True
+    r1, c1 = _hook_runtime(s1)
+    assert QaSessionEndHook(r1)("sess-b", None) is None
     assert c1 == [] and s1.get_qa("b1").status == "complete"
 
-    # (b) session error → honest error close, no re-drive
+    # (b) session error → honest error close, no assertion — the loop's own
+    #     done_reason already carries the failure; nothing left to promote.
     s2 = _empty_answer_store(tmp_path, answer_id="x1", session_id="sess-x")
-    r2, c2 = _nudge_runtime(s2)
-    QaSessionEndHook(r2)("sess-x", "model exploded")
+    r2, c2 = _hook_runtime(s2)
+    assert QaSessionEndHook(r2)("sess-x", "model exploded") is None
     assert c2 == [] and s2.get_qa("x1").status == "error"
 
-    # (c) already cancelled → close() no-ops, no re-drive
+    # (c) already cancelled → close() no-ops, no assertion.
     s3 = _empty_answer_store(tmp_path, answer_id="c1", session_id="sess-c")
     s3.append_qa_event("c1", {"type": "cancelled"})
-    r3, c3 = _nudge_runtime(s3)
-    QaSessionEndHook(r3)("sess-c", None)
+    r3, c3 = _hook_runtime(s3)
+    assert QaSessionEndHook(r3)("sess-c", None) is None
     assert c3 == []
     assert not any(e.get("type") in ("complete", "error")
                    for e in s3.load_qa_events("c1") if e.get("type") != "cancelled")

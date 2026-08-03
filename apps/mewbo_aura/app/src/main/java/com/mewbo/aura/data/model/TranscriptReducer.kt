@@ -344,6 +344,8 @@ object TranscriptReducer {
                 )
             },
             resolution = null,
+            timeoutSeconds = payload.timeoutSeconds,
+            notesPlaceholder = payload.notesPlaceholder,
             ts = event.ts,
             key = "question:${payload.callId}",
         )
@@ -351,14 +353,18 @@ object TranscriptReducer {
     }
 
     /**
-     * A `user_question_answered` event settles the matching [ChatItem.Question] (by `call_id`) — even
-     * when a DIFFERENT surface answered (the whole point of the event). `answered` carries the chosen
-     * answers; every other outcome (`declined`/`interrupted`/`cancelled`, or any unknown future value)
-     * is a plain [QuestionResolution.Dismissed] with no error residue. A matching pending card is
-     * required: an answered event with no prior question (never happens in a well-formed, ts-ordered
-     * log — the `user_question` always precedes) is ignored rather than rendering an answer with no
-     * question. The event's content-key dedupe ([fold]) means a replayed `user_question` never resets
-     * a card this already settled.
+     * A `user_question_answered` event updates the matching [ChatItem.Question] (by `call_id`) — even
+     * when a DIFFERENT surface answered (the whole point of the event). Only `answered` is a true
+     * settle, carrying the chosen answers/notes/delivery into [QuestionResolution.Answered]; every
+     * other outcome (`timed_out`/`declined`/`interrupted`/`cancelled`, or any unknown future value)
+     * becomes [QuestionResolution.RunMovedOn] — the run stopped waiting, but the card stays tappable so
+     * a late answer can still be sent (it lands as a new message; see [QuestionResolution]'s KDoc). A
+     * matching pending card is required: an answered event with no prior question (never happens in a
+     * well-formed, ts-ordered log — the `user_question` always precedes) is ignored rather than
+     * rendering an answer with no question. The event's content-key dedupe ([fold]) means a replayed
+     * `user_question` never resets a card this already settled, and a LATER `answered` event for the
+     * same `call_id` (a late answer resolving what a `RunMovedOn` card was still waiting on) upserts
+     * the same card straight to [QuestionResolution.Answered].
      */
     private fun foldUserQuestionAnswered(state: State, event: SessionEvent.UserQuestionAnswered): State {
         val payload = event.payload
@@ -368,9 +374,11 @@ object TranscriptReducer {
             QuestionResolution.Answered(
                 answers = (payload.answers ?: emptyList()).map { UiAnswer(selectedIndexes = it.selectedIndexes, text = it.text) },
                 answeredVia = payload.answeredVia,
+                notes = payload.notes,
+                delivery = payload.delivery,
             )
         } else {
-            QuestionResolution.Dismissed(outcome = payload.outcome)
+            QuestionResolution.RunMovedOn(outcome = payload.outcome)
         }
         return upsert(state, existing.copy(resolution = resolution))
     }

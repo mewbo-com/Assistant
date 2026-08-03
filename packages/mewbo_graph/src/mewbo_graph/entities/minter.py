@@ -1,7 +1,10 @@
 """EntityMinter — the DRY write core for abstract entities.
 
 normalize → resolve (shared ladder) → upsert-with-provenance. The deterministic
-id makes every write an UPSERT, so a re-index converges and never duplicates.
+id makes every write an UPSERT, so a re-index converges and never duplicates —
+and a candidate whose id is already stored resolves to ITSELF, skipping the
+ladder entirely (see :meth:`EntityMinter.upsert`), which is what makes a
+replayed mint land on the same node with the same provenance.
 A ``merge`` decision adds the surface name as an alias + appends a mention; a
 ``flag`` decision writes a new entity with ``status=needs_review`` plus a SAME_AS
 edge to the flagged neighbour. All collaborators are injected.
@@ -57,33 +60,60 @@ class EntityMinter:
         slug: str,
         insight_id: str | None = None,
     ) -> Entity:
-        """Resolve *extracted* and upsert it (create / merge / flag)."""
+        """Resolve *extracted* and upsert it (create / merge / flag).
+
+        A surface whose deterministic id is ALREADY in the store resolves to
+        ITSELF and never reaches the ladder. That short-circuit is what makes a
+        replay safe: the ladder scores against CURRENT store state and excludes
+        the candidate's own id from its block set, so a second identical mint
+        could score some neighbour minted in between above ``auto_merge`` and
+        write a DIFFERENT entity for a byte-identical call. The id is the
+        convergence guarantee — a candidate that already exists cannot be a
+        duplicate of anything else.
+
+        So resolution is deterministic under replay only for an entity already
+        in the store; a genuinely novel entity's resolution through the ladder
+        is not, for exactly the reason above.
+        """
         now = self._clock()
         mention = EntityMention(
             source=source, insight_id=insight_id, ts=now, surface_name=extracted.name
         )
-        decision = self._resolver.resolve(slug, extracted)
+        prior = self._store.get_entity(slug, extracted.id)
+        if prior is not None:
+            return self._apply_new(slug, extracted, mention, status="active", prior=prior)
 
+        decision = self._resolver.resolve(slug, extracted)
         if decision.action == "merge" and decision.target_id:
             return self._apply_merge(slug, extracted, decision, mention)
         if decision.action == "flag" and decision.target_id:
             return self._apply_flag(slug, extracted, decision, mention)
-        return self._apply_new(slug, extracted, mention, status="active")
+        return self._apply_new(slug, extracted, mention, status="active", prior=None)
 
     def _apply_new(
-        self, slug: str, extracted: Entity, mention: EntityMention, *, status: str
+        self,
+        slug: str,
+        extracted: Entity,
+        mention: EntityMention,
+        *,
+        status: str,
+        prior: Entity | None,
     ) -> Entity:
         # Deterministic id ⇒ a re-mint of the SAME surface is an idempotent
         # convergence, NOT a fresh node: fold the mention into the existing
-        # record so provenance accumulates instead of being overwritten.
-        prior = self._store.get_entity(slug, extracted.id)
+        # record so provenance accumulates instead of being overwritten. Every
+        # list-valued field UNIONS on this path exactly as it does on the merge
+        # path — a field unioned on only one of the two silently regresses on
+        # the second pass, since a deterministic id means re-index ALWAYS
+        # re-resolves through here.
         if prior is not None:
+            aliases = list(dict.fromkeys([*prior.aliases, *extracted.aliases]))
             labels = list(dict.fromkeys([*prior.labels, *extracted.labels]))
             entity = prior.model_copy(
-                update={"mentions": [*prior.mentions, mention], "labels": labels}
-            )
+                update={"aliases": aliases, "labels": labels}
+            ).with_mention(mention)
         else:
-            entity = extracted.model_copy(update={"mentions": [mention], "status": status})
+            entity = extracted.model_copy(update={"status": status}).with_mention(mention)
         self._store.upsert_entities(
             slug, [entity], commit_sha=self._commit_sha, job_id=self._job_id
         )
@@ -99,17 +129,16 @@ class EntityMinter:
     ) -> Entity:
         target = self._store.get_entity(slug, decision.target_id or "")
         if target is None:  # raced/absent — fall back to a fresh insert
-            return self._apply_new(slug, extracted, mention, status="active")
-        aliases = list(dict.fromkeys([*target.aliases, extracted.name]))
+            return self._apply_new(slug, extracted, mention, status="active", prior=None)
+        aliases = list(dict.fromkeys([*target.aliases, extracted.name, *extracted.aliases]))
         labels = list(dict.fromkeys([*target.labels, *extracted.labels]))
         survivor = target.model_copy(
             update={
                 "aliases": aliases,
                 "labels": labels,
-                "mentions": [*target.mentions, mention],
                 "description": target.description or extracted.description,
             }
-        )
+        ).with_mention(mention)
         self._store.upsert_entities(
             slug, [survivor], commit_sha=self._commit_sha, job_id=self._job_id
         )
@@ -123,7 +152,9 @@ class EntityMinter:
         decision: LadderDecision,
         mention: EntityMention,
     ) -> Entity:
-        entity = self._apply_new(slug, extracted, mention, status="needs_review")
+        entity = self._apply_new(
+            slug, extracted, mention, status="needs_review", prior=None
+        )
         if decision.target_id:
             self._store.upsert_entity_edges(
                 slug,

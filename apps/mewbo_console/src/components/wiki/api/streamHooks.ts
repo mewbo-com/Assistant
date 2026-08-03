@@ -16,18 +16,22 @@ import type {
   IndexingLogEntry,
   IndexingPhase,
   QaEvent,
+  QaMode,
   WikiError,
 } from "./types";
 
 // ── Streaming hooks ─────────────────────────────────────────────────
 
-interface IndexingStreamState {
+/** Exported for direct unit testing, mirroring `SessionStreamState`'s
+ *  precedent (`src/hooks/useSessionEvents.ts`) — a plain state shape a test
+ *  seeds directly rather than scripting an async transport. */
+export interface IndexingStreamState {
   /** Current job snapshot, folded from incoming events. */
   job: IndexingJob | null;
   /** Rolling list of scan history rows for the UI. */
   history: Array<{ name: string; done: boolean }>;
   /** Current coarse phase from the BE state machine — null until the
-   *  first ``phase`` event arrives (legacy backends never emit it). */
+   *  first ``phase`` event arrives (some backends never emit it). */
   phase: IndexingPhase | null;
   /** Total pages from the committed plan; null until commit_plan lands. */
   totalPages: number | null;
@@ -49,7 +53,9 @@ const initialIndexingState: IndexingStreamState = {
   error: null,
 };
 
-function reduceIndexing(state: IndexingStreamState, event: IndexingEvent): IndexingStreamState {
+/** Exported for direct unit testing (`SessionStreamState`-style testable pure
+ *  unit) — the hook itself is exercised through `useIndexingStream` below. */
+export function reduceIndexing(state: IndexingStreamState, event: IndexingEvent): IndexingStreamState {
   switch (event.type) {
     case "queued":
       return {
@@ -121,6 +127,16 @@ function reduceIndexing(state: IndexingStreamState, event: IndexingEvent): Index
         pagesSubmitted: event.index + 1,
         totalPages: event.totalPages || state.totalPages,
       };
+    case "scope_preview": {
+      // Fold the SAME counts the snapshot's `scopePreview` field carries — the
+      // event and the field are one write through the BE's shared `emit_*`
+      // seam, so this is the ONLY place the stream half needs to know that.
+      // `queued` always precedes `scope_preview` (ordering guarantee on
+      // `IndexingEvent`), so `state.job` is set by the time this arrives; the
+      // guard is defensive only.
+      const { type: _type, ...preview } = event;
+      return state.job ? { ...state, job: { ...state.job, scopePreview: preview } } : state;
+    }
     case "log":
       return {
         ...state,
@@ -187,6 +203,15 @@ interface QaStreamState {
   answerId: string | null;
   model: string | null;
   fromPageId: string | null;
+  /**
+   * The Mewbo session answering this turn, carried on `meta` — what backs the
+   * Q&A screen's jump into the run WHILE it streams (the persisted snapshot
+   * carries the same binding for a replayed answer). The event defaults it to
+   * `""` so an older persisted `meta` replays unchanged, so an empty string is
+   * normalised to `null` HERE rather than at each reader: absence is "nothing
+   * to watch", and two spellings of it would eventually disagree.
+   */
+  sessionId: string | null;
   /** "Generated from … and related sources" chips. */
   summarySources: string[] | null;
   blocks: Block[];
@@ -199,6 +224,7 @@ const initialQaState: QaStreamState = {
   answerId: null,
   model: null,
   fromPageId: null,
+  sessionId: null,
   summarySources: null,
   blocks: [],
   done: false,
@@ -214,6 +240,7 @@ function reduceQa(state: QaStreamState, event: QaEvent): QaStreamState {
         answerId: event.answerId,
         model: event.model,
         fromPageId: event.fromPageId,
+        sessionId: event.sessionId || null,
       };
     case "summary_ready":
       return { ...state, summarySources: event.sources };
@@ -304,10 +331,13 @@ export function useQaStream(input: {
   /** Continue an existing conversation (a follow-up) instead of minting a new
    *  answer. Absent for the first turn. */
   answerId?: string;
+  /** Q&A agent shape for a NEW conversation (server default ``fast`` when
+   *  omitted); ignored by the backend on a continuation. */
+  mode?: QaMode;
 } | null) {
   const [state, dispatch] = useReducer(reduceQa, initialQaState);
   const key = input
-    ? `${input.slug}|${input.fromPageId}|${input.model}|${input.answerId ?? ""}|${input.question}`
+    ? `${input.slug}|${input.fromPageId}|${input.model}|${input.answerId ?? ""}|${input.mode ?? ""}|${input.question}`
     : null;
   // The key that produced the folded `state`. Advanced to the live key only
   // once that stream's first event lands. Until then a just-swapped input reads

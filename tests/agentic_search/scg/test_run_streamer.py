@@ -26,7 +26,7 @@ from mewbo_api.agentic_search.schemas import (
     utc_now_iso,
 )
 from mewbo_api.agentic_search.store import JsonAgenticSearchStore
-from mewbo_core.session_event_bus import SessionEventBus
+from mewbo_core.session.session_event_bus import SessionEventBus
 
 
 @pytest.fixture
@@ -153,8 +153,8 @@ def test_reconcile_flushes_missing_agents_only(store) -> None:
 def test_probe_trace_projection_condenses_start_brief() -> None:
     """``ProbeTrace`` opens a lane with the SUB-QUERY line, not boilerplate.
 
-    The brief leads with the leaf-executor SYSTEM PROMPT (run-797097e4b1: the
-    real ``SUB-QUERY:`` lands ~7 KB in), so the lane must skip the boilerplate
+    The brief leads with the leaf-executor SYSTEM PROMPT — the real
+    ``SUB-QUERY:`` lands ~7 KB in — so the lane must skip the boilerplate
     header and surface the probe's actual target.
     """
     payload = {
@@ -189,9 +189,9 @@ def test_probe_trace_skips_boilerplate_without_sub_query() -> None:
 def test_lane_name_is_agent_type_not_model() -> None:
     """The lane name is the agent KIND (``agent_type``), never the model string.
 
-    Regression (run-797097e4b1): ``lane_name`` returned ``payload["model"]`` so
-    every lane was labelled by its model (``claude-haiku-4-5``). It now reads
-    ``agent_type`` (Lane A), falling back to the literal kind — never the model.
+    Reading ``payload["model"]`` labels every lane by its model
+    (``claude-haiku-4-5``). ``lane_name`` reads ``agent_type`` instead, falling
+    back to the literal kind — never the model.
     """
     from mewbo_api.agentic_search.scg.run_streamer import ProbeTrace as PT
 
@@ -307,9 +307,9 @@ def _results(store, run_id="run-1"):
 def test_root_reemit_without_url_loses_to_probe_card(store) -> None:
     """A probe emits a url-bearing card; the root re-emits the same hit url-less.
 
-    The EVIDENCE (run-797097e4b1): the root reconstructed the probe's repos from
-    prose with NO url (different stable id, kind flipped to docs) → 5 cards for 3
-    results. The semantic dedup (normalized url, else title+source) collapses the
+    The root reconstructs the probe's repos from prose with NO url (different
+    stable id, kind flipped to docs), which renders 5 cards for 3 results
+    unless they collapse. The semantic dedup (normalized url, else title+source) collapses the
     root's re-emit into the probe's card — FIRST emission wins.
     """
     _run(store)

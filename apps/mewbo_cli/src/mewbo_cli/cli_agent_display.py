@@ -20,9 +20,9 @@ import threading
 import time
 from dataclasses import dataclass
 
+from mewbo_core.agents.hypervisor import AgentHandle
 from mewbo_core.classes import ActionStep
 from mewbo_core.common import MockSpeaker
-from mewbo_core.hypervisor import AgentHandle
 from rich.console import Group, RenderableType
 from rich.panel import Panel
 from rich.text import Text

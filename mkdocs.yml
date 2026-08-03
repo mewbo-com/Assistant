@@ -54,7 +54,11 @@ theme:
   # link schemes and the theme rewrites them into DeepWiki-style badges. File
   # badges auto-derive from repo_url (GitHub blob at the build SHA); endpoint
   # badges deep-link into the Scalar reference page below. The tags map MUST
-  # stay in sync with RETAG_RULES in scripts/ci/generate_openapi_spec.py.
+  # stay in sync with the tag names the spec actually carries: RETAG_RULES in
+  # scripts/ci/generate_openapi_spec.py, PLUS the tags its defensive fallback
+  # derives from a path's first segment for route families RETAG_RULES does not
+  # name (`Apps` is one). A prefix missing here is silent: the badge still
+  # renders, it just loses its `#tag/...` anchor and lands on the reference top.
   code_refs:
     endpoint:
       reference_page: rest-api/
@@ -70,6 +74,7 @@ theme:
         /api/tools: Tools & Skills
         /api/skills: Tools & Skills
         /api/plugins: Plugins
+        /api/apps: Apps
         /api/notifications: Notifications
         /api/config: Configuration
         /api/agentic_search/workspaces: Workspaces & Runs
@@ -115,6 +120,7 @@ theme:
     Web: lucide:layout-dashboard
     Sessions: lucide:messages-square
     "Search and Wiki": lucide:telescope
+    Panels: lucide:layout-panel-top
 
     Android: lucide:smartphone
     Install: lucide:download
@@ -221,6 +227,26 @@ exclude_docs: |
   hooks/
   CLAUDE.md
 
+# MkDocs only reports anchors, orphaned pages and absolute links at INFO by
+# default, so `--strict` alone lets a link to a heading that no longer exists
+# ship silently. Raising them to `warn` is what makes `make docs-build` fail on
+# one. Never lower these to silence a build — fix the link or the nav entry.
+# Warnings fail the build. Set here rather than as a `--strict` CLI flag so it
+# also covers the versioned-publish path, which builds mkdocs internally and
+# accepts no strict flag of its own — that leg would otherwise stay unvalidated.
+strict: true
+
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+    absolute_links: warn
+  links:
+    not_found: warn
+    anchors: warn
+    absolute_links: warn
+    unrecognized_links: warn
+
 plugins:
   - search
   - callouts:
@@ -268,6 +294,7 @@ nav:
       - Sessions: web/sessions.md
       - Search and Wiki: web/search-and-wiki.md
       - Web IDE: web/ide.md
+      - Panels: web/panels.md
       - Widgets: web/widgets.md
   - Android:
       - Get Started: android/index.md

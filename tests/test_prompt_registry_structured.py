@@ -1,17 +1,16 @@
 """Golden byte-equality tests for the migrated ``structured.*`` prompts.
 
-Phase 1 of the central prompt registry is a VERBATIM extraction: the
-hardcoded prompt constants/f-strings in ``structured_response.py`` and
-``structured_synthesis.py`` move into ``prompts/registry/structured.yaml`` with
-ZERO behaviour change. Each ``EXPECTED`` below is the ORIGINAL literal copied
-verbatim; the test asserts ``render(...)`` reproduces it byte-for-byte for
-representative inputs. If a render drifts by even one character (a stripped
-newline, a re-flowed line), the golden fails — which is the whole point.
+``prompts/registry/structured.yaml`` owns the prompt text that
+``structured_response.py`` and ``structured_synthesis.py`` send. Each
+``EXPECTED`` below is a frozen literal; the test asserts ``render(...)``
+reproduces it byte-for-byte for representative inputs. A drift of even one
+character (a stripped newline, a re-flowed line) fails the golden — which is
+the whole point.
 """
 
 from __future__ import annotations
 
-from mewbo_core.prompt_registry import get_prompt_registry
+from mewbo_core.llm.prompt_registry import get_prompt_registry
 
 # ---------------------------------------------------------------------------
 # Verbatim copies of the ORIGINAL literals (the migration's source of truth).

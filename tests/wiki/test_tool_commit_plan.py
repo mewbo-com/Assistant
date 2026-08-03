@@ -140,3 +140,99 @@ def test_commit_plan_overwrites_previous_plan(tmp_path: Path) -> None:
     assert saved is not None
     assert len(saved) == 3
     assert saved[0]["id"] == "alpha"
+
+
+# ── The terminal precondition, decided at plan time ───────────────────────────
+
+
+def test_commit_plan_refuses_a_landing_page_it_does_not_contain(tmp_path: Path) -> None:
+    """Decided at plan time, not ~25 minutes later at wiki_finalize.
+
+    ``landingPageId 'X' not found in submitted pages`` is decidable the instant
+    the plan is committed — the plan IS the set of ids that will exist — so
+    deferring it makes a doomed run pay the whole pages fan-out first.
+    """
+    import mewbo_graph.plugins.wiki.commit_plan as mod
+    from mewbo_graph.plugins.wiki.commit_plan import WikiCommitPlanTool
+
+    store = _store(tmp_path)
+    store.create_job(_job("job-land", "org/repo"))
+    store.attach_job_session("job-land", "sess-land")
+
+    tool = WikiCommitPlanTool(session_id="sess-land")
+    with patch.object(mod, "_resolve_runtime", return_value=_fake_runtime(store)):
+        result = asyncio.run(tool.handle(_make_action_step(
+            {"pages": _two_page_plan(), "landingPageId": "index"}
+        )))
+
+    assert "validation" in result.content
+    assert "index" in result.content
+    # Nothing was committed, so the run has not been left half-planned.
+    assert store.get_job_plan("job-land") is None
+
+
+def test_commit_plan_records_a_valid_landing_page_on_the_job(tmp_path: Path) -> None:
+    """A landing page that IS in the plan is accepted and pinned to the job."""
+    import mewbo_graph.plugins.wiki.commit_plan as mod
+    from mewbo_graph.plugins.wiki.commit_plan import WikiCommitPlanTool
+
+    store = _store(tmp_path)
+    store.create_job(_job("job-ok", "org/repo"))
+    store.attach_job_session("job-ok", "sess-ok")
+
+    tool = WikiCommitPlanTool(session_id="sess-ok")
+    with patch.object(mod, "_resolve_runtime", return_value=_fake_runtime(store)):
+        result = asyncio.run(tool.handle(_make_action_step(
+            {"pages": _two_page_plan(), "landingPageId": "overview"}
+        )))
+
+    assert "error" not in result.content
+    job = store.get_job("job-ok")
+    assert job is not None
+    assert job.landing_page_id == "overview"
+
+
+def test_commit_plan_still_accepts_a_plan_with_no_landing_page(tmp_path: Path) -> None:
+    """The field is optional: an indexer that names its landing page only at
+    finalize keeps working exactly as before."""
+    import mewbo_graph.plugins.wiki.commit_plan as mod
+    from mewbo_graph.plugins.wiki.commit_plan import WikiCommitPlanTool
+
+    store = _store(tmp_path)
+    store.create_job(_job("job-none", "org/repo"))
+    store.attach_job_session("job-none", "sess-none")
+
+    tool = WikiCommitPlanTool(session_id="sess-none")
+    with patch.object(mod, "_resolve_runtime", return_value=_fake_runtime(store)):
+        result = asyncio.run(
+            tool.handle(_make_action_step({"pages": _two_page_plan()}))
+        )
+
+    assert "error" not in result.content
+    job = store.get_job("job-none")
+    assert job is not None and job.landing_page_id is None
+
+
+def test_commit_plan_refuses_duplicate_page_ids(tmp_path: Path) -> None:
+    """A duplicated id makes the progress denominator unreachable.
+
+    ``total_pages`` counts the duplicate but a page id can only be written — and
+    counted — once, so the bar stops short of its own total for the rest of the
+    run.
+    """
+    import mewbo_graph.plugins.wiki.commit_plan as mod
+    from mewbo_graph.plugins.wiki.commit_plan import WikiCommitPlanTool
+
+    store = _store(tmp_path)
+    store.create_job(_job("job-dup", "org/repo"))
+    store.attach_job_session("job-dup", "sess-dup")
+
+    tool = WikiCommitPlanTool(session_id="sess-dup")
+    with patch.object(mod, "_resolve_runtime", return_value=_fake_runtime(store)):
+        result = asyncio.run(tool.handle(_make_action_step(
+            {"pages": [*_two_page_plan(), {"id": "overview", "title": "Overview again"}]}
+        )))
+
+    assert "validation" in result.content
+    assert "overview" in result.content
+    assert store.get_job_plan("job-dup") is None

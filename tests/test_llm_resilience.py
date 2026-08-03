@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import litellm.exceptions as lx
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from mewbo_core.llm_resilience import (
+from mewbo_core.llm.llm_resilience import (
     CircuitBreaker,
     DoomLoopGuard,
     LlmResilienceExhausted,
@@ -24,9 +24,13 @@ from mewbo_core.llm_resilience import (
     WriteProgressSignal,
     repair_tool_pairing,
 )
-from mewbo_core.tool_registry import ToolSpec
+from mewbo_core.tooling.tool_registry import ToolSpec
 
-_SENTINEL = object()
+# A REAL message, not a bare ``object()``: the strategy now asserts a result
+# contract on what a rung returns, so a stub with no content field would read as
+# a rung that produced nothing. Identity assertions still hold — every test here
+# checks ``resp is _SENTINEL``.
+_SENTINEL = AIMessage(content="ok")
 
 
 async def _never_compact() -> bool:
@@ -521,6 +525,38 @@ class TestRetryStrategy:
             self._run(self._strategy(turn_deadline=10.0, clock=clock), ["p"], invoke, [])
         assert ei.value.reason == "deadline"
 
+    def test_spent_deadline_never_blames_an_uninvoked_fallback(self):
+        """A rung the deadline forbids must not appear as tried, nor emit a switch.
+
+        The deadline used to be checked only INSIDE the attempt loop, i.e. after
+        the ``llm_fallback`` event was emitted and after ``tried`` had grown. A run
+        that ran out of wall clock therefore reported a cross-model switch it never
+        performed and named a model it never called, which reads as a provider-wide
+        outage instead of a spent budget.
+        """
+        now = {"t": 0.0}
+        calls: list = []
+
+        async def invoke(model, is_fb):
+            calls.append(model)
+            now["t"] += 100.0  # every attempt burns 100s of the budget
+            raise asyncio.TimeoutError()
+
+        events: list = []
+        strategy = self._strategy(
+            primary_retries=2,
+            turn_deadline=150.0,
+            clock=lambda: now["t"],
+        )
+        with pytest.raises(LlmResilienceExhausted) as ei:
+            self._run(strategy, ["p", "f"], invoke, events)
+
+        # The primary spent the budget; the fallback was never reachable.
+        assert calls == ["p", "p"], "fallback must not be invoked past the deadline"
+        assert ei.value.models_tried == ["p"], "error must name only invoked models"
+        assert ei.value.reason == "deadline"
+        assert [e for e in events if e.get("type") == "llm_fallback"] == []
+
     # A1 — retry cap of 2: one try + one retry, then advance (never a 3rd).
     def test_cap_two_advances_on_second_transient_failure(self):
         calls: list = []
@@ -543,7 +579,7 @@ class TestRetryStrategy:
 
     def test_default_primary_retries_is_two(self):
         # The configured cap default is 2 (one try + one retry).
-        from mewbo_core.llm_resilience import DEFAULT_PRIMARY_RETRIES
+        from mewbo_core.llm.llm_resilience import DEFAULT_PRIMARY_RETRIES
 
         assert DEFAULT_PRIMARY_RETRIES == 2
 

@@ -14,7 +14,7 @@ import time
 from types import SimpleNamespace
 
 from mewbo_api.system_instructions import InstructionValueSources, routes as si_routes
-from mewbo_core.session_provenance import SessionOrigin
+from mewbo_core.session.session_provenance import SessionOrigin
 from mewbo_core.system_instructions import GLOBAL_INSTRUCTIONS_ID, InstructionContext
 from mewbo_core.system_instructions.store import JsonSystemInstructionsStore
 

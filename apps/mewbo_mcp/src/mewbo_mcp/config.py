@@ -220,7 +220,7 @@ class McpConfig:
           ``127.0.0.1``).
         - ``MEWBO_MCP_PORT`` — bind port for the MCP server (default ``5127``).
           Deliberately not ``5125`` — that is the API's gunicorn port in Docker
-          (``API_PORT=5125``), so sharing it would clash when both run together.
+          (``MEWBO_API_PORT=5125``), so sharing it would clash when both run together.
         - ``MEWBO_MCP_EXPOSED_GROUPS`` / ``MEWBO_MCP_EXPOSED_TIERS`` — the two
           axes of the tool-exposure gate; see :class:`McpToolPolicy`.
         """

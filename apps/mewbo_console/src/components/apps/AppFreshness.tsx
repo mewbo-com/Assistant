@@ -12,10 +12,10 @@ import { RelativeTime } from "../../utils/relativeTime";
  *
  * Renders nothing ONLY while there is no system data yet (loading / error) —
  * once the endpoint answers, it always says something. A live app with zero
- * runs and zero armed triggers used to fall through `!last_success_at &&
- * !next_fire_at` straight to a blank render, which reads as "fine" — the exact
- * silent failure that shipped. "Never refreshed" and "No refresh
- * schedule" are explicit warning states now, each independent so they can
+ * runs and zero armed triggers falling through `!last_success_at &&
+ * !next_fire_at` to a blank render would read as "fine", which is the exact
+ * silent failure this guards against. "Never refreshed" and "No refresh
+ * schedule" are explicit warning states, each independent so they can
  * co-occur. This is a deliberate departure from the wiki `FreshnessBadge`
  * stance of "stay silent until there's drift to report": an app that has never
  * run has no baseline to diff against, but "never ran" is itself the thing a

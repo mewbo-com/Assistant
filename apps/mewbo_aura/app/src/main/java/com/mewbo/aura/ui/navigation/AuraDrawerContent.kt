@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FilterAlt
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.DropdownMenu
@@ -142,7 +143,7 @@ fun AuraDrawerContent(
                 )
             }
             item {
-                // Subtle section divider (side-rail visual-polish task, 2026-07-14): separates the
+                // Subtle section divider (side-rail visual-polish task): separates the
                 // New chat / Search chats action rows from the Recents list below, same hairline
                 // token DESIGN.md §4 names for ALL dividers. RecentsHeader still carries its own
                 // sectionHeaderTopPad above "Recents" itself, so this stays a tight inset rather than
@@ -188,7 +189,7 @@ fun AuraDrawerContent(
                 }
             }
         }
-        // Subtle divider above the pinned footer (side-rail visual-polish task, 2026-07-14) — the
+        // Subtle divider above the pinned footer (side-rail visual-polish task) — the
         // same hairline treatment as the action-rows/Recents divider above, closing the rail's
         // third section (Recents list vs. the settings/user-icon/username area).
         HorizontalDivider(
@@ -213,17 +214,20 @@ fun AuraDrawerContent(
                     onResult(success)
                 }
             },
+            onSetPinned = { pinned, onResult ->
+                sessionsViewModel.setPinned(target.sessionId, pinned, onResult)
+            },
         )
     }
 }
 
 /**
- * "Recents" section header + the mobile/all scope filter (user directive 2026-07-03). The list
+ * "Recents" section header + the mobile/all scope filter (user directive). The list
  * defaults to [RecentsFilter.MOBILE_ONLY]; the overflow menu flips to [RecentsFilter.ALL] —
  * mirroring the web console's origin-scoped session list, collapsed to a single binary toggle so
  * the rail stays uncluttered. This header is the stable anchor the date sub-dividers hang beneath.
  *
- * Side-rail visual-polish task, 2026-07-14: gained a leading [ChatIcons.Clock] glyph (reused
+ * Side-rail visual-polish task: gained a leading [ChatIcons.Clock] glyph (reused
  * verbatim — an existing house glyph, not a new hand-roll; team-lead directive: keep it), sized/
  * tinted/spaced exactly like `SettingsScreen`'s own `SettingsSectionHeader`
  * (`AuraSpacing.DrawerRow.iconSize`/`iconToLabelGap`, `textSecondary` — "the glyph reads as one
@@ -231,7 +235,7 @@ fun AuraDrawerContent(
  * decorative (`contentDescription = null`, the "Recents" text is the accessible name). The trigger
  * also swapped [Icons.Default.MoreVert] for [Icons.Default.FilterAlt] — a real funnel glyph reads
  * as "filter" where a generic overflow dot-stack doesn't. `FilterAlt` lands from
- * `material-icons-extended`, added to the dependency catalog 2026-07-14 (orchestrator, hard user
+ * `material-icons-extended`, added to the dependency catalog (orchestrator, hard user
  * directive: real Material icons only, never hand-rolled vector paths) specifically because
  * `material-icons-core` carries no filter glyph at all — this was originally a hand-ported
  * `filter_alt` path (verbatim official SVG data) before the dependency landed; now deleted in
@@ -324,7 +328,7 @@ private fun DateSubheader(label: String, modifier: Modifier = Modifier) {
 }
 
 /**
- * Compact session-history row (user directive 2026-07-03). Denser than the action rows
+ * Compact session-history row (user directive). Denser than the action rows
  * ([AuraSpacing.DrawerRow.recentRowHeight] vs [AuraSpacing.DrawerRow.height]) and — crucially —
  * with the title flush at [AuraSpacing.screenGutter], aligned with the "Recents" header and date
  * dividers. The prior `DrawerRow` reserved a 24dp leading icon slot that indented every recents
@@ -356,6 +360,18 @@ private fun RecentSessionRow(
             .padding(horizontal = AuraSpacing.screenGutter / 2),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // Quiet leading marker — the row's own section header ("Pinned") already says why it's
+        // here, so this stays subdued (textTertiary, compact) rather than competing with the
+        // trailing running-dot's accentPrimary, which signals something actionable (a live run).
+        if (session.pinned) {
+            Icon(
+                imageVector = Icons.Filled.PushPin,
+                contentDescription = null,
+                tint = AuraColors.textTertiary,
+                modifier = Modifier.size(PinnedMarkerSize),
+            )
+            Spacer(Modifier.width(AuraSpacing.DrawerRow.iconToLabelGap / 2))
+        }
         Text(
             text = session.title?.takeIf { it.isNotBlank() } ?: "Untitled session",
             style = AuraType.listItem,
@@ -455,3 +471,7 @@ private fun DrawerFooter(displayName: String, onOpenSettings: () -> Unit, modifi
         }
     }
 }
+
+/** No `AuraSpacing` token covers a recents-row inline marker glyph; same documented gap as
+ * `SessionActionsSheet`'s `ConfirmSpinnerSize`. */
+private val PinnedMarkerSize = 14.dp

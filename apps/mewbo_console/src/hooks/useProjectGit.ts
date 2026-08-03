@@ -36,8 +36,8 @@ export type ProjectGitState = {
   /**
    * Create a worktree. Pass ``{branch}`` to reuse an existing branch, or
    * ``{branch, base}`` to create a new branch from <base> atomically
-   * (the Mewbo-default workflow). The hook stays string-compatible for
-   * legacy callers via the ``string`` overload below.
+   * (the Mewbo-default workflow). The hook also accepts a bare branch name
+   * via the ``string`` overload below.
    */
   createWorktreeFor: (
     input: CreateWorktreeInput | string,

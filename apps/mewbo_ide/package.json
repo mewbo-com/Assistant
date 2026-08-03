@@ -1,0 +1,36 @@
+{
+  "name": "mewbo-ide",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Web IDE container broker: the only process holding the docker socket.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "lint": "eslint . --ext .ts",
+    "lint:ci": "eslint . --ext .ts --max-warnings=0",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest",
+    "test:ci": "vitest run"
+  },
+  "dependencies": {
+    "dockerode": "^4.0.12",
+    "fastify": "^5.11.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/dockerode": "^4.0.1",
+    "@types/node": "^20.11.18",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "eslint": "^8.57.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.4",
+    "vitest": "^1.6.0"
+  },
+  "engines": {
+    "node": ">=20.11"
+  }
+}

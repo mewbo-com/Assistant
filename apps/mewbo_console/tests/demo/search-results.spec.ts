@@ -4,7 +4,7 @@ import { OSS_REPO_SCOUT_WS, RUN_OSS_AGENTS, searchRunHref } from "./search-helpe
 /**
  * Shot searchResults (02) — a completed run's results page: the Synthesis
  * card (with its cited RANK/REPO/STARS/LANGUAGE table), the ranked result
- * cards (e.g. `anthropics/claude-code`), and the right rail (per-lane trace
+ * cards (e.g. `acme/runner-pool`), and the right rail (per-lane trace
  * summary + related questions).
  *
  * Deep-link contract (verified in recon): `/search?ws=...&run=...` on a
@@ -23,21 +23,23 @@ test("searchResults — synthesis + result cards + right rail", async ({ page, d
   // ONLY for a finished run (while streaming it shows "streaming · Ns"), so
   // this both proves the completed snapshot rendered AND is a single, stable
   // match. (A bare /complete/ was a strict-mode violation: "complete" also
-  // appears as a substring in a result-card paragraph.)
-  await expect(page.getByText(/\d+ results/)).toBeVisible();
+  // appears as a substring in a result-card paragraph.) `/\d+ results/`
+  // previously passed for ANY integer — pin the seeded run's exact count so a
+  // ranking regression that still renders SOME results still fails.
+  await expect(page.getByText("12 results", { exact: true })).toBeVisible();
 
-  // Synthesis card — the header label plus the seeded market-overview prose.
+  // Synthesis card — the header label plus the seeded fleet-overview prose.
   // The answer.tldr renders as prose (not a markdown heading), so anchor on its
   // distinctive opening line, which is above the "Show more" fold.
   await expect(page.getByText("Synthesis", { exact: true })).toBeVisible();
   await expect(
-    page.getByText(/open-source AI coding-agent space/),
+    page.getByText(/self-hosted CI fleet splits into two halves/),
   ).toBeVisible();
 
-  // A named result from the seed contract. "anthropics/claude-code" appears in
+  // A named result from the seed contract. "acme/runner-pool" appears in
   // several places (result card title + url, and the synthesis prose cites it),
   // so first() keeps it a single stable match.
-  await expect(page.getByText("anthropics/claude-code").first()).toBeVisible();
+  await expect(page.getByText("acme/runner-pool").first()).toBeVisible();
 
   // Right rail (renders only >=1100px, satisfied by this viewport) — the
   // Agent trace entry point that anchors the rail's presence in the shot.

@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from email.header import decode_header
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from pathlib import Path
+from importlib import resources
 from typing import TYPE_CHECKING, Any
 
 import imapclient
@@ -58,7 +58,10 @@ class _ThreadMeta:
 # Markdown → HTML rendering
 # ------------------------------------------------------------------
 
-_TEMPLATE_PATH = Path(__file__).with_name("email_template.html.j2")
+# Anchored on the PACKAGE, not on this file's depth: the template belongs to
+# ``mewbo_api.channels``, so a __file__-relative path would silently follow
+# this module if it ever moves and fail at render time rather than at import.
+_TEMPLATE_PATH = resources.files("mewbo_api.channels") / "email_template.html.j2"
 _template_cache: Template | None = None
 
 # Inline styles injected into mistune output by wrapping common tags.

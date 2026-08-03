@@ -1,4 +1,4 @@
-import { AgentTreeNode, EventRecord, LogEntry, PlanLogEntry, PlanStep, RunErrorDetail, RunErrorKind, RunFailureMeta, RunFailureReason } from "../types";
+import { AgentTreeNode, EventRecord, LogEntry, PlanLogEntry, PlanStep, ProjectSwitchMeta, RunErrorDetail, RunErrorKind, RunFailureMeta, RunFailureReason, SpawnBatchAgentEntry, SpawnBatchLogEntry } from "../types";
 import { readBool, readNumber, readString } from "./payload";
 
 // ── Shared completion-failure parser ─────────────────────────────────
@@ -44,9 +44,9 @@ function parseErrorDetail(raw: unknown): RunErrorDetail | undefined {
 
 // A completion whose `done_reason` is any of these is a failure the user
 // should see and recover from. `unmet_goal`/`verification_failed`/
-// `halted_no_progress` all mean "ended without achieving the goal" and were
-// previously rendered as an ordinary assistant bubble — no warning, no
-// recovery — because recognition stopped at `error`/`max_steps_reached`.
+// `halted_no_progress` all mean "ended without achieving the goal" —
+// recognizing only `error`/`max_steps_reached` would render them as an
+// ordinary assistant bubble, with no warning and no recovery.
 const FAILED_DONE_REASONS: ReadonlySet<string> = new Set([
   "error",
   "max_steps_reached",
@@ -126,6 +126,94 @@ export function parseOutcomeAssertion(
     text: readString(payload ?? {}, "detail") ?? "",
     failureReason: reason,
   };
+}
+
+// ── Shared project-switch parser ─────────────────────────────────────
+// `switch_project` moves the session's working directory, so both the
+// conversation card and the trace card read the event through this ONE
+// function — the `parseRunFailure` precedent. Two surfaces re-reading a
+// payload is how they come to disagree about what happened.
+
+/** The `tool_id` a project switch arrives under. Named once; two files test it. */
+export const SWITCH_PROJECT_TOOL_ID = "switch_project";
+
+/** Parse a JSON tool result into an object, or `{}` when it is anything else. */
+function resultObject(result: unknown): Record<string, unknown> {
+  if (result != null && typeof result === "object" && !Array.isArray(result)) {
+    return result as Record<string, unknown>;
+  }
+  if (typeof result !== "string") return {};
+  try {
+    const parsed = JSON.parse(result);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Normalize a `switch_project` `tool_result` payload, or null when the event is
+ * not one — or when the switch did NOT happen.
+ *
+ * The tool returns JSON with FIXED keys precisely so a renderer never has to
+ * regex its prose (`project_switch.py:SwitchProjectTool._result`); the model's
+ * sentence is one field (`summary`) among them, and every key is always
+ * present, `null` when unknown. So this reads values, never key existence.
+ *
+ * **`project` is required FROM THE RESULT, and the tool input is deliberately
+ * NOT a fallback.** The tool always returns the key on success, so the only
+ * calls whose result lacks it are ones that did not move the session — and the
+ * input carries the requested project whether or not the switch succeeded, so
+ * falling back to it is exactly the path that would turn a refusal into a card
+ * claiming the session moved. That matters more than it looks: the refusal
+ * shape is the shared error envelope written as a Python `str(dict)` repr, NOT
+ * `json.dumps` (a load-bearing asymmetry — the loop's recognizer is
+ * `ast.literal_eval`), so it does not `JSON.parse` and cannot be detected by
+ * reading an `error` key out of it. Requiring `project` from the result is what
+ * makes the refusal fall through structurally rather than by pattern-matching a
+ * repr. `success: false` — which the loop stamps when it reclassifies that
+ * envelope — is the belt to this braces.
+ *
+ * A refused call still renders, as the ordinary tool row in the trace panel,
+ * which is where an attempt that changed nothing belongs.
+ *
+ * `cwd` is the canonical directory key: it is what this tree calls the
+ * directory a session works in and what the `context` event the switch writes
+ * uses. `path` is read only as tolerance — that is the `list_projects` catalog
+ * spelling, which describes an ENTRY rather than where the agent now is.
+ */
+export function parseProjectSwitch(
+  payload: Record<string, unknown> | undefined,
+): ProjectSwitchMeta | null {
+  const p = payload ?? {};
+  if (readString(p, "tool_id") !== SWITCH_PROJECT_TOOL_ID) return null;
+  if (p.success === false) return null;
+  const result = resultObject(p.result);
+  const project = readString(result, "project");
+  if (!project) return null;
+  const meta: ProjectSwitchMeta = { project };
+  const name = readString(result, "name");
+  if (name && name !== project) meta.name = name;
+  const cwd = readString(result, "cwd") ?? readString(result, "path");
+  if (cwd) meta.cwd = cwd;
+  const repo = readString(result, "repo");
+  if (repo) meta.repo = repo;
+  const branch = readString(result, "branch");
+  if (branch) meta.branch = branch;
+  const previous = readString(result, "previous_project");
+  if (previous && previous !== project) meta.previous = previous;
+  // `previous_project` is null on a session's FIRST switch — the loop is handed
+  // a directory at construction, never a catalog key, so there is no key to
+  // report. `previous_cwd` is known regardless, which is what lets the card
+  // still show the move rather than silently dropping half of it.
+  const previousCwd = readString(result, "previous_cwd");
+  if (previousCwd && previousCwd !== cwd) meta.previousCwd = previousCwd;
+  if (result.project_instructions_found === true) {
+    meta.projectInstructionsFound = true;
+  }
+  return meta;
 }
 
 // ── Shared structured result parser ──────────────────────────────────
@@ -289,6 +377,109 @@ function resolveAgentPrefix(
   return null;
 }
 
+/**
+ * Build a `spawn_batch` log entry from a parsed `agent_batch` envelope
+ * (`{kind, agents, spawned, rejected, agent_ids, text}` —
+ * `spawn_agent.py:run_batch_async`). Per-row `model`/`agent_type` are joined
+ * in from the matching `tool_input.tasks[index]` entry, since the batch
+ * envelope itself only repeats `task` (truncated) per row.
+ *
+ * `agents[].status` is one of the six `AgentStatus` values — no `queued`; a
+ * capacity-deferred unit is `submitted` with a real `agent_id`, and
+ * `rejected` is reserved for PERMANENT refusals.
+ *
+ * Defensive against the admission scheduler's summary-count rename: the
+ * historical envelope's `spawned` becomes `accepted` (same meaning — a task
+ * that got a real `agent_id`), with an additive `dispatched` (the subset
+ * already running). `spawnBatchSpawned` reads `accepted` first, then
+ * `spawned`, then falls back to counting per-agent status when the envelope
+ * omits both — the SAME fallback `orchestration_cards.py:_render_spawn_batch`
+ * uses on the CLI side — so an old two-count transcript renders identically
+ * to before.
+ */
+function buildSpawnBatchLog(
+  ar: Record<string, unknown>,
+  payload: Record<string, unknown>,
+  callerId: string | undefined,
+  ts: string | undefined,
+  nextId: NextId,
+): SpawnBatchLogEntry {
+  const inp = (payload.tool_input as Record<string, unknown>) || {};
+  const rawTasks = Array.isArray(inp.tasks) ? inp.tasks : [];
+  const rawAgents = Array.isArray(ar.agents) ? ar.agents : [];
+  const agents: SpawnBatchAgentEntry[] = rawAgents.map((raw, i) => {
+    const index = readNumber(raw, "index") ?? i;
+    const taskInput = rawTasks[index];
+    return {
+      index,
+      agentId: readString(raw, "agent_id") ?? null,
+      status: readString(raw, "status") ?? "submitted",
+      task: readString(raw, "task") ?? "",
+      code: readString(raw, "code"),
+      reason: readString(raw, "reason"),
+      model: readString(taskInput, "model"),
+      agentType: readString(taskInput, "agent_type"),
+    };
+  });
+  const spawned =
+    readNumber(ar, "accepted") ??
+    readNumber(ar, "spawned") ??
+    agents.filter((a) => a.agentId != null).length;
+  const rejected = readNumber(ar, "rejected") ?? agents.filter((a) => a.status === "rejected").length;
+  return {
+    id: nextId("spawn-batch"),
+    type: "spawn_batch",
+    content: "",
+    timestamp: ts,
+    spawnBatchCaller: callerId,
+    spawnBatchAgents: agents,
+    spawnBatchSpawned: spawned,
+    spawnBatchRejected: rejected,
+    spawnBatchDispatched: readNumber(ar, "dispatched"),
+    spawnBatchDurationMs: readNumber(payload, "duration_ms"),
+    spawnBatchRawText: readString(ar, "text"),
+  };
+}
+
+/**
+ * A shell tool's IDENTITY — the fields that decide whether `renderShell` routes
+ * to `<TerminalCard>` — read from `tool_input` alone, with no result.
+ *
+ * This is the seam that lets a RUNNING call render as a terminal. `renderShell`
+ * dispatches on `shellCommand`, and a pending row has no result to parse a
+ * command out of, so without this it fell through to the generic card and
+ * printed the raw argument JSON — which is exactly what a custom card exists to
+ * avoid. Shared with the settled path, which needs the same derivation for a
+ * timed-out or internally-failed call that produced no structured payload;
+ * two copies of this extraction would drift the moment either grew a field.
+ *
+ * Only the fields KNOWN at dispatch are returned. Nothing is invented: there is
+ * no exit code, no output and no duration for a command that has not finished,
+ * and `TerminalCard` gates each of those on `!== undefined` so it renders the
+ * chrome and the `$ command` line and nothing more.
+ *
+ * Deliberately limited to shell. The other custom cards key on data that only
+ * exists in a RESULT — `<DiffCard>` needs the diff text, `<FileReadCard>` needs
+ * the file body — so there is no honest pending variant of either, and a card
+ * claiming to show a file's contents before they were read would be a lie.
+ */
+function shellIdentityFromInput(
+  toolId: string,
+  toolInput: unknown,
+): { command: string; cwd?: string } | null {
+  if (!/shell|bash|exec|run_command/i.test(toolId)) return null;
+  let command: string | undefined;
+  if (toolInput && typeof toolInput === "object") {
+    const candidate = (toolInput as Record<string, unknown>).command;
+    if (typeof candidate === "string") command = candidate;
+  } else if (typeof toolInput === "string") {
+    // A bare-string argument is the command itself; strip a decorative prompt.
+    command = toolInput.replace(/^\$\s*/, "");
+  }
+  if (!command) return null;
+  return { command, cwd: readString(toolInput, "cwd") };
+}
+
 interface ToolResultCtx {
   nextId: NextId;
   agentModelMap: Map<string, string>;
@@ -320,14 +511,18 @@ function buildToolResultLogs(event: EventRecord, ctx: ToolResultCtx): LogEntry[]
     readString(payload, "model") ??
     (eventAgentId ? agentModelMap.get(eventAgentId) : undefined);
 
-  // Parse AgentResult JSON from spawn_agent tool results.
-  // Two payload shapes share tool_id="spawn_agent":
+  // Parse AgentResult JSON from spawn_agent/spawn_agents tool results.
+  // Three payload shapes share this parse:
   //   - Blocking sub-agent: AgentResult dict (has steps_used).
   //   - Non-blocking root spawn: submit stub
   //     {agent_id, status:"submitted", task, message}.
-  if (toolId === "spawn_agent" && typeof result === "string") {
+  //   - spawn_agents fan-out: {kind:"agent_batch", agents, spawned, rejected}.
+  if ((toolId === "spawn_agent" || toolId === "spawn_agents") && typeof result === "string") {
     try {
       const ar = JSON.parse(result);
+      if (ar && ar.kind === "agent_batch") {
+        return [buildSpawnBatchLog(ar, payload, eventAgentId, event.ts, nextId)];
+      }
       if (ar.status && ar.steps_used !== undefined) {
         return [{
           id: nextId("agent-result"),
@@ -422,6 +617,24 @@ function buildToolResultLogs(event: EventRecord, ctx: ToolResultCtx): LogEntry[]
         fileReadText: typeof result === "string" ? result : "",
         agentId: eventAgentId,
         model: eventModel,
+      }];
+    }
+  }
+
+  // switch_project → the same card the conversation renders. A switch that
+  // showed up here as a generic "switch_project (run)" shell row while the
+  // conversation carried a proper readout would be exactly the two-surface
+  // divergence the shared parser exists to prevent. A REFUSED switch parses to
+  // null and deliberately falls through to that generic row: nothing moved.
+  if (toolId === SWITCH_PROJECT_TOOL_ID) {
+    const projectSwitch = parseProjectSwitch(payload);
+    if (projectSwitch) {
+      return [{
+        id: nextId("project-switch"),
+        type: "project_switch",
+        content: "",
+        timestamp: event.ts,
+        projectSwitch,
       }];
     }
   }
@@ -545,25 +758,15 @@ function buildToolResultLogs(event: EventRecord, ctx: ToolResultCtx): LogEntry[]
 
   // For shell tools without structured JSON (timeouts, internal errors),
   // synthesize shell fields from tool_input so TerminalCard still renders.
-  const isShellTool = /shell|bash|exec|run_command/i.test(toolId);
-  if (!shellData && isShellTool) {
-    const inp = payload.tool_input;
-    let cmd: string | undefined;
-    if (inp && typeof inp === "object" && typeof (inp as Record<string, unknown>).command === "string") {
-      cmd = (inp as Record<string, unknown>).command as string;
-    } else if (typeof inp === "string") {
-      cmd = inp.replace(/^\$\s*/, "");
-    }
-    if (cmd) {
-      const errorMsg = !success ? String(payload.error || summary || "") : undefined;
-      shellData = {
-        command: cmd,
-        cwd: readString(inp, "cwd"),
-        exit_code: !success ? 1 : undefined,
-        stdout: success ? (summary ? String(summary) : undefined) : undefined,
-        stderr: errorMsg || undefined,
-      };
-    }
+  const fromInput = shellIdentityFromInput(toolId, payload.tool_input);
+  if (!shellData && fromInput) {
+    const errorMsg = !success ? String(payload.error || summary || "") : undefined;
+    shellData = {
+      ...fromInput,
+      exit_code: !success ? 1 : undefined,
+      stdout: success ? (summary ? String(summary) : undefined) : undefined,
+      stderr: errorMsg || undefined,
+    };
   }
 
   // Regular tool result → shell card with separated input/output.
@@ -604,6 +807,50 @@ function buildToolResultLogs(event: EventRecord, ctx: ToolResultCtx): LogEntry[]
     shellStderr: shellData?.stderr,
     shellDurationMs: shellData?.duration_ms,
   }];
+}
+
+/**
+ * `tool_call` → the same generic `shell` row a `tool_result` builds, marked
+ * pending. The engine emits this immediately BEFORE dispatching the tool, so a
+ * 60 s tool gets a row at initiation instead of nothing until it returns; the
+ * row deliberately carries only the input and makes no success/failure claim.
+ *
+ * `tool_call_id` is the correlation key the matching `tool_result` upserts on
+ * (see {@link buildLogs}). A provider that omits an id sends an empty string —
+ * kept OFF the entry entirely, so an uncorrelatable result can never replace
+ * the wrong row.
+ */
+function buildToolCallLog(
+  event: EventRecord,
+  nextId: NextId,
+  agentModelMap: Map<string, string>,
+): LogEntry {
+  const payload = event.payload || {};
+  const toolId = readString(payload, "tool_id") ?? "tool";
+  const operation = readString(payload, "operation") ?? "run";
+  const shellInput = formatToolInput(payload.tool_input) || undefined;
+  const agentId = readString(payload, "agent_id");
+  // A shell call carries its command in the INPUT, so the row can route to
+  // `<TerminalCard>` from the moment it is dispatched rather than waiting for a
+  // result it does not have. Without these two fields `renderShell` falls
+  // through to the generic card and prints the argument JSON.
+  const shell = shellIdentityFromInput(toolId, payload.tool_input);
+  return {
+    id: nextId("tool-call"),
+    type: "shell",
+    title: `${toolId} (${operation})`,
+    content: shellInput ? `input: ${shellInput}` : "",
+    timestamp: event.ts,
+    pending: true,
+    toolCallId: readString(payload, "tool_call_id") || undefined,
+    shellInput,
+    shellCommand: shell?.command,
+    shellCwd: shell?.cwd,
+    agentId,
+    model:
+      readString(payload, "model") ??
+      (agentId ? agentModelMap.get(agentId) : undefined),
+  };
 }
 
 interface PlanDiffState {
@@ -851,9 +1098,26 @@ export function buildLogs(events: EventRecord[]): LogEntry[] {
 
   for (const event of events) {
     switch (event.type) {
-      case "tool_result":
-        logs.push(...buildToolResultLogs(event, { nextId, agentModelMap, agentTaskMap }));
+      case "tool_call":
+        logs.push(buildToolCallLog(event, nextId, agentModelMap));
         break;
+      case "tool_result": {
+        const built = buildToolResultLogs(event, { nextId, agentModelMap, agentTaskMap });
+        // Settle the pending row this result belongs to, replacing it IN PLACE
+        // so the tool renders once rather than twice. An empty `tool_call_id`
+        // (a provider that omits one) and a replayed transcript with no
+        // `tool_call` events at all both fall through to the append-only
+        // behaviour that predates the pending row.
+        const callId = readString(event.payload ?? {}, "tool_call_id") ?? "";
+        const idx = callId
+          ? logs.findIndex(
+              (e) => e.type === "shell" && e.pending === true && e.toolCallId === callId,
+            )
+          : -1;
+        if (idx >= 0) logs.splice(idx, 1, ...built);
+        else logs.push(...built);
+        break;
+      }
       case "action_plan":
         logs.push(buildActionPlanLog(event, nextId, planState));
         break;

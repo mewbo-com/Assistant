@@ -93,11 +93,71 @@ export type CreateWorktreeInput = {
   base?: string | null;
 };
 
+/**
+ * What a composed session is ABOUT, as opposed to where it runs.
+ *
+ * A target is not a project scope and never becomes one: it answers "what is
+ * this session for", and it is spent by ROUTING session creation to the
+ * product's own session endpoint instead of `POST /api/sessions`. That
+ * endpoint is get-or-create BY DEFAULT (what the wiki project card / app
+ * detail header's "open" buttons rely on), but the composer
+ * (`App.handleCreateAndRun`, via `openTargetSession(target, {requestNew:
+ * true})`) asks it for a genuinely new session every submit, because the
+ * composer is a CREATE surface, not an "open" one. `requestNew` is the client
+ * parameter name; it rides the wire as `newSession` (wiki, camelCase) or
+ * `new_session` (apps, snake_case) — each product's own casing, absorbed in
+ * `openProjectSession`/`openAppSession`. Nothing here reaches {@link
+ * SessionContext} — a target adds no key to the turn payload, because the
+ * session the endpoint hands back is already bound to the product server-side
+ * and would refuse a client-declared rebinding anyway.
+ *
+ * Consequences worth stating, since a reader meeting this beside `project` will
+ * assume otherwise. (1) A target is HOME-mode only: an existing session's
+ * purpose binding is durable and the server refuses to retarget it, so there is
+ * no detail-mode representation of changing one. (2) It is therefore never read
+ * BACK off the wire — no session event carries it — so the composer can only
+ * ever reset it, never restore it.
+ *
+ * A discriminated union rather than `{kind, id}`: each product's endpoint is
+ * keyed by a different identifier (a wiki project by its `host/owner/repo`
+ * slug, an app by its opaque id), and collapsing the two into one `id` field
+ * loses exactly the distinction the routing switch needs.
+ */
+export type SessionTarget =
+  | {
+      kind: "wiki";
+      /** Canonical `host/owner/repo` of an INDEXED wiki project. */
+      slug: string;
+      /** Display name, resolved at pick time so no surface re-looks it up. */
+      label: string;
+    }
+  | {
+      kind: "app";
+      /** Opaque `app_id` of a non-archived Mewbo App. */
+      appId: string;
+      label: string;
+    };
+
 export type SessionContext = {
   repo?: string;
   branch?: string;
   mcp_tools?: string[];
   skill?: string;
+  /**
+   * Which workspace the session runs in. Three shapes, and the third is a
+   * reserved sentinel rather than a project:
+   *
+   * - a bare name  — a project an operator registered in `app.json`;
+   * - `managed:<uuid>` — a project (or worktree) Mewbo created and owns;
+   * - `"auto"` — auto-select: the session starts in a temporary directory and
+   *   the AGENT chooses the project, switching again later if the task spans
+   *   several. Spelled once as {@link AUTO_PROJECT} (`utils/projectLabel.ts`),
+   *   which is what both the composer that sends it and every label that reads
+   *   it back import; never re-spell the literal.
+   *
+   * Omitting the key entirely is the fourth state and means something else
+   * again: a plain temporary directory with no agent-driven selection.
+   */
   project?: string;
   model?: string;
   mode?: QueryMode;
@@ -120,6 +180,14 @@ export type SessionContext = {
    * fetch.
    */
   app_id?: string;
+  /**
+   * The wiki project this session indexes/maintains, as a canonical
+   * `host/owner/repo` slug. Server-written and read-only to the client — a
+   * wiki maintainer session's context event carries this instead of
+   * `project`, since a wiki checkout is not a registered project. Absent on
+   * every other session.
+   */
+  slug?: string;
 };
 
 export type ShareRecord = {
@@ -214,6 +282,12 @@ export type SessionSpecResponse = {
   source: 'spec' | 'legacy_context';
 };
 
+/** Lines added and removed. Mirrors core's `DiffStat`. */
+export type DiffStat = {
+  additions: number;
+  deletions: number;
+};
+
 export type SessionSummary = {
   session_id: string;
   title: string;
@@ -230,24 +304,51 @@ export type SessionSummary = {
   done_reason?: string | null;
   running?: boolean;
   context?: SessionContext;
-  /** How the session was spawned; absent on legacy summaries → treat as "user". */
+  /** How the session was spawned; absent → treat as "user". */
   origin?: SessionOrigin;
   /**
-   * Capabilities the session was scoped to (advertised set on its context).
-   * Surfaced so the landing page shows e.g. that a session reasoned over the
-   * SCG. Absent/empty on legacy or plain sessions.
+   * Capabilities the session actually EXERCISED, proven by a tool invocation in
+   * its transcript — never the set a client advertised it could render. The
+   * console stamps the same four ids (`stlite`, `apps`, `ask_user`,
+   * `generative_ui`) on every request, so an advertised set chips every row
+   * identically and says nothing about the session. Absent/empty is the normal
+   * case: most sessions exercise no gated capability at all.
    */
   capabilities?: string[];
+  /**
+   * Lines added/removed by the session's own file edits, summed across its
+   * `kind:"diff"` tool results. Absent when the session edited nothing.
+   */
+  diff_stat?: DiffStat;
   /** Search/structured workspace id the session ran against, if any. */
   workspace?: string | null;
   archived?: boolean;
   /**
    * True iff the session is NOT running, did not successfully complete, and has
    * a prior user turn (incl. a session killed mid-call with no completion).
-   * Drives the Continue / Restart recovery affordances. Absent on legacy
-   * summaries → treat as not recoverable.
+   * Drives the Continue / Restart recovery affordances. Absent → treat as
+   * not recoverable.
    */
   recoverable?: boolean;
+  /**
+   * Pin state. The server emits BOTH keys only when the session is pinned — an
+   * unpinned row carries NEITHER, so absent must read as not-pinned (never
+   * default `pinned` to `false` locally; test for the key's absence instead).
+   * Pinning is an ORDERING signal only: the server already returns pinned rows
+   * first, then newest-first, and every active filter (origin, project) still
+   * applies to a pinned session — a pin never bypasses one.
+   */
+  pinned?: boolean;
+  pinned_at?: string | null;
+  /**
+   * Every project identity the session's context has ever bound to — an
+   * auto-select session that switched mid-task carries each one it moved
+   * through, not just its current binding (`context.project`). Absent when
+   * the session has bound to no project. This is what a project FILTER
+   * should read; `context.project`/`context.repo` (via `ProjectLabel`) is
+   * what a project LABEL should render.
+   */
+  projects?: string[];
 };
 export type EventRecord = {
   ts: string;
@@ -267,6 +368,62 @@ export interface WidgetReadyEntry {
   type: "widget_ready";
   ts: string;
   payload: WidgetReadyPayload;
+}
+
+// ---------------------------------------------------------------------------
+// Generative UI — model-authored cards rendered through a component allowlist
+// ---------------------------------------------------------------------------
+
+/**
+ * One node in a generative-UI tree. A bare string is a text leaf; an object
+ * names a component that MUST resolve against the console's allowlist, plus
+ * its props and children.
+ *
+ * Structurally this is assistant-ui's `GenerativeUINode` (the vendored
+ * renderer's input shape, which we don't get to choose). It is restated here
+ * rather than re-exported because it is OUR wire contract: the same shape is
+ * mirrored by the emitting model on the backend and by every other client, so
+ * it must stay readable and stable independently of the renderer package.
+ *
+ * Every field is untrusted model output. Nothing here is validated by the type
+ * system — the allowlist registry and each adapter's own prop coercion are the
+ * enforcement, not this declaration.
+ */
+export type GenerativeUINodeSpec =
+  | string
+  | {
+      component: string;
+      props?: Record<string, unknown>;
+      children?: GenerativeUINodeSpec[];
+      key?: string;
+    };
+
+/**
+ * Root of a generative-UI tree. The renderer accepts a single node or an
+ * array; the wire ALWAYS carries an array so there is exactly one shape to
+ * parse on every surface.
+ */
+export interface GenerativeUISpecPayload {
+  root: GenerativeUINodeSpec[];
+}
+
+/**
+ * A `generative_ui` event payload. Carried on `role: "generative_ui"` timeline
+ * entries.
+ *
+ * `ui_id` is the upsert key — a re-emission for the same id replaces the card
+ * in place instead of stacking a second copy, the same contract `widget_id`
+ * carries for widgets. `alt_text` is the plain-text degradation precomputed
+ * server-side; it is what the CLI, Aura, Home Assistant and MCP render, so
+ * those surfaces never need to know the component vocabulary. The console
+ * renders the spec and uses `alt_text` only as the card's accessible label.
+ */
+export interface GenerativeUIPayload {
+  ui_id: string;
+  session_id: string;
+  spec: GenerativeUISpecPayload;
+  alt_text: string;
+  summary?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -296,11 +453,18 @@ export interface UserQuestionItem {
  * Payload of a `user_question` transcript event: a pending question group the
  * run is blocked on. `call_token` is a single-use bearer secret the answer
  * POST must echo (same threat model as `device_tool_call`).
+ *
+ * Both optional knobs are model-supplied and absent by default:
+ * `timeout_seconds` bounds how long the run waits (a hint to show, never a
+ * client-side timer — the server owns expiry), and `notes_placeholder` asks
+ * for one free-text box alongside the whole group.
  */
 export interface UserQuestionPayload {
   call_id: string;
   call_token: string;
   questions: UserQuestionItem[];
+  timeout_seconds?: number | null;
+  notes_placeholder?: string | null;
 }
 
 /** One answer item: selected option indexes XOR free text, never both. */
@@ -309,19 +473,35 @@ export interface QuestionAnswerItemPayload {
   text?: string | null;
 }
 
-/** How a question group resolved (mirrors core `QuestionOutcome`). */
-export type QuestionOutcome = "answered" | "declined" | "interrupted" | "cancelled";
+/**
+ * How a question group resolved (mirrors core `QuestionOutcome`). Only
+ * `answered` means the QUESTION was resolved; the other four record that the
+ * RUN stopped waiting, which leaves the question itself still open.
+ */
+export type QuestionOutcome =
+  | "answered"
+  | "declined"
+  | "interrupted"
+  | "cancelled"
+  | "timed_out";
+
+/** Where an accepted answer landed: the run that was still waiting for it, or
+ *  a new user message because the run had already moved on. */
+export type AnswerDelivery = "run" | "message";
 
 /**
  * Payload of a `user_question_answered` transcript event: the resolution of a
  * question group, emitted whatever the outcome so every surface settles its
- * card. `answers` is present only when `outcome === "answered"`.
+ * card. `answers`, `notes` and `delivery` are present only when
+ * `outcome === "answered"`.
  */
 export interface UserQuestionAnsweredPayload {
   call_id: string;
   outcome: QuestionOutcome;
   answered_via: string | null;
   answers: QuestionAnswerItemPayload[] | null;
+  notes?: string | null;
+  delivery?: AnswerDelivery | null;
 }
 export type DiffFile = {
   name: string;
@@ -365,7 +545,7 @@ export type TurnTokenUsage = {
 // Output tokens are always cumulative (additive).
 export type SessionUsage = {
   root_model: string;
-  /** Distinct model IDs actually used in the session, in first-seen order. Empty [] for legacy sessions. */
+  /** Distinct model IDs actually used in the session, in first-seen order. Empty [] when not recorded. */
   models_used: string[];
   root_max_input_tokens: number;
   root_last_input_tokens: number;
@@ -437,8 +617,9 @@ export type TodoMeta = {
   source?: "plan" | "agent";
   agentId?: string;
 };
-/** Status of a question card: `pending` while awaiting an answer, then one of
- * the four settled {@link QuestionOutcome} states. */
+/** Status of a question card: `pending` while the run waits, then one of the
+ * {@link QuestionOutcome} states. Only `answered` closes the card — the rest
+ * say the run stopped waiting, so the card stays answerable. */
 export type QuestionStatus = "pending" | QuestionOutcome;
 /**
  * A pending/settled ask-user-question card carried by the `user_question`
@@ -455,6 +636,14 @@ export type QuestionMeta = {
   answers?: QuestionAnswerItemPayload[];
   /** The surface that answered (e.g. "console"), shown muted on the card. */
   answeredVia?: string;
+  /** Seconds the run will wait, when the model bounded it — a hint only. */
+  timeoutSeconds?: number;
+  /** Placeholder for the group-level notes box; absent ⇒ no box at all. */
+  notesPlaceholder?: string;
+  /** The free-text notes submitted with the answer, if any. */
+  notes?: string;
+  /** Where the accepted answer landed — the waiting run, or a new message. */
+  delivery?: AnswerDelivery;
 };
 /**
  * Compact transcript marker for a reverse-invocation trigger.
@@ -535,7 +724,7 @@ export type RunFailureReason =
  */
 export type RunFailureMeta = {
   reason: RunFailureReason;
-  /** Body text: the classified detail when present, else the legacy
+  /** Body text: the classified detail when present, else the
    *  `error`/`last_error` string. Empty when the run failed with no message. */
   text: string;
   /** Present only when the backend shipped `error_detail`. */
@@ -576,9 +765,52 @@ export type CompactionMeta = {
   mode: string;
   tokensSaved?: number;
 };
+/**
+ * A completed `switch_project` call: the session moved to a different working
+ * directory, so every tool call, sub-agent and file read AFTER this point ran
+ * somewhere else. Carried on `role: "project_switch"` timeline entries and on
+ * {@link ProjectSwitchLogEntry} rows — one parse, both surfaces, so the
+ * conversation and the trace panel cannot disagree about where the run went.
+ *
+ * The tool writes every key on every call, `null` when unknown, so this mirrors
+ * only what a RENDERER uses and drops each absent value rather than carrying a
+ * nullable field per key. Only `project` is guaranteed to have a value: a
+ * configured project has no repo, a non-worktree has no branch, and the first
+ * switch of a session has no previous KEY (see `previousCwd`).
+ */
+export type ProjectSwitchMeta = {
+  /** The key switched TO: a bare name, `managed:<uuid>`, or a repository slug. */
+  project: string;
+  /** Human-readable name, when it differs from the key. */
+  name?: string;
+  /** Absolute directory the session runs in from here on. */
+  cwd?: string;
+  /** Canonical `host/owner/repo` slug, when the project has a git remote. */
+  repo?: string;
+  /** Branch, when known (a worktree names its own). */
+  branch?: string;
+  /** The key the session was in BEFORE. Absent on a session's FIRST switch — the
+   *  loop is handed a directory at construction, never a catalog key. */
+  previous?: string;
+  /** The directory it came FROM. Known even when {@link previous} is not, which
+   *  is what lets the first switch still read as a move. */
+  previousCwd?: string;
+  /** The new directory carries its own `CLAUDE.md`, now in the system prompt. */
+  projectInstructionsFound?: boolean;
+};
+/**
+ * A safety-plane disclosure or deny verdict. Carried on `role: "safety_plane"`
+ * timeline entries. `phase: "disclosed"` fires once, before the plane
+ * evaluates anything, naming every active rule; `phase: "deny"` fires each
+ * time a rule stops a call or the run. Mirrors `mewbo_core.safety.plane`'s
+ * `SafetyDisclosure`/`SafetyVerdict` wire shapes.
+ */
+export type SafetyPlaneMeta =
+  | { phase: "disclosed"; rules: { name: string; kind: string; decision: string; inspects: string }[] }
+  | { phase: "deny"; rule: string; reason: string };
 export type TimelineEntry = {
   id: string;
-  role: "user" | "assistant" | "run_failed" | "plan" | "widget" | "todos" | "question" | "trigger" | "session_terminated" | "recovery" | "compaction";
+  role: "user" | "assistant" | "run_failed" | "plan" | "widget" | "generative_ui" | "todos" | "question" | "trigger" | "session_terminated" | "recovery" | "compaction" | "project_switch" | "safety_plane";
   content: string;
   turnId: string;
   /** Timestamp of the underlying event. For user entries this is the user's
@@ -588,6 +820,8 @@ export type TimelineEntry = {
   turn?: TurnMeta;
   plan?: PlanMeta;
   widget?: WidgetReadyPayload;
+  /** Present on `role: "generative_ui"` entries (a model-authored UI tree). */
+  generativeUi?: GenerativeUIPayload;
   todos?: TodoMeta;
   /** Present on `role: "question"` entries (user_question / _answered). */
   question?: QuestionMeta;
@@ -597,6 +831,10 @@ export type TimelineEntry = {
   recovery?: RecoveryMeta;
   /** Present on `role: "compaction"` entries (a context_compacted boundary). */
   compaction?: CompactionMeta;
+  /** Present on `role: "project_switch"` entries (a completed `switch_project`). */
+  projectSwitch?: ProjectSwitchMeta;
+  /** Present on `role: "safety_plane"` entries (a disclosure or deny verdict). */
+  safetyPlane?: SafetyPlaneMeta;
   /** Present on `role: "run_failed"` entries (completion with a failure reason). */
   runFailure?: RunFailureMeta;
   /** Metadata-only descriptors for files uploaded alongside this user turn
@@ -662,6 +900,15 @@ interface LogEntryBase {
 /** Regular tool result → shell/terminal card (also the generic tool fallback). */
 export interface ShellLogEntry extends LogEntryBase {
   type: "shell";
+  /**
+   * The row was built from a `tool_call` (emitted before dispatch) and no
+   * result has arrived yet — so it makes NO success/failure claim. The matching
+   * `tool_result` replaces the row in place, keyed on `toolCallId`.
+   */
+  pending?: boolean;
+  /** Provider call id — the `tool_call` ↔ `tool_result` correlation key. Absent
+   * when the provider omits one, which means the row cannot be upserted onto. */
+  toolCallId?: string;
   shellInput?: string;
   shellOutput?: string;
   error?: string;
@@ -819,6 +1066,58 @@ export interface SpawnSubmitLogEntry extends LogEntryBase {
   spawnDurationMs?: number;
 }
 
+/**
+ * One task's outcome inside a `spawn_agents` batch fan-out (the
+ * `kind: "agent_batch"` envelope's `agents` array). `agentId` is `null` for a
+ * refused slot, in which case `reason` carries why. `model`/`agentType` are
+ * joined in from the matching `tool_input.tasks[index]` entry, when present —
+ * the batch envelope itself doesn't repeat per-task input.
+ *
+ * `status` is one of the six `AgentStatus` values (`hypervisor.py `AgentStatus``) —
+ * there is no `queued`/`pending` state; a capacity-deferred unit is
+ * `submitted` with a real `agent_id`. This reads as a plain string (not
+ * narrowed to a literal union) purely so a status this renderer doesn't
+ * otherwise recognize still displays (folds to `submitted` styling via
+ * `statusKey`) rather than narrowing out an old or unexpected transcript.
+ */
+export type SpawnBatchAgentEntry = {
+  index: number;
+  agentId: string | null;
+  status: string;
+  task: string;
+  /**
+   * The refusal's machine-readable cause, emitted alongside `reason` on a
+   * refused entry. `reason` is prose for a human; `code` is what a caller
+   * branches on — the whole point of carrying it is that "no free slot" and
+   * "unresolvable project" demand different responses, and prose cannot be
+   * relied on to distinguish them. Absent on an accepted entry, and absent on
+   * transcripts written before the code existed.
+   */
+  code?: string;
+  reason?: string;
+  model?: string;
+  agentType?: string;
+};
+
+/** Fan-out `spawn_agents` batch result (`kind: "agent_batch"`) → SpawnAgentBatchCard. */
+export interface SpawnBatchLogEntry extends LogEntryBase {
+  type: "spawn_batch";
+  spawnBatchCaller?: string;
+  spawnBatchAgents: SpawnBatchAgentEntry[];
+  /** Successfully admitted count — reads the historical envelope's `spawned`
+   *  or the scheduler-era envelope's `accepted`, whichever is present. Falls
+   *  back to counting non-refused agents when the envelope omits both. */
+  spawnBatchSpawned: number;
+  /** Permanently-refused count (never recovers). */
+  spawnBatchRejected: number;
+  /** Additive — a scheduler-era envelope's "already running" subset of
+   *  {@link spawnBatchSpawned}. Absent on the historical envelope and on an
+   *  old transcript. */
+  spawnBatchDispatched?: number;
+  spawnBatchDurationMs?: number;
+  spawnBatchRawText?: string;
+}
+
 /** Same-model LLM retry after a transient error. `model` = the retry target. */
 export interface LlmRetryLogEntry extends LogEntryBase {
   type: "llm_retry";
@@ -843,6 +1142,16 @@ export interface LlmFallbackLogEntry extends LogEntryBase {
   fallbackPreviousErrorType?: string;
   /** Destination model is pinned for the rest of the run (sticky fallback). */
   fallbackSticky?: boolean;
+}
+
+/**
+ * A completed `switch_project` call. Carries the SAME {@link ProjectSwitchMeta}
+ * the conversation entry does — the row is a second placement of one parse,
+ * never a second reading of the event.
+ */
+export interface ProjectSwitchLogEntry extends LogEntryBase {
+  type: "project_switch";
+  projectSwitch: ProjectSwitchMeta;
 }
 
 /** The doom-loop halt (`recovery` with `action="halt_no_progress"`). */
@@ -870,8 +1179,10 @@ export type LogEntry =
   | CheckAgentsLogEntry
   | RootSteerLogEntry
   | SpawnSubmitLogEntry
+  | SpawnBatchLogEntry
   | LlmRetryLogEntry
   | LlmFallbackLogEntry
+  | ProjectSwitchLogEntry
   | RecoveryHaltLogEntry;
 
 export type PlanStep = {

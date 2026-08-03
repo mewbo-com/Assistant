@@ -26,13 +26,13 @@ from mewbo_core.common import (
     get_logger,
     pydantic_to_openai_tool,
 )
-from mewbo_core.session_tools import DEFAULT_SESSION_TOOL_MODES
+from mewbo_core.tooling.session_tools import DEFAULT_SESSION_TOOL_MODES
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mewbo_core.classes import ActionStep
-    from mewbo_core.types import Event
+    from mewbo_core.contracts.types import Event
 
 logging = get_logger(name="core.builtin_plugins.widget_builder")
 
@@ -109,7 +109,7 @@ SUBMIT_WIDGET_SCHEMA: dict[str, object] = pydantic_to_openai_tool(
 class WidgetReadyPayload(BaseModel):
     """Typed payload for the ``widget_ready`` event.
 
-    Owned here rather than in ``mewbo_core.types.EventPayload`` — the core
+    Owned here rather than in ``mewbo_core.contracts.types.EventPayload`` — the core
     union is generic infrastructure shared by every event kind, and a
     plugin-specific arm there would re-couple core to the widget shape
     (see ``packages/mewbo_core/CLAUDE.md`` → "Built-in plugins"). The wire
@@ -240,8 +240,8 @@ class SubmitWidgetTool:
 
         # Validated through WidgetReadyPayload (this module's typed contract)
         # then dumped back to a plain dict — the core Event union still rides
-        # its generic ``dict`` branch for this event, but the shape emitted is
-        # no longer hand-assembled and unchecked.
+        # its generic ``dict`` branch for this event, so this model is the only
+        # thing checking the shape.
         payload = WidgetReadyPayload(
             widget_id=args.widget_id,
             session_id=self._session_id,

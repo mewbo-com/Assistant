@@ -11,7 +11,7 @@ predicate that both the loop and spawn_agent read.
 from __future__ import annotations
 
 import pytest
-from mewbo_core.verification import (
+from mewbo_core.contracts.verification import (
     _FEEDBACK_TAIL_CAP,
     CommandVerification,
     VerifierResult,

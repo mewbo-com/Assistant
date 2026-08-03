@@ -34,8 +34,8 @@ def new_fake(fake_rest):
 def test_create_session_auto_provisions_worktree(fake_rest):
     """Default path: read base branch → create-from-base worktree → session → query.
 
-    Fix 2: worktree IS still provisioned server-side, but the caller receives
-    only the minimal {session_id, status} shape (no worktree ids).
+    The worktree IS provisioned server-side, but the caller receives only the
+    minimal {session_id, status} shape (no worktree ids).
     """
     fake = (
         fake_rest
@@ -54,7 +54,7 @@ def test_create_session_auto_provisions_worktree(fake_rest):
     )
     assert result["session_id"] == "s1"
     assert result["status"] == "running"
-    # Fix 2: worktree ids are NOT surfaced to the caller (system-owned lifecycle)
+    # Worktree ids are NOT surfaced to the caller (system-owned lifecycle).
     assert "worktree_project_id" not in result
     assert "parent_project_id" not in result
 
@@ -282,20 +282,86 @@ def test_list_sessions_filters_by_status_project_since(fake_rest):
     assert {s["session_id"] for s in by_since["sessions"]} == {"b", "w"}
 
 
-def test_list_sessions_project_matches_config_and_worktree(fake_rest):
-    """project= matches both a plain config session AND a worktree session.
-
-    The worktree session stores context.project="managed:..." + context.repo=
-    "Assistant"; filtering by "Assistant" must catch it via context.repo, not
-    miss it because context.project is the managed ref.
+def test_list_sessions_forwards_project_as_a_server_query_param(fake_rest):
+    """``project`` is now pushed to the server via ``?project=``, not filtered
+    client-side. The store narrows on the session's ACCUMULATED project set
+    (`SessionQuery`), which client-side re-filtering could never replicate
+    (it would only see the CURRENT `context.project`, missing every project
+    an auto-select session already switched out of) — so this tool must
+    trust the server's response and merely forward the request.
     """
     fake = fake_rest.on("GET", "/api/sessions", _sessions_payload())
     out = run(tools.SessionTools(fake.client()).list_sessions(project="Assistant"))
-    assert {s["session_id"] for s in out["sessions"]} == {"a", "w"}
+    # No client-side narrowing: the (unfiltered) canned payload passes through
+    # whole — the request itself is the thing under test here.
+    assert {s["session_id"] for s in out["sessions"]} == {"a", "b", "w"}
+    sent = [r for r in fake.requests if r.method == "GET" and r.path == "/api/sessions"]
+    assert sent[-1].params.get("project") == "Assistant"
 
-    fake2 = new_fake(fake_rest).on("GET", "/api/sessions", _sessions_payload())
-    other = run(tools.SessionTools(fake2.client()).list_sessions(project="Other"))
-    assert {s["session_id"] for s in other["sessions"]} == {"b"}
+
+def test_list_sessions_omits_the_project_param_when_unset(fake_rest):
+    fake = fake_rest.on("GET", "/api/sessions", _sessions_payload())
+    run(tools.SessionTools(fake.client()).list_sessions())
+    sent = [r for r in fake.requests if r.method == "GET" and r.path == "/api/sessions"]
+    assert "project" not in sent[-1].params
+
+
+def test_list_sessions_orders_pinned_first_then_newest_first(fake_rest):
+    """The server already returns pinned-first order, but this tool re-derives
+    it locally because ``limit`` truncates AFTER sorting — trusting the
+    server's raw order would let a pinned session that sorts past the cutoff
+    get truncated out, the opposite of what a pin is for.
+    """
+    payload = {
+        "sessions": [
+            {"session_id": "old", "status": "idle", "created_at": "2026-06-01"},
+            {
+                "session_id": "pinned-old",
+                "status": "idle",
+                "created_at": "2026-06-02",
+                "pinned": True,
+                "pinned_at": "2026-06-03",
+            },
+            {"session_id": "new", "status": "idle", "created_at": "2026-06-10"},
+            {
+                "session_id": "pinned-new",
+                "status": "idle",
+                "created_at": "2026-06-04",
+                "pinned": True,
+                "pinned_at": "2026-06-09",
+            },
+        ]
+    }
+    fake = fake_rest.on("GET", "/api/sessions", payload)
+    out = run(tools.SessionTools(fake.client()).list_sessions())
+    assert [s["session_id"] for s in out["sessions"]] == [
+        "pinned-new",
+        "pinned-old",
+        "new",
+        "old",
+    ]
+
+
+def test_list_sessions_projects_the_pinned_facet(fake_rest):
+    payload = {
+        "sessions": [
+            {
+                "session_id": "p",
+                "status": "idle",
+                "created_at": "2026-06-01",
+                "pinned": True,
+                "pinned_at": "2026-06-02",
+            },
+            {"session_id": "u", "status": "idle", "created_at": "2026-06-01"},
+        ]
+    }
+    fake = fake_rest.on("GET", "/api/sessions", payload)
+    out = run(tools.SessionTools(fake.client()).list_sessions())
+    rows = {s["session_id"]: s for s in out["sessions"]}
+    assert rows["p"]["pinned"] is True
+    assert rows["p"]["pinned_at"] == "2026-06-02"
+    assert "pinned" not in rows["u"]
+    assert "pinned_at" not in rows["u"]
 
 
 # ---------------------------------------------------------------------------
@@ -877,6 +943,38 @@ def test_ask_wiki_forwards_model_when_given(fake_rest):
     assert fake.find("POST", "/v1/wiki/qa").json["model"] == "gpt-x"
 
 
+def test_ask_wiki_defaults_mode_to_fast(fake_rest):
+    """An unset mode still sends 'fast' explicitly, matching the console default."""
+    stable = {"status": "complete", "blocks": [{"kind": "p", "text": "hi"}]}
+    fake = (
+        fake_rest
+        .on_sse("POST", "/v1/wiki/qa", _qa_meta_sse("ansF"))
+        .on("GET", "/v1/wiki/qa/ansF", stable)
+    )
+    run(
+        tools.WikiTools(fake.client(), timeout_s=5.0, poll_interval_s=0.0).ask(
+            project="assistant", question="q"
+        )
+    )
+    assert fake.find("POST", "/v1/wiki/qa").json["mode"] == "fast"
+
+
+def test_ask_wiki_forwards_mode_when_given(fake_rest):
+    """An explicit mode is forwarded verbatim; the server owns rejecting a bad value."""
+    stable = {"status": "complete", "blocks": [{"kind": "p", "text": "hi"}]}
+    fake = (
+        fake_rest
+        .on_sse("POST", "/v1/wiki/qa", _qa_meta_sse("ansD"))
+        .on("GET", "/v1/wiki/qa/ansD", stable)
+    )
+    run(
+        tools.WikiTools(fake.client(), timeout_s=5.0, poll_interval_s=0.0).ask(
+            project="assistant", question="q", mode="deep"
+        )
+    )
+    assert fake.find("POST", "/v1/wiki/qa").json["mode"] == "deep"
+
+
 def test_ask_wiki_returns_partial_on_timeout(fake_rest):
     """A QA whose blocks never render returns status 'running' rather than hanging."""
     fake = (
@@ -1398,9 +1496,9 @@ def test_agent_tree_initializing_during_spinup(fake_rest):
 
 
 def test_cleanup_worktree_method_removed():
-    """Fix 2: SessionTools no longer exposes cleanup_worktree (system-owned lifecycle)."""
+    """SessionTools does not expose cleanup_worktree — the lifecycle is system-owned."""
     assert not hasattr(tools.SessionTools, "cleanup_worktree"), (
-        "cleanup_worktree must be removed from SessionTools (knob-minimization Fix 2)"
+        "cleanup_worktree must not be exposed on SessionTools"
     )
 
 
@@ -1494,7 +1592,7 @@ def test_error_message_reads_structured_envelope():
 
 
 def test_error_message_empty_body_adds_hint():
-    """Fix 3: an empty response body gets a terse hint rather than a bare status code."""
+    """An empty response body gets a terse hint rather than a bare status code."""
     from mewbo_mcp.rest import _error_message
 
     resp = httpx.Response(503)
@@ -1628,7 +1726,7 @@ def test_long_running_timeout_budgets_below_proxy_ceiling(fake_rest):
 
 
 def test_structured_query_422_raises_rest_error_with_reason(fake_rest):
-    """Fix 3: a 422 GET (model didn't emit) raises RestError with the reason string.
+    """A 422 GET (model didn't emit) raises RestError with the reason string.
 
     The _enveloped decorator at the server layer converts this into a structured
     {error:{code, reason, retryable}} envelope. The run_id from the initial POST

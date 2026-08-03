@@ -1,4 +1,4 @@
-"""Tests for ``mewbo_core.structured_synthesis.StructuredSynthesizer``.
+"""Tests for ``mewbo_core.loop.structured_synthesis.StructuredSynthesizer``.
 
 Design:
 - Fake ``GroundingProvider`` returns 2 Citations.
@@ -17,8 +17,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage
-from mewbo_core.structured_response import StructuredResponseError
-from mewbo_core.structured_synthesis import Citation, StructuredSynthesizer
+from mewbo_core.loop.structured_response import StructuredResponseError
+from mewbo_core.loop.structured_synthesis import Citation, StructuredSynthesizer
 
 # ---------------------------------------------------------------------------
 # Schema used across tests
@@ -105,7 +105,7 @@ def test_synthesize_returns_payload_and_citations():
     responses = [_emit_response({"name": "Ada", "age": 36})]
     model, bound = _stub_model(responses)
 
-    with patch("mewbo_core.structured_synthesis.build_chat_model", return_value=model):
+    with patch("mewbo_core.loop.structured_synthesis.build_chat_model", return_value=model):
         payload, citations = asyncio.run(
             synthesizer.synthesize(
                 "Who is Ada?",
@@ -150,7 +150,7 @@ def test_synthesize_without_workspace_skips_grounding():
     responses = [_emit_response({"name": "Grace"})]
     model, bound = _stub_model(responses)
 
-    with patch("mewbo_core.structured_synthesis.build_chat_model", return_value=model):
+    with patch("mewbo_core.loop.structured_synthesis.build_chat_model", return_value=model):
         payload, citations = asyncio.run(
             synthesizer.synthesize("Who is Grace?", _PERSON_SCHEMA)
         )
@@ -184,7 +184,7 @@ def test_synthesize_reask_on_validation_failure():
     ]
     model, bound = _stub_model(responses)
 
-    with patch("mewbo_core.structured_synthesis.build_chat_model", return_value=model):
+    with patch("mewbo_core.loop.structured_synthesis.build_chat_model", return_value=model):
         payload, citations = asyncio.run(
             synthesizer.synthesize("Who is Turing?", _PERSON_SCHEMA)
         )
@@ -211,7 +211,7 @@ def test_synthesize_raises_on_repeated_invalid():
     ]
     model, _ = _stub_model(responses)
 
-    with patch("mewbo_core.structured_synthesis.build_chat_model", return_value=model):
+    with patch("mewbo_core.loop.structured_synthesis.build_chat_model", return_value=model):
         with pytest.raises(StructuredResponseError):
             asyncio.run(synthesizer.synthesize("Query", _PERSON_SCHEMA))
 
@@ -230,7 +230,7 @@ def test_synthesize_reask_when_model_returns_prose():
     ]
     model, bound = _stub_model(responses)
 
-    with patch("mewbo_core.structured_synthesis.build_chat_model", return_value=model):
+    with patch("mewbo_core.loop.structured_synthesis.build_chat_model", return_value=model):
         payload, _ = asyncio.run(synthesizer.synthesize("Who?", _PERSON_SCHEMA))
 
     assert payload == {"name": "Ada"}
@@ -249,9 +249,9 @@ def test_no_tool_use_loop_or_orchestrator_instantiated():
     model, _ = _stub_model(responses)
 
     with (
-        patch("mewbo_core.structured_synthesis.build_chat_model", return_value=model),
-        patch("mewbo_core.tool_use_loop.ToolUseLoop") as mock_loop,
-        patch("mewbo_core.orchestrator.Orchestrator") as mock_orch,
+        patch("mewbo_core.loop.structured_synthesis.build_chat_model", return_value=model),
+        patch("mewbo_core.loop.tool_use_loop.ToolUseLoop") as mock_loop,
+        patch("mewbo_core.loop.orchestrator.Orchestrator") as mock_orch,
     ):
         asyncio.run(synthesizer.synthesize("Test", _PERSON_SCHEMA))
 
@@ -313,9 +313,9 @@ def test_synthesize_attaches_langfuse_callback_to_invoke():
     model, bound = _stub_model(responses)
 
     with (
-        patch("mewbo_core.structured_synthesis.build_chat_model", return_value=model),
+        patch("mewbo_core.loop.structured_synthesis.build_chat_model", return_value=model),
         patch(
-            "mewbo_core.structured_synthesis.langfuse_invoke_config",
+            "mewbo_core.loop.structured_synthesis.langfuse_invoke_config",
             return_value=fake_config,
         ),
     ):
@@ -337,8 +337,8 @@ def test_synthesize_disabled_langfuse_passes_no_config():
     model, bound = _stub_model(responses)
 
     with (
-        patch("mewbo_core.structured_synthesis.build_chat_model", return_value=model),
-        patch("mewbo_core.structured_synthesis.langfuse_invoke_config", return_value={}),
+        patch("mewbo_core.loop.structured_synthesis.build_chat_model", return_value=model),
+        patch("mewbo_core.loop.structured_synthesis.langfuse_invoke_config", return_value={}),
     ):
         asyncio.run(synthesizer.synthesize("Who is Ada?", _PERSON_SCHEMA))
 

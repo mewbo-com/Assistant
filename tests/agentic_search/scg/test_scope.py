@@ -7,7 +7,7 @@ workspace's own sources. These tests prove the isolation requirement
 ("two workspaces, same source ids in the shared graph, no bleed") via the scope
 filter rather than a store partition:
 
-* an unbound scope routes over every mapped source (historical global behavior);
+* an unbound scope routes over every mapped source;
 * a bound scope drops any candidate recipe touching an out-of-scope source;
 * two scopes over ONE shared graph never see each other's pathways;
 * the scope is ``ContextVar``-isolated (a leaked bind never crosses the boundary).
@@ -98,7 +98,7 @@ def _router(store: JsonScgStore) -> ScgRouter:
     )
 
 
-# ── unbound scope = historical global behavior ──────────────────────────────
+# ── unbound scope = global routing ─────────────────────────────────────────
 
 
 def test_unbound_scope_routes_over_every_source(store: JsonScgStore) -> None:

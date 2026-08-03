@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from .memory_types import EntityKey
-from .types import GraphNode
+from .types import CommitScope, GraphNode
 
 if TYPE_CHECKING:
     from .store import WikiStoreBase
@@ -56,15 +56,31 @@ class StructureProvider(Protocol):
 
 
 class CodeStructureProvider:
-    """``StructureProvider`` over the tree-sitter code graph (v1)."""
+    """``StructureProvider`` over the tree-sitter code graph (v1).
 
-    def __init__(self, store: WikiStoreBase) -> None:
-        """Compose over a wiki store (dependency-injected)."""
+    **The two directions read different commit scopes, on purpose.**
+    ``resolve``/``resolve_many`` answer "where does this key live *now*", so
+    they read the live generation: an ``entity_key`` carries no byte offset, so
+    it re-resolves cleanly onto whatever generation is current, and returning a
+    superseded node would hand the caller a node id no live payload contains.
+    ``entity_key_of`` answers the opposite question about a node id recorded in
+    the PAST — a QA provenance ref from an earlier session — so it must read
+    the union or it would fail to label exactly the historical refs it exists
+    to label.
+    """
+
+    def __init__(self, store: WikiStoreBase, *, scope: CommitScope | None = None) -> None:
+        """Compose over a wiki store; *scope* defaults to the slug's live commit."""
         self._store = store
+        self._scope = scope
+
+    def _live(self, slug: str) -> CommitScope:
+        """The scope forward resolution reads (injected one wins)."""
+        return self._scope if self._scope is not None else self._store.live_scope(slug)
 
     def resolve(self, slug: str, entity_key: EntityKey) -> GraphNode | None:
         """Return the node addressed by *entity_key*, or None if absent."""
-        for node in self._store.query_graph(slug):
+        for node in self._store.query_graph(slug, scope=self._live(slug)):
             if entity_key_for_node(node) == entity_key:
                 return node
         return None
@@ -77,7 +93,7 @@ class CodeStructureProvider:
         out: dict[EntityKey, GraphNode] = {}
         if not wanted:
             return out
-        for node in self._store.query_graph(slug):
+        for node in self._store.query_graph(slug, scope=self._live(slug)):
             key = entity_key_for_node(node)
             if key in wanted and key not in out:
                 out[key] = node
@@ -86,8 +102,15 @@ class CodeStructureProvider:
         return out
 
     def entity_key_of(self, slug: str, node_id: str) -> EntityKey | None:
-        """Return the ``entity_key`` for a code ``node_id``, or None."""
-        for node in self._store.query_graph(slug):
+        """Return the ``entity_key`` for a code ``node_id``, or None.
+
+        Reads EVERY generation deliberately — see the class docstring. The
+        callers hand it node ids captured during earlier sessions, and a node
+        id embeds the symbol's byte offset, so any edit since then re-keyed it
+        out of the live generation. Scoping this would turn a resolvable
+        historical citation into an ``unknown(...)`` label.
+        """
+        for node in self._store.query_graph(slug, scope=CommitScope.every()):
             if node.node_id == node_id:
                 return entity_key_for_node(node)
         return None

@@ -13,9 +13,8 @@ drill view re-render promptly. (The panel also self-ticks while agents run, so
 token/elapsed liveness never depends solely on a hook.)
 
 The plan/todo dock is fed by the hub's authoritative ``todos`` event (an agent
-calls ``update_todos``); the old tool-call heuristic (a ``TodoTracker`` that
-re-projected every raw step) was retired, so these tool hooks now only
-marshal a refresh — they never fabricate progress.
+calls ``update_todos``). These tool hooks only marshal a refresh — they never
+re-project raw steps into progress the agent never reported.
 """
 
 from __future__ import annotations

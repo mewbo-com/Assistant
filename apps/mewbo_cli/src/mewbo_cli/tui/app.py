@@ -158,7 +158,7 @@ class MewboApp(App[int]):
     #sidebar { width: 36; border-left: solid $panel; padding: 0 1; }
     Screen.compact #sidebar { display: none; }
     /* The composer flows above the bottom bar (NOT docked itself — a second
-       bottom-dock would overlap the Footer, the regression this fixes). The
+       bottom-dock overlaps the Footer). The
        margin sets it clearly off from the transcript above and the status bar
        below. */
     #input { height: auto; margin: 1 1; }

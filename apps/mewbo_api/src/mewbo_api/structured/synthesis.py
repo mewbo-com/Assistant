@@ -1,7 +1,7 @@
 """No-loop structured synthesis for ``POST /v1/structured`` (``mode: "synthesis"``).
 
 The degenerate, single-round-trip execution strategy on ``/v1/structured``: the
-core :class:`~mewbo_core.structured_synthesis.StructuredSynthesizer` drives ONE
+core :class:`~mewbo_core.loop.structured_synthesis.StructuredSynthesizer` drives ONE
 grounded LLM call (+ one optional reask) — no ``ToolUseLoop``, no probes — so a
 caller that wants cheap, fast, retrieval-only structured output gets ~1–3s
 latency on the SAME endpoint as the agentic lane. This folds in the former
@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mewbo_core.common import get_logger
-from mewbo_core.structured_synthesis import StructuredSynthesizer
+from mewbo_core.loop.structured_synthesis import StructuredSynthesizer
 
 from mewbo_api.realtime.recorder import RealtimeSessionRecorder
 
@@ -59,7 +59,7 @@ class SynthesisRunner:
     ) -> dict[str, Any]:
         """Synthesize once → ``{run_id, status, output, citations, workspace}``.
 
-        Raises :class:`~mewbo_core.structured_response.StructuredResponseError`
+        Raises :class:`~mewbo_core.loop.structured_response.StructuredResponseError`
         when the answer fails schema validation after the bounded reask (the route
         maps it to a 422 envelope); any other exception bubbles to the route's 500.
         """

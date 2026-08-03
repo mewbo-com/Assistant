@@ -10,15 +10,21 @@ from __future__ import annotations
 import difflib
 from pathlib import Path
 
-from mewbo_core.errors import ToolInputError
+from mewbo_core.contracts.diff_stat import DIFF_RESULT_KIND, DiffStat
+from mewbo_core.contracts.errors import ToolInputError
 
 from mewbo_tools.core import resolve_safe_path
 
 
-def resolve_and_validate_path(file_path: str, root: str) -> Path:
-    """Resolve *file_path* under *root* and reject directory-traversal attempts."""
+def resolve_and_validate_path(file_path: str, root: str, *, write: bool = False) -> Path:
+    """Resolve *file_path* under *root* and reject directory-traversal attempts.
+
+    *write* must be ``True`` for a call that goes on to modify the file — it is
+    what lets an active ``read_only`` containment refuse the edit rather than
+    silently permitting it under the read rule.
+    """
     try:
-        return resolve_safe_path(file_path, root=root)
+        return resolve_safe_path(file_path, root=root, write=write)
     except ValueError as exc:
         raise ToolInputError(str(exc)) from exc
 
@@ -57,12 +63,22 @@ def format_diff_result(
     title: str,
     file_paths: list[str],
 ) -> dict[str, object]:
-    """Build the canonical diff result dict consumed by the frontend DiffCard."""
+    """Build the canonical diff result dict consumed by the frontend DiffCard.
+
+    The line counts ride ALONG with the diff rather than being left to each
+    consumer: the event log is the durable record, and a reader that re-derives
+    them later is reading a text the transcript may have truncated. Computed by
+    the one :class:`~mewbo_core.contracts.diff_stat.DiffStat` so the producer and every
+    renderer agree by construction.
+    """
+    stat = DiffStat.from_unified_diff(diff_text)
     return {
-        "kind": "diff",
+        "kind": DIFF_RESULT_KIND,
         "title": title,
         "text": diff_text,
         "files": file_paths,
+        "additions": stat.additions,
+        "deletions": stat.deletions,
     }
 
 

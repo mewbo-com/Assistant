@@ -11,7 +11,7 @@ Local validation uses :meth:`KeyStoreBase.resolve_key`, the expiry-aware
 sibling of ``verify_key`` — a token whose stored record has an ``expires_at``
 in the past is rejected here rather than being forwarded on to the REST API,
 which honors the same expiry via its own ``resolve_key`` call and would
-reject it anyway. A legacy record (no ``expires_at``) resolves identically
+reject it anyway. A record with no ``expires_at`` resolves identically
 either way, so this changes nothing for existing keys.
 """
 
@@ -21,7 +21,7 @@ import os
 
 from mcp.server.fastmcp import Context
 from mewbo_core.config import get_config_value
-from mewbo_core.key_store import KeyStoreBase, create_key_store
+from mewbo_core.secrets.key_store import KeyStoreBase, create_key_store
 
 
 class AuthError(Exception):
@@ -30,7 +30,7 @@ class AuthError(Exception):
 
 def _master_token() -> str:
     """Return the configured master token (env override wins, as in the API)."""
-    return os.environ.get("MASTER_API_TOKEN") or str(
+    return os.environ.get("MEWBO_MASTER_API_TOKEN") or str(
         get_config_value("api", "master_token", default="msk-strong-password")
     )
 

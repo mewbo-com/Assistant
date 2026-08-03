@@ -154,11 +154,11 @@ class TranscriptReducerTest {
 
     @Test
     fun `a fresh assistant-text item no longer closes the open tool group - a later tool_result still folds into it, ahead of the text`() {
-        // CHANGED: narration/assistant-text used to close the group
-        // (closeToolGroup was called from openAssistantIfNeeded); real sessions interleave
-        // tool_results with root narration WITHIN one turn (9/122 aura-android turns), so only a
-        // fresh user/user_steer turn closes the group now. The turn's one group must still end up
-        // BEFORE its assistant text (activity-precedes-narration).
+        // Narration/assistant-text does not close the open tool group - only a fresh
+        // user/user_steer turn does. Real sessions interleave tool_results with root narration
+        // WITHIN one turn, so closing on assistant-text would split a single turn's tool calls
+        // across two groups. The turn's one group must still end up BEFORE its assistant text
+        // (activity-precedes-narration).
         val items = TranscriptReducer.reduce(
             events(
                 """{"type":"tool_result","ts":"t1","payload":{"tool_id":"shell","operation":"run","success":true}}""",
@@ -794,6 +794,64 @@ class TranscriptReducerTest {
         assertEquals(2, group.calls.size) // the promoted call must never inflate the group's "Used N tools" count
     }
 
+    // --- switch_project promotion ---
+    //
+    // A project switch re-points the working directory of the whole session, so it must be legible
+    // rather than buried in a collapsed "Used N tools" fold. Both halves of the promotion have to
+    // ship together: the id in PromotedTools (which decides the ITEM exists, asserted here) and the
+    // branch in ui/'s ToolCardRegistry (which decides how it LOOKS). An id with no branch is safe -
+    // it lands on GenericToolCard - but a branch with no id renders nothing at all.
+
+    @Test
+    fun `a successful switch_project tool_result is promoted to its own top-level ToolCard`() {
+        val items = TranscriptReducer.reduce(
+            events(
+                """{"type":"tool_result","ts":"t1","payload":{"tool_id":"switch_project","operation":"set",""" +
+                    """"success":true,"tool_input":{"project":"acme/beacon"},""" +
+                    """"result":"{\"project\":\"acme/beacon\",\"name\":\"beacon\",\"cwd\":\"/srv/acme/beacon\"}"}}""",
+            ),
+        )
+        val card = items.single() as ChatItem.ToolCard
+        assertEquals("switch_project", card.call.toolId)
+        assertTrue("a promoted call must not also spawn a ToolCallGroup", items.none { it is ChatItem.ToolCallGroup })
+    }
+
+    @Test
+    fun `a REFUSED switch_project stays in the generic fold - the session never moved`() {
+        // The tool refuses an unknown key, the auto sentinel, and a repository with no checkout,
+        // returning the error envelope the loop reclassifies as a FAILED step. A confident
+        // "Project: acme/beacon" card for a switch that did not happen would state the opposite of
+        // what the session is doing. (SwitchProjectArgs refuses the envelope independently — this
+        // is the first of the two guards, the one that keeps the card from being built at all.)
+        val items = TranscriptReducer.reduce(
+            events(
+                """{"type":"tool_result","ts":"t1","payload":{"tool_id":"switch_project","operation":"set",""" +
+                    """"success":false,"error":"Project 'nope' is not known."}}""",
+            ),
+        )
+        val group = items.single() as ChatItem.ToolCallGroup
+        assertEquals(listOf("switch_project"), group.calls.map { it.toolId })
+        assertTrue(items.none { it is ChatItem.ToolCard })
+    }
+
+    @Test
+    fun `two switches in one turn render two cards, so a task spanning projects reads as one`() {
+        val items = TranscriptReducer.reduce(
+            events(
+                """{"type":"tool_result","ts":"t1","payload":{"tool_id":"switch_project","operation":"set","success":true,""" +
+                    """"result":"{\"project\":\"acme/beacon\",\"cwd\":\"/srv/acme/beacon\"}"}}""",
+                """{"type":"tool_result","ts":"t2","payload":{"tool_id":"shell","operation":"run","success":true}}""",
+                """{"type":"tool_result","ts":"t3","payload":{"tool_id":"switch_project","operation":"set","success":true,""" +
+                    """"result":"{\"project\":\"managed:9f3a\",\"cwd\":\"/srv/wt/9f3a\"}"}}""",
+                """{"type":"assistant","ts":"t4","payload":{"text":"both updated"}}""",
+            ),
+        )
+        val cards = items.filterIsInstance<ChatItem.ToolCard>()
+        assertEquals(2, cards.size)
+        val group = items.filterIsInstance<ChatItem.ToolCallGroup>().single()
+        assertEquals(1, group.calls.size) // neither switch inflates the fold's "Used N tools" count
+    }
+
     // --- widget_ready fold ---
 
     private val widgetFrame =
@@ -913,14 +971,42 @@ class TranscriptReducerTest {
     }
 
     @Test
-    fun `a declined-or-unknown outcome settles the card as a plain dismissal, never an error`() {
-        // declined/interrupted/cancelled and any unknown future value all map to Dismissed, no residue.
-        val dismissedFrame =
+    fun `a declined-timed_out-or-unknown outcome keeps the card interactive as RunMovedOn, never an error`() {
+        // timed_out/declined/interrupted/cancelled and any unknown future value all map to RunMovedOn -
+        // the run stopped waiting, not that the question was resolved - so the card stays tappable.
+        val movedOnFrame =
             """{"type":"user_question_answered","ts":"t3","payload":{"call_id":"q1","outcome":"declined"}}"""
-        val items = TranscriptReducer.reduce(events(questionFrame, dismissedFrame))
+        val items = TranscriptReducer.reduce(events(questionFrame, movedOnFrame))
         val question = items.single() as ChatItem.Question
-        val resolution = question.resolution as QuestionResolution.Dismissed
+        val resolution = question.resolution as QuestionResolution.RunMovedOn
         assertEquals("declined", resolution.outcome)
+    }
+
+    @Test
+    fun `a late answer after the run moved on upserts the same card straight to Answered`() {
+        val timedOutFrame =
+            """{"type":"user_question_answered","ts":"t3","payload":{"call_id":"q1","outcome":"timed_out"}}"""
+        val lateAnswerFrame =
+            """{"type":"user_question_answered","ts":"t4","payload":{"call_id":"q1","outcome":"answered",""" +
+                """"answered_via":"android","delivery":"message","notes":"fyi",""" +
+                """"answers":[{"selected_indexes":[1],"text":null},{"selected_indexes":null,"text":"ok"}]}}"""
+        val items = TranscriptReducer.reduce(events(questionFrame, timedOutFrame, lateAnswerFrame))
+        val question = items.single() as ChatItem.Question
+        val resolution = question.resolution as QuestionResolution.Answered
+        assertEquals("message", resolution.delivery)
+        assertEquals("fyi", resolution.notes)
+        assertEquals(listOf(1), resolution.answers[0].selectedIndexes)
+    }
+
+    @Test
+    fun `timeout_seconds and notes_placeholder ride the pending card verbatim`() {
+        val frame =
+            """{"type":"user_question","ts":"t1","payload":{"call_id":"q9","call_token":"tok9",""" +
+                """"timeout_seconds":120,"notes_placeholder":"Anything else?","questions":[""" +
+                """{"header":"Scope","question":"Which scope?","options":[]}]}}"""
+        val question = TranscriptReducer.reduce(events(frame)).single() as ChatItem.Question
+        assertEquals(120, question.timeoutSeconds)
+        assertEquals("Anything else?", question.notesPlaceholder)
     }
 
     @Test

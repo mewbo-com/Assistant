@@ -16,7 +16,7 @@ object AuraSpacing {
     object Composer {
         val height: Dp = 64.dp
 
-        /** Overlay-only floating pill height [R4 2026-07-10]: the invocation pill reads as a full
+        /** Overlay-only floating pill height [R4]: the invocation pill reads as a full
          * conversational surface, not a media strip — "large FAB-and-a-half" (56dp M3 FAB × 1.5).
          * Deliberately a SEPARATE token from the docked [height] (64dp), same two-token law as
          * [horizontalMargin]/[overlayHorizontalMargin]. */
@@ -40,7 +40,7 @@ object AuraSpacing {
          * leading glyph lines up with where the docked composer pill's rounded cap ENDS and its
          * straight top edge begins — the pill's outer [horizontalMargin] (16dp) plus the stadium
          * corner radius, which is [height]/2 (32dp) because [AuraShape.radiusPill] is a 50% stadium.
-         * User directive 2026-07-14: the row read too close to the screen edge; align its content
+         * User directive: the row read too close to the screen edge; align its content
          * with the composer's body, not the composer's outer margin. The row's RIGHT inset reuses
          * [screenGutter] so both boundaries sit well within the screen edge (never flush).
          */
@@ -54,7 +54,7 @@ object AuraSpacing {
         /** Trailing action circle (mic/send/stop). */
         val actionCircleSize: Dp = 44.dp
 
-        /** Overlay-only trailing circle/tile size [R4 2026-07-10]: the primary voice action must
+        /** Overlay-only trailing circle/tile size [R4]: the primary voice action must
          * dominate the pill's right side (reference-parity hierarchy: talk is primary). Docked
          * keeps [actionCircleSize] (44dp). Touch floor stays minimumInteractiveComponentSize. */
         val overlayActionCircleSize: Dp = 56.dp
@@ -89,7 +89,7 @@ object AuraSpacing {
         val gutter: Dp = 24.dp
 
         /**
-         * Compact scale (user directive 2026-07-04): 12dp explicit gap — supersedes the Rev F
+         * Compact scale (user directive): 12dp explicit gap — supersedes the Rev F
          * ink-distance audit (item C3) value of 0dp above, which relied on
          * [AuraType.bodyMessage]'s then-18sp intrinsic font-metric leading (bubble bottom to
          * first assistant-text glyph) to produce ~12dp of ink on its own, with no padding token
@@ -100,17 +100,17 @@ object AuraSpacing {
          * reference parity back down to 0dp; re-derive via uiautomator bounds (bubble bottom vs.
          * assistant-text top, ÷3.5 at 560dpi) before changing this further.
          *
-         * Breathability retune, user directive 2026-07-04 round 2: 12dp → 16dp — user wants more
+         * Breathability retune, user directive round 2: 12dp → 16dp — user wants more
          * air between the user bubble and the response itself ("increase the space between the
          * chat bubble and the response").
          *
-         * Breathability retune, user directive 2026-07-04 round 3: 16dp → 32dp (doubled) — user
+         * Breathability retune, user directive round 3: 16dp → 32dp (doubled) — user
          * wants 2× the space between a user query and its corresponding assistant response.
          */
         val topGapAfterBubble: Dp = 32.dp
 
         /**
-         * Breathability retune, user directive 2026-07-04 round 2: 12dp → 14dp — intra-turn rhythm
+         * Breathability retune, user directive round 2: 12dp → 14dp — intra-turn rhythm
          * breathes with the wider bubble→reply gap; also drives `MarkdownMessage` inter-block
          * spacing (see [Markdown] KDoc, which reuses this token for plain block gaps).
          */
@@ -118,7 +118,7 @@ object AuraSpacing {
     }
 
     /**
-     * Intra-message block rhythm for `MarkdownMessage` — reference-app parity capture, 2026-07-03, GMS
+     * Intra-message block rhythm for `MarkdownMessage` — reference-app parity capture, GMS
      * redroid @560dpi: ink gap above a heading 165–181px, below 67–102px ("headings cling to what
      * follows", ~2:1), between plain blocks ~80px. Converting ink targets to Spacer values means
      * subtracting the adjacent lines' own box-beyond-ink leading (~33px combined for
@@ -134,18 +134,18 @@ object AuraSpacing {
     }
 
     /**
-     * Turn-boundary rhythm (compact design language, user directive 2026-07-04): every turn
+     * Turn-boundary rhythm (compact design language, user directive): every turn
      * (a user message and everything the assistant produces for it) is separated from the
      * previous one by a hairline divider (AuraColors.outlineHairline, drawn by ChatTranscript)
      * padded by these gaps — separation between turns is BORDER + space, no longer whitespace
      * alone. Intent-named, not measurement-named.
      *
-     * Breathability retune, user directive 2026-07-04 round 2: gapAbove/gapBelow 16dp → 24dp each,
+     * Breathability retune, user directive round 2: gapAbove/gapBelow 16dp → 24dp each,
      * so the divider now sits in a 48dp+hairline band (24 + hairline + 24) — the user wants an
      * "ample, breathable amount of space between each and every turn" and "amplified space after
      * the footer" before the next turn begins.
      *
-     * Breathability retune, user directive 2026-07-04 round 3: gapAbove/gapBelow 24dp → 48dp each
+     * Breathability retune, user directive round 3: gapAbove/gapBelow 24dp → 48dp each
      * (doubled) — user wants double the inter-turn space ("double the space than what we have
      * right now to make them more breathable"); the divider now sits in a 96dp+hairline band
      * (48 + hairline + 48).
@@ -167,7 +167,7 @@ object AuraSpacing {
      */
     object ActionRow {
         /**
-         * Compact scale (user directive 2026-07-04): 20dp glyph — supersedes the Rev F
+         * Compact scale (user directive): 20dp glyph — supersedes the Rev F
          * "unchanged" value of 24dp; only the glyph shrinks, [cellSize] (48dp) stays fixed as the
          * a11y touch-target floor. Do not chase reference parity back up.
          */
@@ -175,7 +175,7 @@ object AuraSpacing {
         val cellSize: Dp = 48.dp
 
         /**
-         * Breathability retune, user directive 2026-07-04 round 2 ("a bit more space between when
+         * Breathability retune, user directive round 2 ("a bit more space between when
          * the response ends and when the footer icons appear"): 8dp explicit margin — supersedes
          * round 1's 4dp, which itself superseded the Rev F ink-math 0dp (that relied on a
          * [cellSize] touch cell's own (48-24)/2 = 12dp inset around a then-24dp glyph). Glyphs are
@@ -208,7 +208,7 @@ object AuraSpacing {
         val sectionHeaderTopPad: Dp = 28.dp
 
         /**
-         * Recents (session-history) row height (user directive 2026-07-03, compact recents rail):
+         * Recents (session-history) row height (user directive, compact recents rail):
          * 44dp — deliberately DENSER than the 56dp action rows above so the history list scans
          * quickly ("not as spacious as it is right now"). The DESIGN.md §1.2 "never cramped" law
          * governs conversational TURN separation in the chat surface; the rail is a navigation
@@ -219,12 +219,12 @@ object AuraSpacing {
 
         /** Top gap above a date sub-divider ("Today" / "Previous 7 days" / "Older") within the
          * Recents section — subordinate to [sectionHeaderTopPad] above the "Recents" header itself,
-         * so the two-tier hierarchy reads as header ▸ date group ▸ rows (user directive 2026-07-03). */
+         * so the two-tier hierarchy reads as header ▸ date group ▸ rows (user directive). */
         val dateGroupTopPad: Dp = 12.dp
 
         /** Running-session liveness dot on a recents row — tokenized here (was an 8dp literal in
          * `AuraDrawerContent`, flagged in DESIGN.md as a missing token). Rendered TRAILING so every
-         * title stays flush at the [screenGutter] left edge (the pre-2026-07-03 leading icon slot
+         * title stays flush at the [screenGutter] left edge (the prior leading icon slot
          * indented titles ~36dp past the "Recents" header — the indentation the directive removed). */
         val runningDotSize: Dp = 8.dp
 
@@ -233,7 +233,7 @@ object AuraSpacing {
     }
 
     /**
-     * Drawer-sheet (side rail) elevation — side-rail visual-polish task, 2026-07-14. Byte-verified
+     * Drawer-sheet (side rail) elevation — side-rail visual-polish task. Byte-verified
      * against material3 1.4.0's `NavigationDrawer.kt`: `ModalDrawerSheet`'s `drawerTonalElevation`
      * flows into an inner `Surface(... tonalElevation = ...)` call that never sets `shadowElevation`
      * — so a stock `ModalDrawerSheet` casts NO drop shadow by default, only a tonal color blend
@@ -281,7 +281,7 @@ object AuraSpacing {
          * that token's KDoc), so this gap must be fully explicit rather than leaning on leading.
          *
          * Doubled to 32dp in lockstep with [AssistantText.topGapAfterBubble] (user directive
-         * 2026-07-04 round 3, 2× bubble→response air): a turn whose response opens with a tool
+         * round 3, 2× bubble→response air): a turn whose response opens with a tool
          * group gets the same doubled user-query→response gap as a plain-text turn, so the
          * "space after my message" reads consistently regardless of whether tools ran. */
         val topGapAfterBubble: Dp = 32.dp
@@ -298,7 +298,7 @@ object AuraSpacing {
      * member of the chip family: those are 36dp glance rows, this is a payload surface, so it
      * carries its own geometry.
      *
-     * Reference-measured on a GMS device, 2026-07-12 (560dpi, dp = px/3.5). The outer gutter (24dp)
+     * Reference-measured on a GMS device (560dpi, dp = px/3.5). The outer gutter (24dp)
      * and the horizontal inner padding (16dp) already had tokens - [AssistantText.gutter] and
      * [Composer.internalPadding] - and are reused verbatim; only the four values below were
      * genuinely uncovered.
@@ -352,7 +352,7 @@ object AuraSpacing {
 
     /**
      * Post-send attachment indicator row (metadata-only tiles, no thumbnails) rendered above a
-     * [com.mewbo.aura.data.model.ChatItem.UserBubble] - reference-app-measured task brief (2026-07-03):
+     * [com.mewbo.aura.data.model.ChatItem.UserBubble] - reference-app-measured task brief:
      * ~88dp square, ~20dp radius, ~12dp gap to the bubble beneath. [size] deliberately reuses
      * [AuraShape.radiusCard]'s existing 20dp radius rather than adding a fourth shape token - this
      * is the same solid rounded-square CARD family as the assist overlay's response card.

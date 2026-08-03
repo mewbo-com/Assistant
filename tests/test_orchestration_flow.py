@@ -20,13 +20,13 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
-from mewbo_core.context import ContextSnapshot
-from mewbo_core.orchestrator import Orchestrator
-from mewbo_core.planning import Planner, PromptBuilder
-from mewbo_core.session_store import SessionStore
-from mewbo_core.token_budget import TokenBudget
-from mewbo_core.tool_registry import ToolRegistry, ToolSpec
-from mewbo_core.tool_use_loop import ToolUseLoop
+from mewbo_core.loop.orchestrator import Orchestrator
+from mewbo_core.loop.planning import Planner, PromptBuilder
+from mewbo_core.loop.tool_use_loop import ToolUseLoop
+from mewbo_core.session.context import ContextSnapshot
+from mewbo_core.session.session_store import SessionStore
+from mewbo_core.session.token_budget import TokenBudget
+from mewbo_core.tooling.tool_registry import ToolRegistry, ToolSpec
 
 # ---------------------------------------------------------------------------
 # Helpers shared across all test classes
@@ -304,9 +304,9 @@ class TestPlannerGenerate:
         plan_result = Plan(steps=[])
 
         with (
-            patch("mewbo_core.planning.build_chat_model") as mock_build,
-            patch("mewbo_core.planning.build_langfuse_handler", return_value=None),
-            patch("mewbo_core.planning.langfuse_trace_span") as mock_span,
+            patch("mewbo_core.loop.planning.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.planning.build_langfuse_handler", return_value=None),
+            patch("mewbo_core.loop.planning.langfuse_trace_span") as mock_span,
         ):
             mock_model = MagicMock()
             mock_parser = MagicMock()
@@ -322,12 +322,12 @@ class TestPlannerGenerate:
             span_ctx.__exit__ = MagicMock(return_value=False)
             mock_span.return_value = span_ctx
 
-            with patch("mewbo_core.planning.PydanticOutputParser") as mock_p_cls:
+            with patch("mewbo_core.loop.planning.PydanticOutputParser") as mock_p_cls:
                 mock_p_cls.return_value = mock_parser
                 mock_parser.get_format_instructions.return_value = ""
                 mock_parser.__or__ = MagicMock(return_value=mock_chain)
 
-                with patch("mewbo_core.planning.ChatPromptTemplate") as mock_pt:
+                with patch("mewbo_core.loop.planning.ChatPromptTemplate") as mock_pt:
                     prompt_inst = MagicMock()
                     prompt_inst.__or__ = MagicMock(return_value=mock_chain)
                     mock_pt.return_value = prompt_inst
@@ -350,9 +350,9 @@ class TestPlannerGenerate:
         captured_prompts = []
 
         with (
-            patch("mewbo_core.planning.build_chat_model") as mock_build,
-            patch("mewbo_core.planning.build_langfuse_handler", return_value=None),
-            patch("mewbo_core.planning.langfuse_trace_span") as mock_span,
+            patch("mewbo_core.loop.planning.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.planning.build_langfuse_handler", return_value=None),
+            patch("mewbo_core.loop.planning.langfuse_trace_span") as mock_span,
         ):
             mock_model = MagicMock()
             mock_chain = MagicMock()
@@ -364,12 +364,12 @@ class TestPlannerGenerate:
             span_ctx.__exit__ = MagicMock(return_value=False)
             mock_span.return_value = span_ctx
 
-            with patch("mewbo_core.planning.PydanticOutputParser") as mock_p_cls:
+            with patch("mewbo_core.loop.planning.PydanticOutputParser") as mock_p_cls:
                 mock_parser = MagicMock()
                 mock_p_cls.return_value = mock_parser
                 mock_parser.get_format_instructions.return_value = ""
 
-                with patch("mewbo_core.planning.ChatPromptTemplate") as mock_pt:
+                with patch("mewbo_core.loop.planning.ChatPromptTemplate") as mock_pt:
 
                     def capture_prompt(*args, **kwargs):
                         captured_prompts.append(kwargs)
@@ -574,7 +574,7 @@ class TestSessionCapabilities:
                 lambda adv: ("scg",) if "scg" not in adv else ()
             )
             with patch(
-                "mewbo_core.orchestrator.langfuse_session_context",
+                "mewbo_core.loop.orchestrator.langfuse_session_context",
                 side_effect=_capture,
             ), patch.object(orch, "_session_store", store):
                 with pytest.raises(_StopRun):
@@ -593,7 +593,7 @@ class TestSessionCapabilities:
     # -----------------------------------------------------------------
 
     def _register_gated_tool(self, orch, *, tool_id: str, capability: str) -> None:
-        from mewbo_core.session_tools import DEFAULT_SESSION_TOOL_MODES, SessionToolFactory
+        from mewbo_core.tooling.session_tools import DEFAULT_SESSION_TOOL_MODES, SessionToolFactory
 
         class _GatedStub:
             """A minimal real ``SessionTool`` — the symmetry test now BUILDS it.
@@ -629,11 +629,11 @@ class TestSessionCapabilities:
     def test_allowed_tools_derives_capability_for_a_gated_product_tool(self, tmp_path):
         """Naming a product tool in ``allowed_tools`` grants its capability.
 
-        This is the fix: previously only the client-advertised header (or
-        a runtime provider) could grant a capability, so surface (a) — the
-        AgentDef/skill catalog — stayed blind to a tool selected purely via
-        ``context.mcp_tools``. Now the SAME allowlist that already reaches
-        ``SessionToolRegistry.build_for`` also derives the capability.
+        If only the client-advertised header (or a runtime provider) could
+        grant a capability, surface (a) — the AgentDef/skill catalog — stays
+        blind to a tool selected purely via ``context.mcp_tools``. The SAME
+        allowlist that reaches ``SessionToolRegistry.build_for`` derives the
+        capability too.
         """
         orch, store = _make_orchestrator(tmp_path)
         session_id = store.create_session()
@@ -798,7 +798,7 @@ class TestTrySkillInvocation:
         mock_skill = MagicMock()
         orch._skill_registry.get = MagicMock(return_value=mock_skill)
 
-        with patch("mewbo_core.orchestrator.activate_skill") as mock_activate:
+        with patch("mewbo_core.loop.orchestrator.activate_skill") as mock_activate:
             mock_activate.return_value = ("skill instructions", ["spec_a"])
             si, ts = orch._try_skill_invocation("/my-skill some args", ["spec_a"], ())
 
@@ -974,8 +974,10 @@ class TestPlanModeIntegration:
         session_id = store.create_session()
 
         with patch.object(ToolUseLoop, "run", _simple_loop_run):
-            with patch("mewbo_core.orchestrator.ensure_plan_dir") as mock_epd:
-                with patch("mewbo_core.orchestrator.plan_file_for", return_value="/tmp/plan.md"):
+            with patch("mewbo_core.loop.orchestrator.ensure_plan_dir") as mock_epd:
+                with patch(
+                    "mewbo_core.loop.orchestrator.plan_file_for", return_value="/tmp/plan.md"
+                ):
                     tq, state = orch.run(
                         user_query="plan this",
                         session_id=session_id,
@@ -1010,7 +1012,7 @@ class TestAutoCompactIntegration:
         session_id = store.create_session()
         store.append_event(session_id, {"type": "user", "payload": {"text": "hi"}})
 
-        with patch("mewbo_core.orchestrator.get_token_budget") as mock_budget:
+        with patch("mewbo_core.loop.orchestrator.get_token_budget") as mock_budget:
             budget = MagicMock()
             budget.needs_compact = False
             mock_budget.return_value = budget
@@ -1024,13 +1026,13 @@ class TestAutoCompactIntegration:
         session_id = store.create_session()
         store.append_event(session_id, {"type": "user", "payload": {"text": "hi"}})
 
-        with patch("mewbo_core.orchestrator.get_token_budget") as mock_budget:
+        with patch("mewbo_core.loop.orchestrator.get_token_budget") as mock_budget:
             budget = MagicMock()
             budget.needs_compact = True
             budget.total_tokens = 10000
             mock_budget.return_value = budget
 
-            with patch("mewbo_core.compact.compact_conversation") as mock_compact:
+            with patch("mewbo_core.session.compact.compact_conversation") as mock_compact:
                 compact_result = MagicMock()
                 compact_result.model = "test-model"
                 compact_result.summary = "Compacted summary"
@@ -1041,7 +1043,7 @@ class TestAutoCompactIntegration:
 
                 mock_compact.side_effect = fake_compact
 
-                with patch("mewbo_core.compact.record_compaction"):
+                with patch("mewbo_core.session.compact.record_compaction"):
                     result = orch._maybe_auto_compact(session_id)
 
         assert result == "Compacted summary"
@@ -1052,7 +1054,7 @@ class TestAutoCompactIntegration:
         session_id = store.create_session()
         store.append_event(session_id, {"type": "user", "payload": {"text": "hi"}})
 
-        with patch("mewbo_core.orchestrator.get_token_budget") as mock_budget:
+        with patch("mewbo_core.loop.orchestrator.get_token_budget") as mock_budget:
             budget = MagicMock()
             budget.needs_compact = True
             budget.total_tokens = 10000
@@ -1061,7 +1063,7 @@ class TestAutoCompactIntegration:
             async def raiser(*args, **kwargs):
                 raise RuntimeError("compaction failed")
 
-            with patch("mewbo_core.compact.compact_conversation", raiser):
+            with patch("mewbo_core.session.compact.compact_conversation", raiser):
                 result = orch._maybe_auto_compact(session_id)
 
         assert result is None
@@ -1255,7 +1257,7 @@ class TestUserEventAttachments:
 class TestRegistryCleanup:
     def test_registry_cleanup_runs_after_loop(self, tmp_path):
         """Lines 401-402: registry.cleanup() called even on success."""
-        from mewbo_core.hypervisor import AgentHypervisor
+        from mewbo_core.agents.hypervisor import AgentHypervisor
 
         orch, store = _make_orchestrator(tmp_path)
         session_id = store.create_session()

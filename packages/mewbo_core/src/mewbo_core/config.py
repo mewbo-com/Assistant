@@ -4,15 +4,19 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import errno
 import json
 import logging
 import os
+import re
+import tempfile
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -27,9 +31,17 @@ from pydantic import (
     model_validator,
 )
 
-# Single source of truth for the retry/fallback defaults (defined where the
-# behaviour lives); the RetryConfig fields below reference these.
-from mewbo_core.llm_resilience import (
+# Single source of truth for the retry/fallback and verifier-gate defaults; the
+# RetryConfig/AgentConfig fields below reference these rather than redeclaring a
+# literal that would drift from the behaviour.
+#
+# They live in ``contracts.defaults`` — a module that imports nothing — and NOT
+# in ``llm_resilience``/``verification`` where the behaviour lives, because this
+# module is imported by nearly all of core: reaching UP into a behaviour module
+# from here pins that module (and everything it imports) beneath config in the
+# import graph. ``llm_resilience`` and ``verification`` re-import these, so
+# reading a retry default from the retry module still works everywhere else.
+from mewbo_core.contracts.defaults import (
     DEFAULT_BACKOFF_BASE,
     DEFAULT_BACKOFF_CAP,
     DEFAULT_BUDGET_CAPACITY,
@@ -37,20 +49,20 @@ from mewbo_core.llm_resilience import (
     DEFAULT_CB_THRESHOLD,
     DEFAULT_DOOM_LOOP_THRESHOLD,
     DEFAULT_FALLBACK_RETRIES,
+    DEFAULT_FIRST_TOKEN_TIMEOUT,
+    DEFAULT_LLM_CALL_LIVENESS_S,
     DEFAULT_PRIMARY_RETRIES,
+    DEFAULT_RATE_LIMIT_BUDGET_CAPACITY,
+    DEFAULT_REQUEST_TIMEOUT,
     DEFAULT_RETRY_AFTER_CAP,
+    DEFAULT_STREAM_IDLE_TIMEOUT,
     DEFAULT_TIMEOUT,
     DEFAULT_TURN_DEADLINE,
+    DEFAULT_VERIFICATION_TIMEOUT,
     DEFAULT_WRITE_PROGRESS_EVENT_INTERVAL,
     DEFAULT_WRITE_PROGRESS_MAX_EVENTS,
     DEFAULT_WRITE_PROGRESS_THRESHOLD,
 )
-
-# Imported here (not redefined) so the verifier-gate default lives in ONE place
-# — ``verification.py`` owns it, config references it, same pattern as the
-# write-progress constants above. ``verification.py`` deliberately imports
-# nothing from core at module top, so this import cannot cycle.
-from mewbo_core.verification import DEFAULT_VERIFICATION_TIMEOUT
 
 _APP_CONFIG_PATH_OVERRIDE: Path | None = None
 _MCP_CONFIG_PATH_OVERRIDE: Path | None = None
@@ -72,17 +84,49 @@ def resolve_mewbo_home() -> Path:
     return Path.home() / ".mewbo"
 
 
+#: Names the config directory outright, ahead of the CWD walk below. It is an
+#: ENVIRONMENT variable rather than only the in-process override because a
+#: child process inherits it: ``set_app_config_path`` can redirect this
+#: process, but anything it spawns re-runs the walk from its own CWD and finds
+#: whatever config is sitting there.
+_CONFIG_DIR_ENV = "MEWBO_CONFIG_DIR"
+
+
 def _resolve_config_path(filename: str) -> Path:
     """Find a config file by walking up from CWD, then ``MEWBO_HOME``.
 
-    The first ``configs/<filename>`` found while ascending from the current
-    directory wins, so running ``mewbo`` from a subdirectory (or a parent
-    that contains the project) still loads the project's config instead of
-    silently falling back to built-in defaults. The ascent stops at the git
+    ``MEWBO_CONFIG_DIR`` wins outright when set — it is how a caller pins the
+    config directory for itself AND for every process it spawns. The walk below
+    cannot do that: it reads the spawning process's CWD, so a subprocess
+    launched from a directory containing a ``configs/`` picks that up no matter
+    what its parent had selected.
+
+    Otherwise the first ``configs/<filename>`` found while ascending from the
+    current directory wins, so running ``mewbo`` from a subdirectory (or a
+    parent that contains the project) still loads the project's config instead
+    of silently falling back to built-in defaults. The ascent stops at the git
     root (or the filesystem root), mirroring project-instruction discovery
     (``common._find_git_root``). When nothing is found, fall back to
     ``MEWBO_HOME`` exactly as before.
     """
+    pinned = os.environ.get(_CONFIG_DIR_ENV)
+    if pinned:
+        directory = Path(pinned).expanduser()
+        if not directory.is_dir():
+            # Refuse rather than fall back. A missing FILE inside a real
+            # directory is ordinary — a fresh install scaffolds one — but a
+            # directory that is not there means the pin itself is wrong, and
+            # the silent alternative is the worst outcome available: unknown
+            # paths load as ``{}``, so the process would come up healthy on
+            # built-in defaults, reaching no gateway and holding no operator
+            # setting, with nothing anywhere saying why.
+            raise ValueError(
+                f"{_CONFIG_DIR_ENV} points at '{directory}', which is not a "
+                "directory. Point it at the directory holding app.json, or "
+                "unset it to search upward from the working directory."
+            )
+        return directory / filename
+
     # Lazy import: common imports config at module load, so importing it at
     # module top would be a cycle (matches the codebase's in-function imports).
     from mewbo_core.common import _find_git_root
@@ -143,6 +187,64 @@ def _coerce_list(value: Any) -> list[str]:
     return []
 
 
+class EnvOverridable(BaseModel):
+    """Base for a section whose fields may be OVERRIDDEN from the environment.
+
+    A field declares the variable that overrides it next to the field itself,
+    and this base applies every such declaration in one place::
+
+        driver: str = Field(
+            "json",
+            json_schema_extra={"x-env-var": "MEWBO_STORAGE_DRIVER"},
+        )
+
+    Adding an override is therefore a declaration, not another hand-written
+    validator that reads ``os.environ``. A hand-written one is invisible to
+    ``configs/app.schema.json`` and so to the console and the docs; a
+    declaration reaches both, because ``x-env-var`` is emitted on the field's
+    schema node like every other ``x-`` annotation.
+
+    This is the OPPOSITE direction to :class:`EnvRef`, and the two are not
+    interchangeable:
+
+    * an :class:`EnvRef` is written BY the operator in ``app.json`` as the value
+      ``${VARIABLE}``, names a variable the file has chosen to defer to, and is
+      an error at load when that variable is unset;
+    * an override is declared BY this module on a field the operator may have
+      set to a perfectly good literal, and takes precedence over it. An unset —
+      or empty — variable is simply "not overridden", never an error, because
+      the file value is still the answer.
+
+    The override is applied to the raw payload, so the field's own validators
+    still run over it: a bad ``MEWBO_STORAGE_DRIVER`` is rejected exactly as a
+    bad ``driver`` in the file is.
+
+    Cost: ``O(1)`` — one pass over a section's declared fields, at validation.
+    """
+
+    #: Schema key a field uses to declare its override. See the annotation
+    #: contract block above ``AppConfig``.
+    ENV_VAR_KEY: ClassVar[str] = "x-env-var"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _apply_env_overrides(cls, payload: Any) -> Any:
+        if not isinstance(payload, dict):
+            return payload
+        overridden = dict(payload)
+        for name, field_info in cls.model_fields.items():
+            extra = field_info.json_schema_extra
+            variable = extra.get(cls.ENV_VAR_KEY) if isinstance(extra, dict) else None
+            if not isinstance(variable, str):
+                continue
+            # Empty reads as absent on purpose: an exported-but-blank variable is
+            # how a shell says nothing, not how an operator blanks a setting.
+            value = os.environ.get(variable)
+            if value:
+                overridden[name] = value
+        return overridden if overridden != payload else payload
+
+
 class RuntimeConfig(BaseModel):
     """Runtime environment settings."""
 
@@ -174,10 +276,11 @@ class RuntimeConfig(BaseModel):
     log_style: str = Field(
         "",
         description=(
-            "Legacy override for the CLI's terminal log format. Only the literal "
-            "value 'dark' has any effect (dims the log line style for a dark "
-            "background); anything else uses the plain format. Takes priority "
-            "over cli_log_style when set; leave empty to use that instead."
+            "Override for the CLI's terminal log format; prefer cli_log_style. "
+            "Only the literal value 'dark' has any effect (dims the log line "
+            "style for a dark background); anything else uses the plain format. "
+            "Takes priority over cli_log_style when set; leave empty to use "
+            "that instead."
         ),
         examples=[""],
     )
@@ -199,7 +302,7 @@ class RuntimeConfig(BaseModel):
         False,
         description=(
             "Enable developer mode. Unlocks graph-only (no-LLM) repository "
-            "onboarding so contributors can inspect AST graph construction "
+            "indexing so contributors can inspect AST graph construction "
             "without documentation generation. Read by the API, console, and CLI."
         ),
     )
@@ -395,9 +498,9 @@ class LLMConfig(BaseModel):
     fallback_models: list[str] = Field(
         default_factory=list,
         description=(
-            "Legacy ordered list of fallback model IDs. Prefer 'fallback' "
-            "(typed, explicit opt-in). A non-empty value here is still honored "
-            "for backward compatibility (treated as fallback enabled)."
+            "Flat ordered list of fallback model IDs. Prefer 'fallback' "
+            "(typed, explicit opt-in). A non-empty value here is still honored, "
+            "and is treated as fallback enabled."
         ),
         examples=[["gpt-5.4", "gemini-2.5-pro"]],
     )
@@ -415,6 +518,18 @@ class LLMConfig(BaseModel):
             "Only relevant when api_base is configured."
         ),
         examples=["openai", "azure", "vertex_ai"],
+        json_schema_extra={"x-advanced": True},
+    )
+    request_timeout: float = Field(
+        DEFAULT_REQUEST_TIMEOUT,
+        description=(
+            "Seconds handed to the LiteLLM client as its HTTP timeout. Because the "
+            "loop STREAMS, this behaves as the maximum gap BETWEEN response chunks, "
+            "not as a ceiling on total call duration — a long generation that keeps "
+            "emitting chunks never trips it. The total-duration ceiling is "
+            "agent.llm_call_timeout. Raise this only when a provider is slow to send "
+            "its FIRST chunk."
+        ),
         json_schema_extra={"x-advanced": True},
     )
     reasoning_effort: str = Field(
@@ -570,6 +685,18 @@ class LLMConfig(BaseModel):
             )
         return ConfigCheck(name="llm", enabled=True, ok=True, metadata={"available_models": models})
 
+    def effective_fallback_models(self) -> list[str]:
+        """Resolve the active fallback ladder from this instance.
+
+        The precedence rule lives HERE, on the data that owns it, so the
+        module-level accessor (which reads the process-wide config) and any
+        validator holding a not-yet-installed ``AppConfig`` cannot disagree
+        about how long the ladder is.
+        """
+        if self.fallback.enabled:
+            return list(self.fallback.models) or list(self.fallback_models)
+        return list(self.fallback_models)
+
 
 class ContextConfig(BaseModel):
     """Context window selection and event filtering."""
@@ -658,7 +785,12 @@ class TokenBudgetConfig(BaseModel):
             "Override only: per-model context window in tokens. Keys are model "
             "names (with or without provider prefix). The authoritative source "
             "is LiteLLM's model catalogue; populate this only to cap below the "
-            "model's real max, or for models LiteLLM doesn't know yet."
+            "model's real max, or for models LiteLLM doesn't know yet — which "
+            "includes every model renamed by a proxy, since the catalogue is "
+            "keyed on the real name. A model the catalogue cannot resolve falls "
+            "back to default_context_window and logs a one-time warning naming "
+            "it; that number then drives compaction and every utilisation "
+            "reading, so an unlisted model silently budgets against a guess."
         ),
     )
 
@@ -726,31 +858,6 @@ class CompactionConfig(BaseModel):
     @classmethod
     def _normalize_caveman_mode(cls, value: Any) -> bool:
         return _coerce_bool(value, default=False)
-
-
-class ReflectionConfig(BaseModel):
-    """Post-execution reflection pass settings."""
-
-    model_config = ConfigDict(
-        validate_default=True,
-        json_schema_extra={"title": "Reflection", "x-group": "models", "x-order": 5},
-    )
-
-    enabled: bool = Field(
-        True, description="Enable a reflection LLM pass after tool execution to verify results."
-    )
-    model: str = Field(
-        "",
-        description=(
-            "Model ID for the reflection pass. Falls back to llm.default_model when empty."
-        ),
-        examples=["anthropic/claude-sonnet-4-6"],
-    )
-
-    @field_validator("enabled", mode="before")
-    @classmethod
-    def _normalize_enabled(cls, value: Any) -> bool:
-        return _coerce_bool(value, default=True)
 
 
 class LangfuseConfig(BaseModel):
@@ -894,6 +1001,33 @@ class PermissionsConfig(BaseModel):
         return "ask"
 
 
+class SafetyConfig(BaseModel):
+    """Master switch for the operator-owned tool-call gate and session observer.
+
+    OFF by default. While off, ``.mewbo/policy/`` and ``.mewbo/monitor/`` are
+    never read, no rule is built and no event is emitted — a deployment that
+    never sets this section pays nothing. There is deliberately no per-project
+    override and no other knob here: discovery path, rule precedence and the
+    built-in self-protection rule are fixed by the plane itself, not
+    config-tunable, because a knob that could redirect discovery or reorder
+    rules would be a knob that could weaken the guardrail it configures.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"title": "Safety Plane", "x-group": "agent", "x-order": 3},
+    )
+
+    enabled: bool = Field(
+        False,
+        description=(
+            "Master switch for the policy gate and session-budget observer "
+            "read from .mewbo/policy/ and .mewbo/monitor/. OFF by default: no "
+            "evaluation, no tokens, no latency until an operator turns this on."
+        ),
+    )
+
+
 class CliRemoteConfig(BaseModel):
     """Opt-in remote endpoint for the terminal CLI; CLI-scoped ONLY.
 
@@ -954,58 +1088,10 @@ class CLIConfig(BaseModel):
         default_factory=lambda: CliRemoteConfig.model_validate({}),
         description="Opt-in remote session sync + product tools (CLI-only).",
     )
-    approval_style: str = Field(
-        "inline",
-        description=(
-            "Tool-approval UI style: 'inline' (plain prompt), "
-            "'textual' (TUI dialog), or 'aider' (diff-style)."
-        ),
-        examples=["aider"],
-    )
-
     @field_validator("disable_textual", mode="before")
     @classmethod
     def _normalize_disable_textual(cls, value: Any) -> bool:
         return _coerce_bool(value, default=False)
-
-    @field_validator("approval_style", mode="before")
-    @classmethod
-    def _normalize_approval_style(cls, value: Any) -> str:
-        if value is None:
-            return "inline"
-        normalized = str(value).strip().lower()
-        if normalized in {"inline", "textual", "aider"}:
-            return normalized
-        return "inline"
-
-
-class ChatConfig(BaseModel):
-    """Legacy config section kept for backward compatibility with app.json files."""
-
-    model_config = ConfigDict(
-        validate_default=True,
-        json_schema_extra={"title": "Chat", "x-group": "interface", "x-order": 2},
-    )
-
-    port: int = Field(
-        8501,
-        description="TCP port for the legacy chat interface.",
-        examples=[8501],
-    )
-    address: str = Field(
-        "127.0.0.1",
-        description="Bind address for the legacy chat interface.",
-        examples=["127.0.0.1"],
-    )
-
-    @field_validator("port", mode="before")
-    @classmethod
-    def _normalize_port(cls, value: Any) -> int:
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError):
-            return 8501
-        return max(parsed, 1)
 
 
 class APIAuthSessionConfig(BaseModel):
@@ -1218,10 +1304,18 @@ class APIConfig(BaseModel):
     master_token: str = Field(
         "msk-strong-password",
         description=(
-            "Bearer token required for all REST API requests. "
-            "Change from the default before deploying."
+            "Bearer token required for all REST API requests. Change from the "
+            "default before deploying. "
+            "The `MEWBO_MASTER_API_TOKEN` environment variable OVERRIDES whatever "
+            "is set here: when it is present, the API and the MCP server both "
+            "use it and this value is never consulted — which is the case in "
+            "every containerised deployment. To keep the token out of this file "
+            "and say so plainly, set this to `${MEWBO_MASTER_API_TOKEN}`. Any "
+            "value may name an environment variable that way, and a name that is "
+            "not set in the environment is refused at startup rather than read "
+            "as empty."
         ),
-        examples=["msk-strong-password"],
+        examples=["${MEWBO_MASTER_API_TOKEN}"],
         json_schema_extra={"x-protected": True},
     )
     allow_external_cwd: bool = Field(
@@ -1231,6 +1325,20 @@ class APIConfig(BaseModel):
             "`cwd` field on POST /api/sessions and POST /api/sessions/{id}/query. "
             "Off by default; enable only for trusted external workspace managers "
             "that manage their own worktrees."
+        ),
+    )
+    max_concurrent_streams: int = Field(
+        6,
+        ge=0,
+        description=(
+            "How many Server-Sent Events streams the server keeps open at once. "
+            "A stream holds one of the server's request threads for as long as "
+            "it stays open rather than for the work it does, so without a bound "
+            "enough of them starve every other endpoint and the server stops "
+            "answering at all. Past this many, a new stream is refused with a "
+            "retryable 503 and the rest of the API keeps serving. Keep it below "
+            "the worker's thread count so ordinary requests always have "
+            "headroom; 0 removes the bound."
         ),
     )
     apps_token_secret: str = Field(
@@ -1443,15 +1551,15 @@ class PluginsConfig(BaseModel):
 
         # 3. Ensure every configured catalog is cloned (skip ones already present).
         if sync and self.marketplaces:
-            from mewbo_core.plugins import marketplace_dir_name, sync_marketplaces
+            from mewbo_core.tooling.plugins import marketplace_dir_name, sync_marketplaces
 
             existing_names = {d.name for d in dirs}
             missing = []
             for entry in self.marketplaces:
                 canonical = marketplace_dir_name(entry, default_host=self.marketplace_default_host)
-                # Legacy pre-host-agnostic leaf name (and Claude Code's own
-                # leaf-named cache) — reuse those clones instead of re-cloning
-                # the same catalog under the new canonical name.
+                # A clone directory named by the bare repo leaf (Claude Code's
+                # own cache layout) holds the same catalog — reuse it instead of
+                # re-cloning under the canonical name.
                 legacy_leaf = entry.rstrip("/").split("/")[-1]
                 if canonical not in existing_names and legacy_leaf not in existing_names:
                     missing.append(entry)
@@ -1643,6 +1751,20 @@ class ProjectConfig(BaseModel):
             "Purely informational, with no effect on behavior."
         ),
     )
+    allowed_paths: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Additional directories a session may reach while this project is "
+            "its active one, on top of the project's own path — a sibling "
+            "checkout or a shared data directory, say. Both halves of the "
+            "boundary honour it: the entry is subtracted from "
+            "agent.shell_sandbox's deny set for shell subprocesses, and added "
+            "to the roots agent.path_scope_to_active_project allows a path "
+            "argument to resolve under, so it re-permits a directory that "
+            "would otherwise be out of scope as belonging to another project. "
+            "Absolute or ~-relative; a path that does not exist is ignored."
+        ),
+    )
 
     @field_validator("path", mode="before")
     @classmethod
@@ -1652,15 +1774,31 @@ class ProjectConfig(BaseModel):
             return str(Path(raw).expanduser().resolve())
         return ""
 
+    @field_validator("allowed_paths", mode="before")
+    @classmethod
+    def _normalize_allowed_paths(cls, value: Any) -> list[str]:
+        raw_list = value if isinstance(value, list) else [value] if value else []
+        normalized: list[str] = []
+        for raw in raw_list:
+            text = str(raw).strip() if raw else ""
+            if text:
+                normalized.append(str(Path(text).expanduser().resolve()))
+        return normalized
+
 
 def _projects_config_default() -> dict[str, ProjectConfig]:
     return {}
 
 
-class WebIdeConfig(BaseModel):
+class WebIdeConfig(EnvOverridable):
     """Config for the per-session code-server "Open in Web IDE" feature."""
 
-    model_config = ConfigDict(extra="forbid", json_schema_extra={"title": "Web IDE"})
+    # ``validate_default=True`` so ``broker_url``'s normalizer still runs when
+    # the key is absent from app.json; without it the validator only runs for a
+    # key that is already present.
+    model_config = ConfigDict(
+        extra="forbid", validate_default=True, json_schema_extra={"title": "Web IDE"}
+    )
 
     enabled: bool = Field(
         default=False,
@@ -1748,6 +1886,27 @@ class WebIdeConfig(BaseModel):
             "self-terminate on schedule."
         ),
     )
+    broker_url: str = Field(
+        default="",
+        description=(
+            "Base URL of the IDE broker service, e.g. http://127.0.0.1:5128. "
+            "When this is set and the MEWBO_IDE_BROKER_TOKEN environment "
+            "variable is present, the API delegates every container operation "
+            "to the broker and needs no Docker access of its own — the broker "
+            "holds the socket and builds each container spec from its own "
+            "configuration. Leave empty to drive Docker directly from the API "
+            "process, which requires giving that process the socket. The "
+            "MEWBO_IDE_BROKER_URL environment variable overrides this value; "
+            "the shared secret is read from the environment only, never from "
+            "this file."
+        ),
+        json_schema_extra={"x-env-var": "MEWBO_IDE_BROKER_URL"},
+    )
+
+    @field_validator("broker_url", mode="before")
+    @classmethod
+    def _normalize_broker_url(cls, value: Any) -> str:
+        return str(value).strip() if value else ""
 
 
 class LSPConfig(BaseModel):
@@ -1789,15 +1948,18 @@ class ToolSearchConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", json_schema_extra={"title": "Tool Search"})
 
     mode: Literal["off", "on", "auto"] = Field(
-        "auto",
+        "on",
         description=(
-            "'off' keeps every tool's schema in the initial bind. "
-            "'on' always defers MCP tools and any spec with "
+            "'on' (the default) always defers MCP tools and any spec with "
             "metadata.deferred=True; the model loads schemas on demand via "
-            "tool_search. 'auto' defers only when the number of deferrable "
-            "tools exceeds auto_threshold, so lean / zero-MCP sessions keep "
-            "verbatim binding and pay nothing, while many-MCP sessions are "
-            "spared ~240 tokens per tool every turn."
+            "tool_search, so no user MCP tool occupies the context window "
+            "until it is actually needed. 'off' keeps every tool's schema in "
+            "the initial bind. 'auto' defers only when the number of "
+            "deferrable tools exceeds auto_threshold. Note that 'on' costs a "
+            "zero-MCP session nothing: deferral only engages when the "
+            "deferrable set is non-empty, so the two modes bind an identical "
+            "list there. The range where they differ is 1..auto_threshold "
+            "tools, where 'auto' spends ~240 tokens per tool every turn."
         ),
     )
     auto_threshold: int = Field(
@@ -1842,7 +2004,11 @@ class RetryConfig(BaseModel):
         DEFAULT_TURN_DEADLINE,
         description=(
             "Wall-clock seconds budget for one logical LLM call across all "
-            "retries and fallbacks. Checked before each attempt. 0 disables."
+            "retries and fallbacks. Checked before each attempt AND before "
+            "advancing to the next model, so a spent budget stops the chain "
+            "without claiming a model it never called. Must exceed "
+            "llm_call_timeout x llm_call_retries plus one more attempt, or no "
+            "fallback model is ever reachable. 0 disables."
         ),
     )
     fallback_retries: int = Field(
@@ -1853,18 +2019,38 @@ class RetryConfig(BaseModel):
         DEFAULT_CB_THRESHOLD,
         description=(
             "Consecutive per-model failures before that model is cooled down "
-            "and skipped (when an alternative exists). 0 disables."
+            "and skipped (when an alternative exists). 0 disables this "
+            "heuristic. It does NOT disable the cooldown a provider declares "
+            "for itself: a model whose quota the provider reports as exhausted "
+            "is still skipped until that quota resets, since that is a stated "
+            "fact rather than an inference this threshold tunes."
         ),
     )
     circuit_breaker_cooldown: float = Field(
         DEFAULT_CB_COOLDOWN,
-        description="Seconds a model is skipped after tripping the circuit breaker.",
+        description=(
+            "Seconds a model is skipped after tripping the circuit breaker. A "
+            "provider-declared reset time overrides this for that model."
+        ),
     )
     budget_capacity: float = Field(
         DEFAULT_BUDGET_CAPACITY,
         description=(
-            "Token-bucket retry budget. Retries stop once the bucket drops to "
-            "half capacity, so a sustained outage fails fast instead of storming."
+            "Token-bucket retry budget for transient failures (timeouts, 5xx, "
+            "connection errors). Retries stop once the bucket drops to half "
+            "capacity, so a sustained outage fails fast instead of storming."
+        ),
+    )
+    rate_limit_budget_capacity: float = Field(
+        DEFAULT_RATE_LIMIT_BUDGET_CAPACITY,
+        description=(
+            "Separate, much smaller token-bucket budget for rate-limit (429) "
+            "retries. Retrying a server error bets that the server recovers in "
+            "seconds and usually pays; retrying a throttle bets against a rate "
+            "window the provider controls, and each attempt re-sends the whole "
+            "prompt. Once this bucket is spent the run moves to the next model "
+            "in the ladder rather than failing, because that model draws on a "
+            "different quota pool. Retries stop at half capacity, as above."
         ),
     )
     doom_loop_threshold: int = Field(
@@ -1876,7 +2062,7 @@ class RetryConfig(BaseModel):
     )
 
 
-class AgentConfig(BaseModel):
+class AgentConfig(EnvOverridable):
     """Sub-agent hypervisor settings."""
 
     model_config = ConfigDict(
@@ -1884,7 +2070,6 @@ class AgentConfig(BaseModel):
         json_schema_extra={"title": "Agent", "x-group": "agent", "x-order": 1},
     )
 
-    enabled: bool = Field(True, description="Enable the sub-agent spawning system.")
     max_depth: int = Field(
         5, description="Maximum nesting depth for sub-agent delegation (1 = no sub-agents)."
     )
@@ -1924,16 +2109,6 @@ class AgentConfig(BaseModel):
             "for API backward compatibility but is not enforced."
         ),
     )
-    sub_agent_max_steps: int = Field(
-        10,
-        deprecated=True,
-        description=(
-            "Deprecated. Sub-agents now run until natural completion. "
-            "This field is retained for API backward compatibility but "
-            "is not enforced. Safety is provided by session_step_budget, "
-            "stall detection, and LLM timeouts."
-        ),
-    )
     session_step_budget: int = Field(
         0,
         description=(
@@ -1950,8 +2125,8 @@ class AgentConfig(BaseModel):
             "every spawn/terminal transition in a session's agent tree — "
             "bounded scalars + a contract snapshot + a summary FINGERPRINT "
             "only, never task text or raw summary content. Additive and "
-            "never fatal: a failed or absent chain degrades to the historical "
-            "no-attestation behaviour. Default ON; this is the kill switch."
+            "never fatal: a failed or absent chain simply records no "
+            "attestation. Default ON; this is the kill switch."
         ),
     )
     default_workspace_mode: str = Field(
@@ -1961,20 +2136,114 @@ class AgentConfig(BaseModel):
             "narrowed per sub-agent by spawn_agent's workspace_mode. One "
             "of 'read_only' (reads confined to the workspace, no writes), "
             "'workspace_write' (reads + writes confined to the workspace), or "
-            "'full_access' (no path restriction; default, historical behaviour). "
-            "Only bites when workspace_enforcement is on."
+            "'full_access' (no path restriction). The root stays 'full_access' "
+            "because containment attenuates privilege ACROSS A SPAWN: the root "
+            "agent acts directly for the operator, while a sub-agent defaults to "
+            "'workspace_write' and can only ever narrow further. Set this to "
+            "confine the root session itself as well."
         ),
         examples=["full_access", "workspace_write", "read_only"],
     )
     workspace_enforcement: bool = Field(
+        True,
+        description=(
+            "Master switch for workspace_mode filesystem containment. While on, "
+            "an agent whose tier is narrower than 'full_access' resolves every "
+            "path against its own workspace root plus the Mewbo-owned scratch "
+            "roots, and the workspace root it was handed is authoritative — a "
+            "wider root supplied in tool arguments is ignored rather than "
+            "honoured. Turn it off to restore the older behaviour, where a path "
+            "resolves against the union of every configured project root and an "
+            "agent's tier governs nothing."
+        ),
+    )
+    shell_sandbox: bool = Field(
+        True,
+        description=(
+            "Confine shell subprocesses using the kernel's Landlock LSM, so a "
+            "command cannot read another task's files no matter which binary "
+            "it runs. This is a DENY-list, not an allowlist: every configured "
+            "project other than the session's own active one is denied, "
+            "together with anything listed in agent.shell_denied_paths. "
+            "Everything else — the interpreter, system libraries, the CLI "
+            "toolbox and HOME — stays reachable, so nothing has to be "
+            "enumerated to keep the shell working. Normal filesystem "
+            "permissions still apply on top of this; Landlock only removes "
+            "access, never grants it. On a kernel without Landlock this logs "
+            "once and changes nothing."
+        ),
+    )
+    shell_denied_paths: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Extra absolute directories the shell tool may never read or "
+            "write, on top of the other-projects denial shell_sandbox already "
+            "applies — for example the harness's own source and config "
+            "directory on a deployment where those sit outside every "
+            "configured project. A path that does not exist is ignored. This "
+            "only affects commands run through the shell tool; every other "
+            "tool is already argument-validated."
+        ),
+    )
+    harness_self_deny: bool = Field(
+        True,
+        description=(
+            "Hide Mewbo's own source trees and the directory holding app.json "
+            "from every session, so a command cannot read the file that holds "
+            "the API keys. The directories are derived from where Mewbo is "
+            "installed rather than configured, and a directory containing the "
+            "Python runtime is never denied — that would stop every command "
+            "instead of confining it. Turn this off to develop Mewbo itself, "
+            "where its packages are the work rather than internals to hide; the "
+            "session then reaches them like any other project. It denies "
+            "unconditionally by default, including when the session's own "
+            "project contains the installation, because the alternative was to "
+            "guess when to make an exception: the guess is invisible on a "
+            "deployment, where an unnoticed exception exposes the keys, while "
+            "an unwanted denial is immediate and local on a workstation, where "
+            "it is fixed by turning this off."
+        ),
+    )
+    path_scope_to_active_project: bool = Field(
+        True,
+        description=(
+            "Scope the path-taking tools — file read, file edit, directory "
+            "listing and LSP — to the session's active project, so a path "
+            "argument resolves only under that project plus the extra "
+            "directories its allowed_paths re-admits. While off, a path "
+            "resolves against the union of every configured project root and "
+            "the API host's own working directory, which lets one session read "
+            "another project's files by naming them. This is the "
+            "argument-validated half of the boundary agent.shell_sandbox "
+            "enforces in the kernel for shell subprocesses, and both halves "
+            "read the same active project. It is a separate switch because "
+            "shell_sandbox also decides whether a kernel mechanism is applied "
+            "at all, so a deployment that turns that one off — an older kernel, "
+            "or a ruleset that broke a command — should not silently lose this "
+            "check too. The Mewbo-owned scratch roots stay reachable either "
+            "way, and a call with no active project, such as a direct library "
+            "caller, is unaffected."
+        ),
+    )
+    server_sandbox: bool = Field(
         False,
         description=(
-            "Master switch for workspace_mode filesystem containment. "
-            "OFF by default (staged): while off, every path resolves "
-            "through the historical tenant-union allowlist regardless of an "
-            "agent's workspace_mode, so the tiers are carried + narrowed but "
-            "never enforced. Flip on to collapse each contained agent's reachable "
-            "paths to its own workspace root + Mewbo scratch."
+            "Extend the shell sandbox to the MCP and language servers Mewbo "
+            "configures but does not spawn itself. Their command line is "
+            "prefixed with a small launcher that applies the same Landlock "
+            "ruleset to itself and is then replaced by the real server, which "
+            "inherits the confinement. Each server is scoped to the workspace "
+            "it serves — a language server to the project root it resolves, an "
+            "MCP server to its own configured working directory — and denied "
+            "every other configured project, so an MCP server that names no "
+            "working directory reaches none of them. Servers reached over HTTP "
+            "spawn no process here and are unaffected. This needs "
+            "agent.shell_sandbox as well, because it applies the same kernel "
+            "mechanism: a deployment that turned that one off must not have it "
+            "reappear underneath its language servers. Off by default because "
+            "a denied path surfaces inside a server as a missing file rather "
+            "than as a refusal, and which servers a deployment runs is not "
+            "knowable in advance."
         ),
     )
     stall_threshold_s: float = Field(
@@ -2021,8 +2290,8 @@ class AgentConfig(BaseModel):
         description=(
             "Master switch for verifier-gated completion. OFF by default "
             "(staged): while off, a spawn's verification spec is carried but "
-            "never run, so every natural completion is accepted exactly as "
-            "historically. Flip on to gate a write-capable agent's claimed "
+            "never run, so every natural completion is accepted unchanged. "
+            "Flip on to gate a write-capable agent's claimed "
             "completion behind a ground-truth command check before its text "
             "is accepted."
         ),
@@ -2051,8 +2320,48 @@ class AgentConfig(BaseModel):
             "Covers extended-thinking models (raised from 60s because bare "
             "timeouts were the largest single failure class). On timeout, the call is "
             "retried up to llm_call_retries times before cascading to "
-            "fallback models."
+            "fallback models. Deployments where one call legitimately runs long "
+            "(slow local inference, a saturated proxy) can lift the ceiling "
+            "without editing this file via MEWBO_AGENT_LLM_CALL_TIMEOUT."
         ),
+        json_schema_extra={"x-env-var": "MEWBO_AGENT_LLM_CALL_TIMEOUT"},
+    )
+    llm_first_token_timeout: float = Field(
+        DEFAULT_FIRST_TOKEN_TIMEOUT,
+        description=(
+            "Ceiling in seconds on the wait for the FIRST chunk of a streamed "
+            "model call. 0 (the default) defers to llm_call_timeout, so one "
+            "bound covers the whole call. A large prompt on an "
+            "extended-thinking model can legitimately take minutes to emit its "
+            "first token, so a tighter value here manufactures failures unless "
+            "a deployment has measured its own first-token latency."
+        ),
+        json_schema_extra={"x-advanced": True},
+    )
+    llm_stream_idle_timeout: float = Field(
+        DEFAULT_STREAM_IDLE_TIMEOUT,
+        description=(
+            "Maximum seconds between chunks once a streamed model call has "
+            "started producing. This is the bound llm_call_timeout cannot "
+            "express: a provider that returns 200 and then goes silent is "
+            "otherwise unbounded until the total ceiling, and a total ceiling "
+            "loose enough for a long healthy generation is far too loose for a "
+            "dead one. 0 disables it, leaving llm_call_timeout as the only "
+            "bound."
+        ),
+        json_schema_extra={"x-advanced": True},
+    )
+    llm_call_liveness_s: float = Field(
+        DEFAULT_LLM_CALL_LIVENESS_S,
+        description=(
+            "Seconds one outstanding model call may go silent before the loop emits "
+            "an llm_call_stalled event. This DETECTS a wedged call; it does not "
+            "recover one — asyncio's attempt cap can only cancel a coroutine that "
+            "reaches a cancellation point, and a provider read wedged below the "
+            "event loop never does. Keep it above llm_call_timeout, or a normally "
+            "timing-out call reports as stalled."
+        ),
+        json_schema_extra={"x-advanced": True},
     )
     llm_call_retries: int = Field(
         DEFAULT_PRIMARY_RETRIES,
@@ -2064,16 +2373,6 @@ class AgentConfig(BaseModel):
             "Backoff/budget/circuit-breaker live under agent.retry."
         ),
     )
-
-    @field_validator("llm_call_timeout", mode="before")
-    @classmethod
-    def _llm_call_timeout_env(cls, value: Any) -> Any:
-        # Deployments where a single model call legitimately runs long (slow
-        # local inference, a saturated proxy) need to lift the ceiling without
-        # editing a config file. Invalid values fall through to pydantic's own
-        # float coercion error.
-        env = os.environ.get("MEWBO_AGENT_LLM_CALL_TIMEOUT")
-        return env if env else value
 
     @field_validator("attestation_enabled", mode="before")
     @classmethod
@@ -2097,6 +2396,17 @@ class AgentConfig(BaseModel):
     @classmethod
     def _normalize_workspace_enforcement(cls, value: Any) -> bool:
         return _coerce_bool(value, default=False)
+
+    @field_validator("shell_denied_paths", mode="before")
+    @classmethod
+    def _normalize_shell_denied_paths(cls, value: Any) -> list[str]:
+        raw_list = value if isinstance(value, list) else [value] if value else []
+        normalized: list[str] = []
+        for raw in raw_list:
+            text = str(raw).strip() if raw else ""
+            if text:
+                normalized.append(str(Path(text).expanduser().resolve()))
+        return normalized
 
     @field_validator("verification_enabled", mode="before")
     @classmethod
@@ -2126,6 +2436,69 @@ class AgentConfig(BaseModel):
         default_factory=lambda: RetryConfig.model_validate({}),
         description="Automatic LLM-call retry / fallback resilience knobs.",
     )
+
+    def ladder_budget_seconds(self, fallback_count: int) -> float:
+        """Worst-case seconds the configured model ladder can spend in one turn.
+
+        The primary rung may spend ``llm_call_timeout x llm_call_retries``; every
+        fallback rung may spend ``llm_call_timeout x retry.fallback_retries``.
+        The rung count arrives as an ARGUMENT because the ladder is declared
+        under ``llm``, not here — this model must never reach across the config
+        tree to read it.
+        """
+        rungs = self.llm_call_timeout * max(self.llm_call_retries, 1)
+        per_fallback = self.llm_call_timeout * max(self.retry.fallback_retries, 1)
+        return rungs + per_fallback * max(fallback_count, 0)
+
+    def unreachable_rung(self, fallback_count: int) -> tuple[float, float] | None:
+        """``(needed, deadline)`` when the ladder cannot fit, else ``None``.
+
+        THE BUDGET LAW. ``retry.turn_deadline`` bounds ONE logical LLM call
+        across every retry and every fallback, and it is checked between
+        attempts. So rungs that can together consume the whole budget leave
+        every rung below them unreachable — the chain advances, finds the
+        deadline spent, and stops. Cross-model fallback then silently never
+        runs, which reads as a provider-wide outage rather than as the tuning
+        mistake it is.
+        """
+        deadline = self.retry.turn_deadline
+        if deadline <= 0:
+            return None  # terminator disabled — nothing bounds the ladder
+        needed = self.ladder_budget_seconds(fallback_count)
+        return (needed, deadline) if needed > deadline else None
+
+    @model_validator(mode="after")
+    def _warn_when_fallback_is_unreachable(self) -> AgentConfig:
+        """Report a budget too small for even a SINGLE fallback rung.
+
+        This is the floor check, and it is all this model can perform on its own:
+        the real ladder length lives in ``llm.fallback``, so ``AppConfig`` runs
+        the full-ladder check once both halves are present. Raising
+        ``llm_call_timeout`` without raising ``turn_deadline`` is the way
+        deployments walk into the floor case.
+
+        This reports instead of refusing: the single-model path still works, and a
+        hard failure at config load would take down a running deployment over a
+        knob it can keep serving traffic with (same reasoning as the
+        ``system_instructions`` template-compilation carve-out).
+        """
+        breach = self.unreachable_rung(1)
+        if breach is not None:
+            needed, deadline = breach
+            _logger.warning(
+                "agent.retry.turn_deadline=%.0fs cannot reach a fallback model: the "
+                "primary rung alone may spend %.0fs (llm_call_timeout=%.0fs x "
+                "llm_call_retries=%d) and one fallback rung needs %.0fs more. "
+                "Cross-model fallback will not run. Raise turn_deadline to >= %.0fs.",
+                deadline,
+                self.llm_call_timeout * max(self.llm_call_retries, 1),
+                self.llm_call_timeout,
+                self.llm_call_retries,
+                self.llm_call_timeout * max(self.retry.fallback_retries, 1),
+                needed,
+            )
+        return self
+
     default_denied_tools: list[str] = Field(
         default_factory=list,
         description="Tool IDs denied to all sub-agents by default (e.g. spawn_agent).",
@@ -2217,11 +2590,6 @@ class AgentConfig(BaseModel):
             return normalized
         return ""
 
-    @field_validator("enabled", mode="before")
-    @classmethod
-    def _normalize_enabled(cls, value: Any) -> bool:
-        return _coerce_bool(value, default=True)
-
     @field_validator("max_depth", mode="before")
     @classmethod
     def _normalize_max_depth(cls, value: Any) -> int:
@@ -2247,15 +2615,6 @@ class AgentConfig(BaseModel):
             parsed = int(value)
         except (TypeError, ValueError):
             return 30
-        return max(parsed, 1)
-
-    @field_validator("sub_agent_max_steps", mode="before")
-    @classmethod
-    def _normalize_sub_agent_max_steps(cls, value: Any) -> int:
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError):
-            return 10
         return max(parsed, 1)
 
     @field_validator("session_step_budget", mode="before")
@@ -2339,43 +2698,44 @@ class AgentConfig(BaseModel):
         return normalized
 
 
-class MongoDBConfig(BaseModel):
+class MongoDBConfig(EnvOverridable):
     """MongoDB connection settings."""
 
-    # validate_default=True so the env-override validators below run even when
-    # the field falls back to its default (the common `model_validate({})`
-    # path); without it the MEWBO_MONGODB_* overrides silently never applied.
+    # validate_default=True so the normalizers below run even when the field
+    # falls back to its default (the common `model_validate({})` path).
     model_config = ConfigDict(validate_default=True, json_schema_extra={"title": "MongoDB"})
 
     uri: str = Field(
         "mongodb://localhost:27017",
-        description="MongoDB connection URI (includes host, port, credentials).",
+        description=(
+            "MongoDB connection URI (includes host, port, credentials). "
+            "Overridden by the MEWBO_MONGODB_URI environment variable."
+        ),
         examples=["mongodb://user:pass@localhost:27017/mewbo?authSource=admin"],
+        json_schema_extra={"x-env-var": "MEWBO_MONGODB_URI"},
     )
     database: str = Field(
         "mewbo",
-        description="MongoDB database name for session storage.",
+        description=(
+            "MongoDB database name for session storage. "
+            "Overridden by the MEWBO_MONGODB_DATABASE environment variable."
+        ),
         examples=["mewbo"],
+        json_schema_extra={"x-env-var": "MEWBO_MONGODB_DATABASE"},
     )
 
     @field_validator("uri", mode="before")
     @classmethod
     def _normalize_uri(cls, value: Any) -> str:
-        env = os.environ.get("MEWBO_MONGODB_URI")
-        if env:
-            return env
         return str(value).strip() if value else "mongodb://localhost:27017"
 
     @field_validator("database", mode="before")
     @classmethod
     def _normalize_database(cls, value: Any) -> str:
-        env = os.environ.get("MEWBO_MONGODB_DATABASE")
-        if env:
-            return env
         return str(value).strip() if value else "mewbo"
 
 
-class StorageConfig(BaseModel):
+class StorageConfig(EnvOverridable):
     """Session storage backend configuration."""
 
     model_config = ConfigDict(
@@ -2390,8 +2750,12 @@ class StorageConfig(BaseModel):
 
     driver: str = Field(
         "json",
-        description="Storage driver: 'json' (filesystem) or 'mongodb'.",
+        description=(
+            "Storage driver: 'json' (filesystem) or 'mongodb'. "
+            "Overridden by the MEWBO_STORAGE_DRIVER environment variable."
+        ),
         examples=["json", "mongodb"],
+        json_schema_extra={"x-env-var": "MEWBO_STORAGE_DRIVER"},
     )
     mongodb: MongoDBConfig = Field(
         default_factory=lambda: MongoDBConfig.model_validate({}),
@@ -2401,9 +2765,6 @@ class StorageConfig(BaseModel):
     @field_validator("driver", mode="before")
     @classmethod
     def _normalize_driver(cls, value: Any) -> str:
-        env = os.environ.get("MEWBO_STORAGE_DRIVER")
-        if env:
-            value = env
         raw = str(value).strip().lower() if value else "json"
         if raw not in {"json", "mongodb"}:
             raise ValueError(f"Unknown storage driver {raw!r}. Expected 'json' or 'mongodb'.")
@@ -2434,10 +2795,6 @@ def _compaction_config_default() -> CompactionConfig:
     return CompactionConfig.model_validate({})
 
 
-def _reflection_config_default() -> ReflectionConfig:
-    return ReflectionConfig.model_validate({})
-
-
 def _langfuse_config_default() -> LangfuseConfig:
     return LangfuseConfig.model_validate({})
 
@@ -2450,12 +2807,12 @@ def _permissions_config_default() -> PermissionsConfig:
     return PermissionsConfig.model_validate({})
 
 
+def _safety_config_default() -> SafetyConfig:
+    return SafetyConfig.model_validate({})
+
+
 def _cli_config_default() -> CLIConfig:
     return CLIConfig.model_validate({})
-
-
-def _chat_config_default() -> ChatConfig:
-    return ChatConfig.model_validate({})
 
 
 def _api_config_default() -> APIConfig:
@@ -2510,11 +2867,64 @@ class WikiEmbeddingConfig(BaseModel):
         64,
         description=(
             "Number of graph nodes embedded per API call during indexing. "
-            "Higher values index faster but send larger requests; lower it if "
-            "you hit the embedding provider's rate or payload limits."
+            "Embedding throughput per connection is roughly flat regardless of "
+            "batch size — a larger batch just takes proportionally longer per "
+            "call — so use `concurrency` to speed up indexing, and use this "
+            "knob only to stay under the provider's request payload limit."
         ),
         examples=[32, 64, 128],
         gt=0,
+    )
+    concurrency: int = Field(
+        4,
+        description=(
+            "Maximum number of embedding requests issued to the provider "
+            "concurrently during indexing. Embedding is I/O-bound — the "
+            "indexer spends its time waiting on the network, not on CPU — so "
+            "this, not `batch_size`, is what determines indexing speed. Keep "
+            "it conservative: issuing too many requests at once trades "
+            "throughput for HTTP 429 responses and retries. Raise it only "
+            "after confirming headroom against your provider's rate limits."
+        ),
+        examples=[4, 8, 16],
+        gt=0,
+    )
+    requests_per_minute: int | None = Field(
+        None,
+        description=(
+            "Optional ceiling on embedding requests issued per minute. When "
+            "set, the indexer paces itself against this budget — queuing "
+            "work rather than firing it — instead of relying on `concurrency` "
+            "alone. Leave unset to rely on `concurrency` plus automatic "
+            "backoff on 429 responses."
+        ),
+        examples=[500, 3000],
+        gt=0,
+    )
+    tokens_per_minute: int | None = Field(
+        None,
+        description=(
+            "Optional ceiling on embedding tokens processed per minute, "
+            "estimated from input text length. Paced the same way as "
+            "`requests_per_minute`. Leave unset to rely on `concurrency` plus "
+            "automatic backoff on 429 responses."
+        ),
+        examples=[1000000, 5000000],
+        gt=0,
+    )
+    max_retries: int = Field(
+        5,
+        description=(
+            "Number of times a rate-limited (HTTP 429) embedding request is "
+            "retried before the indexing job fails. A retry honours the "
+            "provider's `Retry-After` header when present, and falls back to "
+            "exponential backoff with jitter otherwise; sustained "
+            "rate-limiting also reduces `concurrency` for the remainder of "
+            "the run so a rate-limited pass degrades to slower rather than "
+            "failing outright."
+        ),
+        examples=[3, 5, 8],
+        ge=0,
     )
 
 
@@ -2533,7 +2943,23 @@ class WikiMemoryConfig(BaseModel):
             "Empty → falls back to default_qa_model, then default_model."
         ),
     )
-    max_insight_chars: int = Field(200, description="Hard cap on a memory note's length.")
+    # The ceiling mirrors ``mewbo_graph.wiki.memory_types.MAX_INSIGHT_CHARS`` by
+    # VALUE, not import: graph sits ABOVE core, so this module cannot reach it.
+    # Kept in lockstep by ``TestMaxInsightCharsCeiling`` in
+    # ``tests/wiki/test_memory_config_ceiling.py``, which asserts this bound
+    # against the canonical constant directly — the same arrangement
+    # ``_normalize_projects`` uses for the reserved project name.
+    max_insight_chars: int = Field(
+        200,
+        gt=0,
+        le=200,
+        description=(
+            "Hard cap on a memory note's length. Lowering this shortens notes; "
+            "it cannot be raised above 200, which is the length the stored note "
+            "model itself declares — a larger value would let a note past this "
+            "check and then fail validation as it was written."
+        ),
+    )
     max_anchors: int = Field(8, description="Max code anchors per note.")
     dedup_k: int = Field(5, description="kNN candidate window for fuzzy + LLM dedup tiers.")
     dedup_cosine: float = Field(0.6, description="Cosine floor for the LLM dedup tier.")
@@ -2566,8 +2992,62 @@ class WikiRefreshConfig(BaseModel):
     page_edit: float = Field(0.35, description="Doc staleness < this → edit.")
     page_regen: float = Field(0.70, description="Doc staleness ≥ this → regenerate + review.")
     new_page_min: int = Field(5, description="Uncovered public symbols to propose a new page.")
-    require_scope_confirm: bool = Field(
-        False, description="Require a human gate on the scope preview before the act phase."
+
+
+class WikiPhaseTimeoutsConfig(BaseModel):
+    """How long each long-running indexing phase may run before it is called wedged.
+
+    These are WEDGE DETECTORS, not pacing knobs. Every phase below runs off the
+    agent's event loop, so raising a value never makes indexing feel slower and
+    lowering one never makes it faster — the only thing a timeout decides is how
+    long a stuck phase is allowed to look like a working one. Each default is
+    sized from that phase's own honest worst case, which depends on the
+    repositories and the hardware a deployment actually has; that is why they are
+    knobs rather than constants. When a phase does expire, its work is NOT
+    stopped (a thread mid-parse or mid-clone reaches no cancellation point) — the
+    tool reports the phase as wedged and the work continues in the background.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid", json_schema_extra={"title": "Phase timeouts", "x-advanced": True}
+    )
+
+    clone_s: float = Field(
+        1800.0,
+        gt=0,
+        description=(
+            "Seconds `wiki_clone_repo` waits for the checkout. Sized from the "
+            "credential chain's own worst case rather than from a clone's "
+            "duration: the chain tries up to five candidates and each git "
+            "attempt is capped at 300s, so a repository whose every stored "
+            "credential has been revoked legitimately spends 1500s before it "
+            "reaches the anonymous attempt that succeeds. Raise it for very "
+            "large repositories on slow links."
+        ),
+        examples=[1800.0, 3600.0],
+    )
+    scan_s: float = Field(
+        900.0,
+        gt=0,
+        description=(
+            "Seconds `wiki_scan_tree` waits for the tree walk. The scan reads "
+            "and hashes every file it keeps, so its cost tracks total bytes on "
+            "disk rather than file count, and it touches no network. Raise it "
+            "for a very large monorepo or a slow filesystem."
+        ),
+        examples=[900.0, 1800.0],
+    )
+    graph_build_s: float = Field(
+        3600.0,
+        gt=0,
+        description=(
+            "Seconds `wiki_build_graph` waits for the tree-sitter parse, the "
+            "graph write and the embedding pass. The longest of the phases and "
+            "the one with the widest spread: it scales with parseable source "
+            "size, and its embedding leg waits on the LLM proxy. Raise it for a "
+            "large repository or a slow embedding model."
+        ),
+        examples=[3600.0, 7200.0],
     )
 
 
@@ -2598,6 +3078,27 @@ class WikiConfig(BaseModel):
         ),
         examples=["openai/gpt-5.4-nano"],
     )
+    default_qa_fast_model: str = Field(
+        "",
+        description=(
+            "Model the Q&A composer's fast mode pre-selects. Fast mode holds "
+            "the retrieval surface itself with no probe fan-out, so a "
+            "smaller/faster model than default_qa_model often suffices. Empty "
+            "string means: fall back to default_qa_model, then default_model, "
+            "then llm.default_model."
+        ),
+        examples=["openai/gpt-5.4-nano"],
+    )
+    qa_fast_step_budget: int = Field(
+        15,
+        ge=1,
+        description=(
+            "Tool-step ceiling for a fast-mode Q&A run — the root itself "
+            "retrieves with no probe fan-out, so it needs far fewer steps than "
+            "deep mode's session-wide budget. Budgets are config-tunable, "
+            "never hardcoded."
+        ),
+    )
     default_depth: Literal["", "comprehensive", "concise"] = Field(
         "",
         description=(
@@ -2623,6 +3124,10 @@ class WikiConfig(BaseModel):
     refresh: WikiRefreshConfig = Field(
         default_factory=lambda: WikiRefreshConfig.model_validate({}),
         description="On-demand incremental-refresh thresholds.",
+    )
+    phase_timeouts: WikiPhaseTimeoutsConfig = Field(
+        default_factory=lambda: WikiPhaseTimeoutsConfig.model_validate({}),
+        description="How long each long-running indexing phase may run before it is called wedged.",
     )
 
 
@@ -2698,6 +3203,299 @@ def _scg_config_default() -> ScgConfig:
     return ScgConfig.model_validate({})
 
 
+class ConfigWriteError(RuntimeError):
+    """Raised when the configuration file cannot be persisted.
+
+    A bare ``OSError`` escaping the persistence path reaches an HTTP surface as
+    an opaque 500 with a traceback and nothing a deployment can act on. This
+    carries the two things a caller needs instead: a stable machine ``code`` to
+    branch on and an operator-actionable ``reason`` to render. The absolute
+    ``path`` stays on the exception (and therefore in the logs) rather than in
+    the prose, because ``reason`` is user-facing copy and a server path is not.
+    """
+
+    #: ``errno`` -> stable machine code. Anything unlisted is ``io_error``.
+    #: The mapping is by errno alone because that is the only unambiguous
+    #: signal, and because the two denial codes call for DIFFERENT operator
+    #: actions: ``read_only`` means the mount itself refuses writes (fix the
+    #: deployment), ``permission_denied`` means the filesystem allows writes
+    #: but not to this process (fix ownership/mode). Collapsing them would
+    #: hand the operator prose for the wrong repair.
+    _CODES_BY_ERRNO: ClassVar[dict[int, str]] = {
+        errno.EROFS: "read_only",
+        errno.EACCES: "permission_denied",
+        errno.EPERM: "permission_denied",
+        errno.ENOSPC: "no_space",
+        errno.EDQUOT: "no_space",
+    }
+
+    #: Failures meaning atomic replacement is STRUCTURALLY impossible at this
+    #: path rather than transiently broken — the only ones a caller may degrade
+    #: to a non-atomic in-place write. ENOSPC/EDQUOT/EIO are excluded on
+    #: purpose: an in-place write truncates the live config first, so degrading
+    #: on a full or failing disk would destroy the config on its way to failing
+    #: anyway. See ``AppConfig._in_place_fallback_applies``.
+    _STRUCTURAL_ERRNOS: ClassVar[frozenset[int]] = frozenset(
+        {errno.EBUSY, errno.EROFS, errno.EACCES, errno.EPERM}
+    )
+
+    _REASONS: ClassVar[dict[str, str]] = {
+        "read_only": (
+            "The configuration directory is mounted read-only; settings cannot be saved "
+            "until the deployment grants write access."
+        ),
+        "permission_denied": (
+            "The server process is not allowed to write the configuration directory; "
+            "check its ownership and mode for the user the server runs as."
+        ),
+        "no_space": (
+            "The filesystem holding the configuration is out of space; free space or grow "
+            "the volume, then save again."
+        ),
+        "io_error": (
+            "The configuration could not be written because the filesystem rejected the "
+            "write; see the server logs for the underlying error."
+        ),
+    }
+
+    def __init__(self, path: Path, code: str, reason: str) -> None:
+        """Build the failure from an already-classified ``code``/``reason``."""
+        super().__init__(reason)
+        self.path = path
+        self.code = code
+        self.reason = reason
+
+    @classmethod
+    def reason_for(cls, code: str) -> str:
+        """Return the operator-facing prose for a stable machine ``code``."""
+        return cls._REASONS.get(code, cls._REASONS["io_error"])
+
+    @classmethod
+    def classify(cls, exc: OSError) -> tuple[str, str]:
+        """Map an ``OSError`` to its stable ``(code, reason)`` pair."""
+        code = cls._CODES_BY_ERRNO.get(exc.errno or 0, "io_error")
+        return code, cls._REASONS[code]
+
+    @classmethod
+    def is_structural(cls, exc: OSError) -> bool:
+        """Whether ``exc`` means atomic replacement can never work at this path."""
+        return exc.errno in cls._STRUCTURAL_ERRNOS
+
+    @classmethod
+    def from_oserror(cls, path: Path, exc: OSError) -> ConfigWriteError:
+        """Build the typed failure for an ``OSError`` raised while persisting."""
+        code, reason = cls.classify(exc)
+        return cls(path, code, reason)
+
+
+class ConfigWriteAccess(BaseModel):
+    """Whether the configuration store can be persisted to."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    writable: bool
+    code: str | None = None
+    reason: str | None = None
+
+
+class EnvRef(BaseModel):
+    """A config value that NAMES an environment variable instead of holding one.
+
+    Written as a value that is exactly ``${VARIABLE}``, so a secret can stay in
+    the environment and out of ``app.json``::
+
+        {"llm": {"api_key": "${OPENAI_API_KEY}"}}
+
+    Two deliberate limits, both there so this stays a naming convention rather
+    than a template language:
+
+    * the reference is the WHOLE value or it is not a reference at all — a value
+      that merely contains ``${`` is left exactly as written, which is what lets
+      a literal password contain those characters with nothing to escape;
+    * a reference to a variable that is not set is an error at load, never an
+      empty string. Substituting empty turns a missing secret into a puzzling
+      401 much later; naming a variable is a claim that it will be there, and a
+      claim is worth checking. A variable set to the empty string IS set, and
+      resolves to empty — that is the way to say a value is deliberately blank.
+
+    Not to be confused with :class:`EnvOverridable`, which runs the other way
+    round: there the FIELD names a variable that overrides whatever the file
+    says, and an unset variable is a no-op rather than an error.
+
+    Cost: ``O(one record)`` — one walk of the config document, on load only.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    variable: str = Field(..., description="Name of the environment variable to read.")
+
+    #: Anchored on purpose: see the whole-value rule in the class docstring.
+    _SYNTAX: ClassVar[re.Pattern[str]] = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
+
+    @classmethod
+    def parse(cls, value: Any) -> EnvRef | None:
+        """Return the reference ``value`` spells, or ``None`` if it spells none."""
+        if not isinstance(value, str):
+            return None
+        match = cls._SYNTAX.match(value.strip())
+        return cls(variable=match.group(1)) if match else None
+
+    def resolve(self, environ: Mapping[str, str], where: str) -> str:
+        """Return the variable's value, or raise naming both it and ``where``."""
+        resolved = environ.get(self.variable)
+        if resolved is None:
+            raise ValueError(
+                f"Configuration key '{where}' references environment variable "
+                f"'{self.variable}', which is not set. Set it, or replace the "
+                f"reference with a literal value."
+            )
+        return resolved
+
+    @classmethod
+    def resolve_document(cls, payload: Any, environ: Mapping[str, str], where: str = "") -> Any:
+        """Rebuild ``payload`` with every reference in it replaced by its value.
+
+        Returns the payload unchanged — the same object, not a copy — when it
+        holds no reference, so the common case allocates nothing and the
+        caller's document is never touched. See
+        :meth:`AppConfig._drop_retired_keys` for why not touching it matters.
+        """
+        if isinstance(payload, dict):
+            resolved = {
+                key: cls.resolve_document(item, environ, f"{where}.{key}" if where else str(key))
+                for key, item in payload.items()
+            }
+            return payload if resolved == payload else resolved
+        if isinstance(payload, list):
+            items = [
+                cls.resolve_document(item, environ, f"{where}[{index}]")
+                for index, item in enumerate(payload)
+            ]
+            return payload if items == payload else items
+        reference = cls.parse(payload)
+        return reference.resolve(environ, where) if reference is not None else payload
+
+
+class RetiredKey(BaseModel):
+    """One config key that no longer exists, and what to tell whoever still sets it.
+
+    Deleting a field does not delete the key from the OPERATOR'S ``app.json``,
+    and what that key does next is opposite in the two section kinds: under
+    ``extra="ignore"`` it is swallowed in silence, so a knob that stopped
+    working looks exactly like one that works; under ``extra="forbid"`` it is a
+    ``ValidationError`` during startup, so the process will not boot.
+
+    A retired key is therefore pruned from the payload before validation — so a
+    ``forbid`` section never sees it — and announced once per key per process,
+    so the silence becomes an instruction to delete the line.
+
+    Cost: ``O(one record)`` — one walk per declared retired key over the config
+    document, on the load path only.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: tuple[str, ...] = Field(
+        ..., min_length=1, description="Dotted location of the key, split into segments."
+    )
+    guidance: str = Field(
+        ..., description="What the operator should do instead, in one sentence."
+    )
+
+    @property
+    def dotted(self) -> str:
+        """The key as an operator would read it in ``app.json``."""
+        return ".".join(self.path)
+
+    def prune(self, payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """Return ``payload`` without this key, plus whether it was there at all.
+
+        Copies only the dicts ALONG the key's own path and shares every other
+        branch, so the caller's document is never mutated and nothing else in it
+        is duplicated. A whole-document deep copy would be the obvious
+        alternative and is not available: a payload reaching ``model_validate``
+        may already hold constructed submodels, which do not survive a
+        JSON round trip.
+        """
+        return self._without(payload, self.path)
+
+    @classmethod
+    def _without(cls, node: dict[str, Any], path: tuple[str, ...]) -> tuple[dict[str, Any], bool]:
+        """Rebuild ``node`` minus ``path``, sharing every branch off that path."""
+        head, rest = path[0], path[1:]
+        if head not in node:
+            return node, False
+        if not rest:
+            trimmed = dict(node)
+            del trimmed[head]
+            return trimmed, True
+        child = node[head]
+        if not isinstance(child, dict):
+            return node, False
+        rebuilt, removed = cls._without(child, rest)
+        if not removed:
+            return node, False
+        trimmed = dict(node)
+        trimmed[head] = rebuilt
+        return trimmed, True
+
+
+#: Every key ``AppConfig`` no longer declares. Data, not logic: a deletion adds a
+#: row here in the SAME commit that removes the field, which is what keeps an
+#: existing deployment booting across the upgrade.
+#:
+#: A row names the widest thing that went: when a whole section was removed, the
+#: section — otherwise the top-level key becomes unknown, ``AppConfig``'s own
+#: ``extra="ignore"`` drops it without a word, and the announcement this
+#: registry exists to make never happens.
+#:
+#: A row is RETIRABLE once no supported upgrade path still starts from a version
+#: that declared the key. Dropping it costs the announcement, never the boot —
+#: pruning is what a ``forbid`` section needs, and every section named here is
+#: ``extra="ignore"``, so re-check that before removing a row whose section is
+#: not.
+_RETIRED_KEYS: tuple[RetiredKey, ...] = (
+    RetiredKey(
+        path=("reflection",),
+        guidance=(
+            "No reflection pass was ever run from it; the reflector the console "
+            "shows is driven from the tool-use loop, not from configuration."
+        ),
+    ),
+    RetiredKey(
+        path=("chat",),
+        guidance="The chat interface it bound no longer exists.",
+    ),
+    RetiredKey(
+        path=("wiki", "refresh", "require_scope_confirm"),
+        guidance=(
+            "There is no confirmation step for it to require. A refresh commits "
+            "its graph delta before a scope preview exists, and the job "
+            "lifecycle has no state meaning 'waiting for a human', so the "
+            "setting could only ever have read as approval nobody was asked for."
+        ),
+    ),
+    RetiredKey(
+        path=("cli", "approval_style"),
+        guidance="Set cli.disable_textual instead — it is what chooses the approval UI.",
+    ),
+    RetiredKey(
+        path=("agent", "enabled"),
+        guidance=(
+            "It never disabled anything. Set agent.max_depth to 1 to refuse "
+            "sub-agents, which is the setting admission actually reads."
+        ),
+    ),
+    RetiredKey(
+        path=("agent", "sub_agent_max_steps"),
+        guidance=(
+            "Sub-agents run to natural completion; agent.session_step_budget is "
+            "the ceiling that is enforced."
+        ),
+    ),
+)
+
+
 # ---------------------------------------------------------------------------
 # Curation annotation contract (drives the faceted Settings UI)
 # ---------------------------------------------------------------------------
@@ -2733,10 +3531,26 @@ def _scg_config_default() -> ScgConfig:
 #                  the public schema marked ``writeOnly: true``; its value is
 #                  stripped from dumps. The API reports is-set status separately.
 #   x-advanced  -> single field is power-user-only; hidden by default.
+#   x-env-var   -> names the environment variable that OVERRIDES this field.
+#                  Applied by ``EnvOverridable``, the base the field's section
+#                  must inherit from — the declaration alone does nothing on a
+#                  plain ``BaseModel``. The variable wins over the file value;
+#                  unset or empty simply means "not overridden", never an error
+#                  (that is ``EnvRef``'s ``${VAR}``, which is the other
+#                  direction). Read-only to the API: it describes where a value
+#                  may come from, it is not a value to PATCH.
 class AppConfig(BaseModel):
     """Typed configuration for the Mewbo runtime."""
 
     model_config = ConfigDict(extra="ignore", validate_default=True)
+
+    #: Set once the first non-atomic save degrades, so the warning that
+    #: explains it is logged one time per process rather than per save.
+    _warned_non_atomic: ClassVar[bool] = False
+
+    #: Retired keys already announced, so a config validated on every settings
+    #: PATCH repeats itself once per key rather than once per request.
+    _warned_retired: ClassVar[set[str]] = set()
 
     runtime: RuntimeConfig = Field(
         default_factory=_runtime_config_default, description="Runtime environment settings."
@@ -2761,10 +3575,6 @@ class AppConfig(BaseModel):
         default_factory=_compaction_config_default,
         description="Conversation compaction prompt selection (caveman mode).",
     )
-    reflection: ReflectionConfig = Field(
-        default_factory=_reflection_config_default,
-        description="Post-execution reflection pass settings.",
-    )
     langfuse: LangfuseConfig = Field(
         default_factory=_langfuse_config_default,
         description="Langfuse LLM observability integration.",
@@ -2777,13 +3587,13 @@ class AppConfig(BaseModel):
         default_factory=_permissions_config_default,
         description="Tool execution permission policy.",
     )
+    safety: SafetyConfig = Field(
+        default_factory=_safety_config_default,
+        description="Operator-owned tool-call gate and session observer. Off by default.",
+    )
     cli: CLIConfig = Field(
         default_factory=_cli_config_default,
         description="Terminal CLI display and interaction settings.",
-    )
-    chat: ChatConfig = Field(
-        default_factory=_chat_config_default,
-        description="Legacy chat interface settings.",
     )
     api: APIConfig = Field(
         default_factory=_api_config_default, description="REST API authentication."
@@ -2831,7 +3641,7 @@ class AppConfig(BaseModel):
     )
     channels: dict[str, dict[str, Any]] = Field(
         default_factory=dict,
-        description="Chat platform channel adapters (nextcloud-talk, slack, etc.).",
+        description="Channel adapters, keyed by name (nextcloud-talk, email).",
         json_schema_extra={"x-group": "integrations", "x-order": 4},
     )
     projects: dict[str, ProjectConfig] = Field(
@@ -2847,18 +3657,126 @@ class AppConfig(BaseModel):
         json_schema_extra={"x-group": "workspace", "x-order": 1},
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _prepare_document(cls, payload: Any) -> Any:
+        """Drop retired keys, then resolve environment references — in that order.
+
+        Both steps are here, sequenced by hand, rather than in a validator each.
+        Pydantic runs ``mode="before"`` model validators bottom-up, so two of
+        them would put this ordering in the DECLARATION ORDER of two methods —
+        invisible, and silently reversed by anyone who moves one. The order is
+        load-bearing: a retired key holding a reference to a variable nobody
+        sets any more must not refuse the boot, when the whole point of that key
+        is that it is ignored.
+        """
+        if not isinstance(payload, dict):
+            return payload
+        return EnvRef.resolve_document(cls._without_retired_keys(payload), os.environ)
+
+    @classmethod
+    def _without_retired_keys(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        """Return ``payload`` minus every retired key, announcing each one once.
+
+        Prunes into a copy, and that is load-bearing rather than defensive
+        habit. The settings PATCH path validates the operator's merged document
+        and then persists THAT SAME dict — so a validator pruning in place
+        would delete lines out of somebody's ``app.json`` as a side effect of
+        an unrelated save, silently and with no record that the key was ever
+        set. The pruning exists to let the process start, not to edit the file;
+        removing the line stays the operator's own act.
+        """
+        if not _RETIRED_KEYS:
+            return payload
+        pruned = payload
+        for retired in _RETIRED_KEYS:
+            pruned, was_set = retired.prune(pruned)
+            if not was_set:
+                continue
+            if retired.dotted in cls._warned_retired:
+                continue
+            cls._warned_retired.add(retired.dotted)
+            _logger.warning(
+                "Configuration key '%s' has been retired and is ignored. %s "
+                "Remove it from your app.json to silence this warning.",
+                retired.dotted,
+                retired.guidance,
+            )
+        return pruned
+
     @field_validator("projects", mode="before")
     @classmethod
     def _normalize_projects(cls, value: Any) -> dict[str, ProjectConfig]:
         if not isinstance(value, dict):
             return {}
+        # Mirrors ``mewbo_core.workspaces.project_catalog.AUTO_PROJECT`` by VALUE, not
+        # import: ``project_catalog`` imports ``ProjectConfig`` from this
+        # module, and its own import chain calls back into ``get_config()``
+        # (``project_store`` -> ``worktree``'s module-level logger setup ->
+        # ``common._configure_logging``) before it finishes loading — even a
+        # lazy import here deadlocks on the FIRST ``AppConfig()`` built in a
+        # fresh process (``validate_default=True`` runs this on every
+        # construction, including the default). Kept in lockstep by
+        # ``TestAppConfigNormalizeProjects.test_a_project_named_auto_is_refused``,
+        # which asserts this literal against the canonical constant directly.
+        reserved_auto_project_name = "auto"
         result: dict[str, ProjectConfig] = {}
         for name, cfg in value.items():
+            key = str(name)
+            if key == reserved_auto_project_name:
+                raise ValueError(
+                    f"A configured project cannot be named '{reserved_auto_project_name}' "
+                    "— that name is reserved for the auto-select sentinel. Choose a "
+                    "different project name."
+                )
             if isinstance(cfg, dict):
-                result[str(name)] = ProjectConfig.model_validate(cfg)
+                result[key] = ProjectConfig.model_validate(cfg)
             elif isinstance(cfg, ProjectConfig):
-                result[str(name)] = cfg
+                result[key] = cfg
         return result
+
+    @model_validator(mode="after")
+    def _warn_when_the_ladder_is_unreachable(self) -> AppConfig:
+        """Apply the budget law to the REAL ladder, which only this level can see.
+
+        ``AgentConfig`` can check one fallback rung and no more — the ladder is
+        declared under ``llm``, and a model that reached across the config tree
+        to read it would be the coupling the layering rules exist to prevent. So
+        the floor check lives there and the full check lives here, where both
+        halves are in hand.
+
+        The distinction is not academic: a deployment can size ``turn_deadline``
+        so the primary plus ONE fallback fits, pass that check, and still have
+        every rung after the second be dead configuration. The chain reaches
+        them, finds the wall clock spent, and stops — silently, since an
+        unreachable rung produces no event of its own.
+
+        Only fires when the floor check passed, so one misconfiguration never
+        logs twice. Reports rather than refuses, for the reason ``AgentConfig``
+        gives.
+        """
+        fallbacks = len(self.llm.effective_fallback_models())
+        if fallbacks < 2 or self.agent.unreachable_rung(1) is not None:
+            return self  # nothing more to say than the floor check already said
+        breach = self.agent.unreachable_rung(fallbacks)
+        if breach is not None:
+            needed, deadline = breach
+            _logger.warning(
+                "agent.retry.turn_deadline=%.0fs cannot reach the whole model ladder: "
+                "%d fallback model(s) after the primary may spend %.0fs in total "
+                "(llm_call_timeout=%.0fs, llm_call_retries=%d, "
+                "retry.fallback_retries=%d). The last rungs are unreachable and "
+                "cross-model fallback stops short of them. Raise turn_deadline to "
+                ">= %.0fs, or shorten the ladder.",
+                deadline,
+                fallbacks,
+                needed,
+                self.agent.llm_call_timeout,
+                self.agent.llm_call_retries,
+                self.agent.retry.fallback_retries,
+                needed,
+            )
+        return self
 
     @classmethod
     def load(cls, path: str | Path) -> AppConfig:
@@ -2871,10 +3789,163 @@ class AppConfig(BaseModel):
         return self.model_dump_json(indent=indent, exclude_none=True)
 
     def write(self, path: str | Path, *, indent: int = 2) -> None:
-        """Write config JSON to disk."""
+        """Atomically persist THIS MODEL as the whole config file.
+
+        Renders every declared field, so an unset one is written out at its
+        resolved default. That suits a caller scaffolding a fresh config; it is
+        the wrong tool for saving an edit to a file someone already maintains —
+        use :meth:`write_document` for that and see the warning there.
+        """
+        self.write_document(path, json.loads(self.to_json(indent=indent)), indent=indent)
+
+    @classmethod
+    def write_document(
+        cls,
+        path: str | Path,
+        document: Mapping[str, Any],
+        *,
+        indent: int = 2,
+    ) -> None:
+        """Atomically persist an already-shaped config document.
+
+        Editing a config means writing back the operator's OWN document with
+        their change applied — never a re-rendering of the validated model.
+        Re-rendering looks equivalent and is not, in two ways that both corrupt
+        a shared file. It converts every unset field into an explicit default,
+        so "leave this to the runtime" silently becomes "pin this forever". And
+        because several defaults are derived from the environment of whichever
+        process happens to save (``MEWBO_HOME`` feeding the ``runtime.*``
+        directories, the storage driver's URI), a save from inside a container
+        rewrites the shared file with container-only absolute paths and
+        hostnames, which then breaks every other consumer of it. The model is
+        still the validator — nothing unvalidated reaches disk — it is just not
+        the thing serialized. This also keeps a key the model does not declare
+        (``$schema``, a block for a feature with no typed field yet) instead of
+        dropping it, since ``extra="ignore"`` discards those at validation.
+        """
+        cls._write_atomically(Path(path), json.dumps(document, indent=indent) + "\n")
+
+    @classmethod
+    def _write_atomically(cls, target: Path, payload: str) -> None:
+        """Stage ``payload`` beside ``target`` and swap it in, or raise ``ConfigWriteError``.
+
+        A plain ``write_text`` truncates the target before it writes, so a
+        failure part-way through (out of space, killed process) leaves the live
+        config truncated or half-written. The payload is staged in a temporary
+        file in the SAME directory — same filesystem, which is what makes
+        ``os.replace`` atomic — and only swapped in once it is fully on disk,
+        so a failed save leaves the previous config byte-for-byte intact.
+
+        Some deployments make that impossible; those degrade to a non-atomic
+        in-place write rather than failing. See ``_in_place_fallback_applies``.
+        """
+        tmp_path: Path | None = None
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            handle, name = tempfile.mkstemp(
+                dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
+            )
+            tmp_path = Path(name)
+            with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            # ``mkstemp`` creates owner-only; the deployed stack has more than
+            # one process reading this file, so keep whatever mode the operator
+            # already has on it and fall back to the umask-default of the
+            # ``write_text`` this replaced.
+            os.chmod(tmp_path, target.stat().st_mode & 0o777 if target.exists() else 0o644)
+            os.replace(tmp_path, target)
+        except OSError as exc:
+            if tmp_path is not None:
+                # Cleanup failures must not mask the real error, and must not
+                # turn a save the fallback below completed into a reported one.
+                with contextlib.suppress(OSError):
+                    tmp_path.unlink(missing_ok=True)
+            if cls._in_place_fallback_applies(target, exc):
+                cls._write_in_place(target, payload)
+                return
+            raise ConfigWriteError.from_oserror(target, exc) from exc
+
+    @classmethod
+    def _in_place_fallback_applies(cls, target: Path, exc: OSError) -> bool:
+        """Whether a failed atomic write may degrade to writing ``target`` directly.
+
+        WHY: a rename cannot replace a path that is ITSELF a bind-mount point —
+        it fails with EBUSY — and a single-file mount can equally leave the
+        containing directory read-only while the file stays writable. In both
+        shapes the staged-file dance can never work however healthy the
+        filesystem is, and writing the target directly is the only way to save
+        at all. Both gates are load-bearing: the errno gate keeps a full or
+        failing disk OUT (an in-place write truncates first, so degrading there
+        would destroy the config on the way to failing anyway), and the
+        writability gate keeps a genuinely read-only deployment out, so that
+        one still gets its honest ``read_only`` refusal.
+        """
+        return ConfigWriteError.is_structural(exc) and os.access(target, os.W_OK)
+
+    @classmethod
+    def _write_in_place(cls, target: Path, payload: str) -> None:
+        """Write ``payload`` straight onto ``target`` — the non-atomic last resort."""
+        try:
+            with open(target, "w", encoding="utf-8") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except OSError as exc:
+            raise ConfigWriteError.from_oserror(target, exc) from exc
+        if not cls._warned_non_atomic:
+            # Once per process: the shape of the deployment does not change
+            # between saves, so repeating this per save is pure log noise.
+            AppConfig._warned_non_atomic = True
+            _logger.warning(
+                "Configuration saved without atomic replacement: %s cannot be replaced by "
+                "rename, which is how a single-file bind mount of the config presents. A "
+                "crash mid-write can truncate it; mount the containing directory rather "
+                "than the file to restore atomic saves.",
+                target,
+            )
+
+    @classmethod
+    def probe_write_access(cls, path: str | Path) -> ConfigWriteAccess:
+        """Report whether ``path`` could be persisted to, without modifying it.
+
+        The probe creates and removes a temporary file in the directory an
+        atomic :meth:`write` would stage into — exactly the permission that
+        write needs — so it never opens, truncates or replaces an existing
+        config. A missing parent is probed at its nearest existing ancestor
+        (where ``mkdir`` would have to write) rather than being created, so the
+        probe itself has no side effects at all.
+
+        It answers for the SAME rungs :meth:`write` will try, fallback
+        included. Reporting a directory-only verdict would say "not writable"
+        for a single-file-mounted config that saves perfectly well in place,
+        and a console that disables its Save button on this would then be
+        refusing a write the server would have accepted.
+        """
         target = Path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(self.to_json(indent=indent) + "\n", encoding="utf-8")
+        probe_dir = target.parent
+        while not probe_dir.exists() and probe_dir.parent != probe_dir:
+            probe_dir = probe_dir.parent
+        try:
+            handle, name = tempfile.mkstemp(
+                dir=probe_dir, prefix=f".{target.name}.", suffix=".probe"
+            )
+            os.close(handle)
+            os.unlink(name)
+        except OSError as exc:
+            if cls._in_place_fallback_applies(target, exc):
+                return ConfigWriteAccess(writable=True)
+            code, reason = ConfigWriteError.classify(exc)
+            return ConfigWriteAccess(writable=False, code=code, reason=reason)
+        except Exception:
+            # A probe that raises is a probe nobody can call from a request
+            # handler; an unexpected failure is still "cannot persist".
+            _logger.warning("Config write probe failed for %s", target, exc_info=True)
+            return ConfigWriteAccess(
+                writable=False, code="io_error", reason=ConfigWriteError.reason_for("io_error")
+            )
+        return ConfigWriteAccess(writable=True)
 
     async def preflight(self, *, disable_on_failure: bool = True) -> dict[str, dict[str, Any]]:
         """Run async validation checks for optional integrations."""
@@ -3142,16 +4213,15 @@ def effective_fallback_models() -> list[str]:
     """Resolve the active fallback model chain honoring the opt-in policy.
 
     Precedence: when ``llm.fallback.enabled`` is set, use ``llm.fallback.models``
-    (falling back to the legacy ``llm.fallback_models`` if the typed list is
-    empty). When fallback is disabled, a non-empty legacy ``llm.fallback_models``
-    is still honored for backward compatibility; otherwise there is no fallback.
+    (falling back to the flat ``llm.fallback_models`` if the typed list is
+    empty). When fallback is disabled, a non-empty ``llm.fallback_models`` is
+    still honored; otherwise there is no fallback.
+
+    A thin accessor over :meth:`LLMConfig.effective_fallback_models`, which owns
+    the rule — the config-load-time budget check has to apply the SAME
+    precedence to an ``AppConfig`` that is not the process-wide one yet.
     """
-    enabled = bool(get_config_value("llm", "fallback", "enabled", default=False))
-    typed = list(get_config_value("llm", "fallback", "models", default=[]) or [])
-    legacy = list(get_config_value("llm", "fallback_models", default=[]) or [])
-    if enabled:
-        return typed or legacy
-    return legacy
+    return get_config().llm.effective_fallback_models()
 
 
 def get_config_section(*keys: str) -> dict[str, Any]:
@@ -3247,6 +4317,98 @@ def ensure_example_configs(
 _MAX_MCP_SUBTREE_DEPTH = 5
 
 
+class UntrustedCwdRegistry:
+    """Directories whose own ``.mcp.json`` must never enter the merged config.
+
+    A working directory is normally a developer's own project, so its
+    ``.mcp.json`` legitimately contributes MCP servers at the highest priority
+    tier. That stops being true the moment the directory holds content this
+    deployment did not author — a repository cloned for indexing being the
+    worked example: its ``.mcp.json`` is attacker-supplied, and admitting it
+    both OVERRIDES a same-named operator server and, because ``_deep_merge``
+    recurses, lets a file naming only ``env`` keep the operator's ``command``
+    and credential while adding a variable of its own. Merge order cannot fix
+    that — the tier has to be excluded, not out-prioritised.
+
+    The caller that CREATED the directory is the only one that knows this, so
+    it registers the root here once. Every resolution of the merged config then
+    excludes it — the initial registry build and every re-resolution a tool
+    runner performs at invocation time alike — without the knowledge having to
+    be threaded through each of them. Registration is by explicit path, never
+    by pattern-matching one: a heuristic on the directory name would be exactly
+    the accidental control this exists to remove.
+
+    Registering a root covers that directory and everything beneath it, so one
+    registration of a clone ROOT covers every job that clones into it.
+
+    Cost: ``O(registered roots)`` per lookup, on a path already doing file I/O.
+    """
+
+    def __init__(self) -> None:
+        """Initialize an empty, lock-guarded registry."""
+        self._lock = threading.Lock()
+        self._roots: set[Path] = set()
+
+    @staticmethod
+    def _normalize(path: str | Path) -> Path | None:
+        """Resolve *path* for comparison, or ``None`` when it cannot be read."""
+        try:
+            return Path(path).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            return None
+
+    def register(self, path: str | Path) -> None:
+        """Mark *path* and everything under it as an untrusted working directory."""
+        resolved = self._normalize(path)
+        if resolved is None:
+            _logger.warning("Could not mark %s as an untrusted cwd: unresolvable path", path)
+            return
+        with self._lock:
+            self._roots.add(resolved)
+
+    def unregister(self, path: str | Path) -> None:
+        """Drop a previously registered root (no-op when absent)."""
+        resolved = self._normalize(path)
+        if resolved is None:
+            return
+        with self._lock:
+            self._roots.discard(resolved)
+
+    def clear(self) -> None:
+        """Drop every registered root (tests)."""
+        with self._lock:
+            self._roots.clear()
+
+    def roots(self) -> tuple[str, ...]:
+        """Return the registered roots, sorted, for diagnostics."""
+        with self._lock:
+            return tuple(sorted(str(root) for root in self._roots))
+
+    def contains(self, path: str | Path | None) -> bool:
+        """True when *path* is at or below a registered untrusted root.
+
+        A path that cannot be resolved is reported as untrusted: this gate is
+        the one place where failing closed costs a feature and failing open
+        spawns a process.
+        """
+        with self._lock:
+            if not self._roots:
+                return False
+            roots = set(self._roots)
+        resolved = self._normalize(path if path is not None else Path.cwd())
+        if resolved is None:
+            return True
+        return any(resolved == root or root in resolved.parents for root in roots)
+
+
+_UNTRUSTED_CWDS = UntrustedCwdRegistry()
+
+# Thin aliases so callers register a root without reaching for the singleton.
+register_untrusted_cwd = _UNTRUSTED_CWDS.register
+unregister_untrusted_cwd = _UNTRUSTED_CWDS.unregister
+is_untrusted_cwd = _UNTRUSTED_CWDS.contains
+
+
 def _discover_subtree_mcp_json(
     cwd: str | None = None,
     *,
@@ -3320,15 +4482,43 @@ def get_merged_mcp_config(
     cwd: str | None = None,
     *,
     extra_servers: dict[str, Any] | None = None,
+    trust_cwd: bool = True,
 ) -> dict[str, Any]:
     """Load and merge MCP configs: plugin extras + global + subtree + CWD ``.mcp.json``.
 
     Priority (lowest → highest): extra_servers < global < subtree (deep→shallow) < CWD.
     Returns the merged config dict with a ``servers`` key.
     When MCP is disabled (via ``set_mcp_config_path(None)``), returns ``{}``.
+
+    A server entry is a ``command`` this process will spawn, and the spawn
+    happens during config resolution rather than at invocation — so no
+    downstream tool allowlist can gate it. The two directory-derived tiers
+    (``cwd`` itself and the subtree walk beneath it) are therefore admitted
+    only when the directory is trusted: pass ``trust_cwd=False``, or register
+    the directory via :data:`register_untrusted_cwd`, and BOTH are skipped
+    entirely rather than merged at a lower priority — a partial merge would
+    still let a repo-supplied ``env`` ride inside an operator's server.
+    **``trust_cwd`` defaults to ``True`` as a COMPATIBILITY AFFORDANCE, not
+    because trusting is the safe answer.** The default exists so a developer's
+    own project keeps contributing its ``.mcp.json``, which is a real feature.
+    It is not a judgement that an unspecified directory is safe, and it is why
+    a caller who simply forgets this parameter gets the permissive behaviour.
+
+    **Any ``cwd`` derived from request input MUST pass ``trust_cwd=False``
+    explicitly** — a path off a query string, a repository checkout, a PR
+    worktree, an indexing clone. Registering the directory via
+    :data:`register_untrusted_cwd` covers directories this deployment creates,
+    but it can never cover a path a CALLER names: such a path is by
+    construction absent from that registry, and those are exactly the ones
+    that need denying. There is no fallback behind this argument.
+
+    Cost: ``O(one directory tree)`` — the subtree walk is depth-capped, and is
+    skipped altogether for an untrusted directory.
     """
     if _MCP_CONFIG_DISABLED:
         return {}
+
+    admit_directory_tiers = trust_cwd and not _UNTRUSTED_CWDS.contains(cwd)
 
     # 0. Plugin MCP servers (lowest priority — user/project configs override)
     merged: dict[str, Any] = {}
@@ -3348,11 +4538,18 @@ def get_merged_mcp_config(
     if not isinstance(global_config, dict):
         global_config = {}
 
-    # 2. Discover subtree .mcp.json files (deepest first)
-    subtree_configs = _discover_subtree_mcp_json(cwd)
-
-    # 3. Discover CWD .mcp.json
-    cwd_config = _discover_cwd_mcp_json(cwd)
+    # 2-3. Discover subtree (deepest first) then CWD .mcp.json — both skipped
+    # wholesale for an untrusted directory, per the trust contract above.
+    subtree_configs: list[dict[str, Any]] = []
+    cwd_config: dict[str, Any] | None = None
+    if admit_directory_tiers:
+        subtree_configs = _discover_subtree_mcp_json(cwd)
+        cwd_config = _discover_cwd_mcp_json(cwd)
+    else:
+        _logger.debug(
+            "Untrusted working directory %s: its .mcp.json and any beneath it are excluded",
+            cwd or Path.cwd(),
+        )
 
     # 4. Merge: extra_servers ← global ← subtree (deep→shallow) ← CWD
     merged = _deep_merge(merged, global_config)
@@ -3367,9 +4564,12 @@ def get_merged_mcp_config(
 __all__ = [
     "AppConfig",
     "ConfigCheck",
+    "ConfigWriteAccess",
+    "ConfigWriteError",
     "HookEntry",
     "HooksConfig",
     "ProjectConfig",
+    "UntrustedCwdRegistry",
     "ensure_app_config",
     "ensure_example_configs",
     "get_app_config_path",
@@ -3379,10 +4579,13 @@ __all__ = [
     "get_last_preflight",
     "get_mcp_config_path",
     "get_merged_mcp_config",
+    "is_untrusted_cwd",
+    "register_untrusted_cwd",
     "reset_config",
     "resolve_mewbo_home",
     "set_app_config_path",
     "set_config_override",
     "set_mcp_config_path",
     "start_preflight",
+    "unregister_untrusted_cwd",
 ]

@@ -81,7 +81,7 @@ function Accordion({
       </summary>
       {/* Same `SrcChip` the inline citations and the Sources footer use, so
           every file reference on the page is one clickable, commit-pinned
-          badge — these rows were previously dead text. */}
+          badge. */}
       <ul className="border-t border-[hsl(var(--border))] px-3.5 py-2.5 flex flex-wrap gap-1.5">
         {items.map((it, i) => (
           <li key={i}>

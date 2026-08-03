@@ -15,12 +15,15 @@ from mewbo_graph.wiki.types import (
     Embedding,
     ErrorEvent,
     FinalizingEvent,
+    FingerprintDecision,
+    FingerprintMismatch,
     GraphEdge,
     GraphNodeAdapter,
     H2Block,
     H3Block,
     HeartbeatEvent,
     HrBlock,
+    IndexFingerprint,
     IndexingEventUnion,
     IndexingJob,
     # InlineNode
@@ -97,6 +100,54 @@ def test_project_primary_optional():
     # optional field omitted from dump when None by default — just check no error
 
 
+def _fingerprint(**overrides) -> IndexFingerprint:
+    fields = {
+        "embedding_model": "openai/text-embedding-3-small",
+        "graph_schema_version": "1",
+        "grammar_pack_version": "1.12.2",
+        "resolver_available": True,
+    }
+    fields.update(overrides)
+    return IndexFingerprint(**fields)
+
+
+def test_project_roundtrip_with_fingerprint():
+    fp = _fingerprint()
+    data = {
+        "slug": "x/y",
+        "source": "github",
+        "lang": "Go",
+        "indexedAt": "2026-01-01T00:00:00Z",
+        "pages": 1,
+        "desc": "minimal",
+        "fingerprint": fp.model_dump(by_alias=True),
+    }
+    obj, dumped = roundtrip(Project, data)
+    assert obj.fingerprint == fp
+    assert dumped["fingerprint"]["embeddingModel"] == "openai/text-embedding-3-small"
+
+
+def test_project_roundtrip_without_fingerprint_stays_none():
+    """A record written before this field existed must load, not raise.
+
+    Simulates a pre-migration ``Project`` row: no ``fingerprint`` key at all,
+    not even ``null``. ``extra="forbid"`` only rejects UNKNOWN keys present in
+    the input — a missing declared-optional key is not one, so this must
+    validate cleanly.
+    """
+    data = {
+        "slug": "x/y",
+        "source": "github",
+        "lang": "Go",
+        "indexedAt": "2026-01-01T00:00:00Z",
+        "pages": 1,
+        "desc": "minimal",
+    }
+    assert "fingerprint" not in data
+    obj = Project.model_validate(data)
+    assert obj.fingerprint is None
+
+
 # ── 2. WizardSubmission ────────────────────────────────────────────────────────
 
 def test_wizard_submission_roundtrip():
@@ -165,6 +216,70 @@ def test_indexing_job_invalid_status():
             "totalCount": 0,
             "currentFile": None,
         })
+
+
+def test_indexing_job_roundtrip_with_fingerprint():
+    fp = _fingerprint(resolver_available=False)
+    data = {
+        "jobId": "job-abc-123",
+        "slug": "x/y",
+        "status": "complete",
+        "scannedCount": 5,
+        "totalCount": 5,
+        "currentFile": None,
+        "fingerprint": fp.model_dump(by_alias=True),
+    }
+    obj, dumped = roundtrip(IndexingJob, data)
+    assert obj.fingerprint == fp
+    assert dumped["fingerprint"]["resolverAvailable"] is False
+
+
+# ── 3b. IndexFingerprint / FingerprintMismatch / FingerprintDecision ───────────
+
+
+def test_index_fingerprint_roundtrip():
+    fp = _fingerprint()
+    obj, dumped = roundtrip(IndexFingerprint, fp.model_dump(by_alias=True))
+    assert obj == fp
+    assert dumped["graphSchemaVersion"] == "1"
+
+
+def test_index_fingerprint_embedding_and_grammar_pack_version_are_optional():
+    fp = IndexFingerprint(graph_schema_version="1", resolver_available=False)
+    assert fp.embedding_model is None
+    assert fp.grammar_pack_version is None
+
+
+def test_fingerprint_mismatch_roundtrip():
+    obj, dumped = roundtrip(
+        FingerprintMismatch,
+        {"field": "embedding_model", "expected": "openai/a", "actual": "openai/b"},
+    )
+    assert obj.field == "embedding_model"
+    assert dumped["expected"] == "openai/a"
+
+
+def test_fingerprint_mismatch_field_rejects_unknown_literal():
+    with pytest.raises(pydantic.ValidationError):
+        FingerprintMismatch.model_validate(
+            {"field": "not_a_real_field", "expected": "a", "actual": "b"}
+        )
+
+
+def test_fingerprint_mismatch_expected_actual_accept_bool():
+    """``resolver_available`` mismatches carry real bools, never stringified."""
+    m = FingerprintMismatch(field="resolver_available", expected=False, actual=True)
+    assert m.expected is False
+    assert m.actual is True
+    dumped = m.model_dump(by_alias=True)
+    assert dumped["expected"] is False
+    assert dumped["actual"] is True
+
+
+def test_fingerprint_decision_is_frozen():
+    d = FingerprintDecision(reason="match")
+    with pytest.raises(pydantic.ValidationError):
+        d.reason = "mismatch"  # type: ignore[misc]
 
 
 # ── 4. IndexingEvent discriminated union ───────────────────────────────────────
@@ -471,6 +586,21 @@ def test_embedding_roundtrip():
             "scannedCount": 0, "totalCount": 0, "currentFile": None,
         },
         "extra",
+    ),
+    (
+        IndexFingerprint,
+        {"graphSchemaVersion": "1", "resolverAvailable": True},
+        "extra",
+    ),
+    (
+        FingerprintMismatch,
+        {"field": "embedding_model", "expected": "a", "actual": "b"},
+        "extra",
+    ),
+    (
+        FingerprintDecision,
+        {"reason": "match"},
+        "canReuse",
     ),
 ])
 def test_extra_forbid(model_cls, valid_data, unknown_key):

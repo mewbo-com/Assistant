@@ -4,7 +4,11 @@ import { stubFreshness } from "./wiki-helpers";
 /**
  * Shot wikiLanding (01) — the Agentic Wiki gallery: 12 seeded projects (the
  * richest three — Grove, Assistant, Beacon — anchor the wait) plus the
- * collapsed "Incomplete indexes" band fed by the 16 seeded interrupted jobs.
+ * collapsed "Incomplete indexes" band fed by 13 seeded failed/cancelled jobs
+ * with reusable work (a genuinely `interrupted` job renders the band EMPTY —
+ * see demo/CLAUDE.md's Phase-3 trap table — so these are deliberately NOT
+ * `interrupted`), and the "Indexing now" band fed by exactly one in-flight
+ * (`finalizing`) job.
  *
  * The existing placeholder raster is ~1920x1386; this harness captures at
  * deviceScaleFactor 2 (playwright.demo.config.ts default), so a ~1900x1400
@@ -29,10 +33,19 @@ test("wikiLanding — project gallery + incomplete indexes", async ({ page, demo
   await expect(page.getByText("bearlike/Assistant", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("acme/beacon", { exact: true }).first()).toBeVisible();
 
+  // The "Indexing now" band — exactly ONE finalizing job. A bare presence
+  // check (the header alone) is satisfied whether 1 or 10 jobs are running;
+  // pin the count so a seeding regression that leaves the band non-empty but
+  // wrong-sized still fails.
+  await expect(page.getByRole("heading", { name: "Indexing now" })).toBeVisible();
+  await expect(page.getByText("1 in progress", { exact: true })).toBeVisible();
+
   // The resumable-jobs band — collapsed by default (matches the app's
   // default state); only the header needs to be visible for this shot.
+  // `/\d+ resumable/` (any integer) previously passed at 13, 20, or 2 alike —
+  // pin the exact seeded count.
   await expect(page.getByRole("heading", { name: "Incomplete indexes" })).toBeVisible();
-  await expect(page.getByText(/\d+ resumable/)).toBeVisible();
+  await expect(page.getByText("13 resumable", { exact: true })).toBeVisible();
 
   await demo.capturePage("wikiLanding");
 });

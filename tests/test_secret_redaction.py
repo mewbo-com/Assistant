@@ -10,7 +10,7 @@ import logging
 
 import pytest
 from loguru import logger
-from mewbo_core.secret_redaction import (
+from mewbo_core.contracts.secret_redaction import (
     REDACTION_ERROR_MARKER,
     SecretRedactor,
     install_log_redaction,

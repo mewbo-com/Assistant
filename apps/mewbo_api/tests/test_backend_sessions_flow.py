@@ -18,7 +18,7 @@ import io
 import time
 
 from mewbo_api import backend
-from mewbo_core.session_store import SessionStore
+from mewbo_core.session.session_store import SessionStore
 
 # ---------------------------------------------------------------------------
 # Helpers shared across this module
@@ -55,11 +55,26 @@ def _reset_backend(tmp_path, monkeypatch):
     )
 
 
-def _fake_run_sync(*, session_id: str, user_query: str, should_cancel=None, **_kwargs):
-    """Write events as the real runtime would so the event-polling assertions work."""
-    backend.session_store.append_event(
-        session_id, {"type": "user", "payload": {"text": user_query}}
-    )
+def _fake_run_sync(
+    *,
+    session_id: str,
+    user_query: str,
+    should_cancel=None,
+    user_turn_persisted=False,
+    **_kwargs,
+):
+    """Write events as the real runtime would so the event-polling assertions work.
+
+    ``user_turn_persisted`` is honoured for the same reason
+    ``_fake_run_sync_with_attachments`` honours it: the acceptance seam
+    (``start_async``) writes the turn before handing off the run, so a stub
+    that appends unconditionally reports TWO user events for one turn — a
+    stub-only artefact, not evidence of a real duplicate.
+    """
+    if not user_turn_persisted:
+        backend.session_store.append_event(
+            session_id, {"type": "user", "payload": {"text": user_query}}
+        )
     backend.session_store.append_event(session_id, {"type": "assistant", "payload": {"text": "ok"}})
     backend.session_store.append_event(
         session_id,
@@ -71,18 +86,32 @@ def _fake_run_sync(*, session_id: str, user_query: str, should_cancel=None, **_k
 
 
 def _fake_run_sync_with_attachments(
-    *, session_id: str, user_query: str, attachments=None, should_cancel=None, **_kwargs
+    *,
+    session_id: str,
+    user_query: str,
+    attachments=None,
+    should_cancel=None,
+    user_turn_persisted=False,
+    **_kwargs,
 ):
     """Like ``_fake_run_sync`` but persists ``attachments`` on the ``user``
-    event exactly as the real ``Orchestrator._run_with_session_context`` does
-    (additive — only set when non-empty) — used to prove the events-replay
+    event exactly as the real ``Orchestrator._run_with_session_context_async``
+    does (additive — only set when non-empty) — which proves the events-replay
     half of the attachment-card contract without paying for a real
     ``Orchestrator``/``ToolUseLoop`` build.
+
+    ``user_turn_persisted`` is honoured for the same reason the executor honours
+    it: the acceptance seam (``start_async``) writes the turn before handing off
+    the run, so a stub that appends unconditionally reports TWO user events for
+    one turn — a stub-only artefact that would look exactly like a real duplicate.
+    Under the live path the descriptors below therefore come from production's
+    own writer, which is what makes this the seam test it claims to be.
     """
-    payload: dict = {"text": user_query}
-    if attachments:
-        payload["attachments"] = attachments
-    backend.session_store.append_event(session_id, {"type": "user", "payload": payload})
+    if not user_turn_persisted:
+        payload: dict = {"text": user_query}
+        if attachments:
+            payload["attachments"] = attachments
+        backend.session_store.append_event(session_id, {"type": "user", "payload": payload})
     backend.session_store.append_event(session_id, {"type": "assistant", "payload": {"text": "ok"}})
     backend.session_store.append_event(
         session_id,
@@ -1348,9 +1377,9 @@ class TestSessionRecovery:
     ):
         """A chosen recovery model updates the binding rather than replacing it.
 
-        The override used to be persisted as a model-only context event, which then
-        became the newest one — so every reader that takes the newest payload
-        verbatim saw a session with no tool ceiling, no playbook and no cwd.
+        Persisting the override as a model-only context event would make THAT
+        the newest one, so every reader that takes the newest payload verbatim
+        would see a session with no tool ceiling, no playbook and no cwd.
         """
         _reset_backend(tmp_path, monkeypatch)
         sid = backend.session_store.create_session()
@@ -1381,10 +1410,24 @@ class TestSessionRecovery:
         assert spec.skill_instructions == "PLAYBOOK"
 
 
-class _FakeJob:
-    def __init__(self, status: str = "interrupted", slug: str = "org/repo") -> None:
-        self.status = status
-        self.slug = slug
+def _FakeJob(status: str = "interrupted", slug: str = "org/repo"):
+    """A REAL ``IndexingJob`` — the dispatch asks it ``is_resumable`` itself.
+
+    Deliberately not a hand-rolled stand-in with its own status set: "can this
+    be resumed" is now the model's own question, and a double that re-declared
+    the answer would go on passing after the real predicate changed underneath
+    it — the exact drift that having four private copies of these sets caused.
+    """
+    from mewbo_graph.wiki.types import IndexingJob
+
+    return IndexingJob(
+        job_id="job-fake",
+        slug=slug,
+        status=status,
+        scanned_count=0,
+        total_count=0,
+        current_file=None,
+    )
 
 
 class _FakeWikiStore:
@@ -1419,10 +1462,6 @@ class TestSessionRecoveryWikiDispatch:
         called = {}
 
         class FakeWikiResume:
-            @staticmethod
-            def is_resumable(j):
-                return j.status not in {"complete", "cancelled"}
-
             @classmethod
             def resume(
                 cls, store, runtime, job_id, *,
@@ -1472,10 +1511,6 @@ class TestSessionRecoveryWikiDispatch:
         called = {}
 
         class FakeWikiResume:
-            @staticmethod
-            def is_resumable(j):
-                return j.status not in {"complete", "cancelled"}
-
             @classmethod
             def resume(
                 cls, store, runtime, job_id, *,
@@ -1510,10 +1545,6 @@ class TestSessionRecoveryWikiDispatch:
         import mewbo_api.wiki.resume as resume_mod
 
         class FakeWikiResume:
-            @staticmethod
-            def is_resumable(j):
-                return j.status not in {"complete", "cancelled"}
-
             @classmethod
             def resume(cls, *a, **k):  # pragma: no cover - must not run
                 raise AssertionError("should not resume a complete job")

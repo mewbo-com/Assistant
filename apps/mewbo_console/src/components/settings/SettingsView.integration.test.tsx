@@ -35,6 +35,7 @@ import type { ReactElement } from "react";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { SettingsView } from "../SettingsView";
+import { PANE_COUNTS } from "./panes";
 import * as client from "../../api/client";
 
 // --- the REAL backend-generated schema -------------------------------------
@@ -124,13 +125,43 @@ function render(ui: ReactElement) {
 // document would otherwise stack multiple SettingsView shells).
 afterEach(cleanup);
 
-// Pre-warm the lazily-imported ApiKeysView module (same path SettingsView's
-// React.lazy uses) so the Security facet's Suspense boundary resolves from the
-// module cache instead of racing a dynamic chunk transform. That race is what
-// made the default 1 s findBy time out on slow CI runners — the component
-// itself renders its "API Keys" heading unconditionally.
+// Pre-warm every lazily-imported pane this file's tests actually mount (same
+// paths SettingsView's React.lazy uses) so each Suspense boundary resolves
+// from the module cache instead of racing a dynamic chunk transform. That
+// race is what made the default 1 s findBy time out on slow CI runners — the
+// components themselves render their headings unconditionally. `ApiKeysView`
+// was the original single entry here; `SecretsSummary` (Security facet),
+// `PluginsPane` (Plugins facet) and `ProjectsPane` (Workspace facet) never
+// were, which stayed marginal until the Repositories facet's own, heavier
+// pane landed elsewhere in `panes.ts` and tipped the settings folder's
+// aggregate transform load over the timeout under full-suite parallel load.
+// EVERY pane in `FACET_PANES`, not a hand-picked subset. The first test below
+// walks every facet, so it mounts every registered pane; warming four of ten
+// left the rest racing their own cold transform, which is why this file passed
+// alone and failed under full-suite load. Adding an unrelated test file
+// anywhere in the repo was enough to tip it, so the symptom pointed at whatever
+// landed last rather than at the gap here.
+const WARMED_PANES = [
+  import("./panes/SystemInstructionsPane"),
+  import("./panes/PluginsPane"),
+  import("./panes/TriggersPane"),
+  import("../apps/AppsPane"),
+  import("./panes/SecretsSummary"),
+  import("../ApiKeysView"),
+  import("./panes/IdentityAccessPane"),
+  import("./panes/RepositoriesPane"),
+  import("../GitCredentialsView"),
+  import("./panes/ProjectsPane"),
+];
+
 beforeAll(async () => {
-  await import("../ApiKeysView");
+  // A list mirroring a registry goes stale silently, and the failure it causes
+  // is a timeout in a DIFFERENT test — so tie the two together and let a newly
+  // registered pane fail HERE, naming the real problem, instead of re-opening
+  // the flake somewhere a reader will blame on load.
+  const registered = Object.values(PANE_COUNTS).reduce<number>((n, c) => n + (c ?? 0), 0);
+  expect(WARMED_PANES).toHaveLength(registered);
+  await Promise.all(WARMED_PANES);
 });
 
 beforeEach(() => {

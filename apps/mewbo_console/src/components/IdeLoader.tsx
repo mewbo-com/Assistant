@@ -95,7 +95,7 @@ export function IdeLoader({ sessionId }: IdeLoaderProps) {
     };
 
     const run = async () => {
-      // Phase 1: create (or reconnect).
+      // Create, or reconnect to an existing container.
       let instance: IdeInstance;
       try {
         instance = await createIde(sessionId, controller.signal);
@@ -120,7 +120,7 @@ export function IdeLoader({ sessionId }: IdeLoaderProps) {
         return;
       }
 
-      // Phase 2: poll until ready or timeout.
+      // Poll until ready or timeout.
       setPhase("polling");
       const deadline = Date.now() + POLL_TIMEOUT_MS;
       while (!cancelled) {

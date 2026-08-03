@@ -100,9 +100,9 @@ class CatalogIngestor:
 
         for doc in documents:
             # One content-addressed id keys BOTH the page and the node so they
-            # can never desync. Slugifying ``doc.id`` (the old page id) collided
-            # distinct ids ("foo bar" vs "foo-bar") to the same page → silent
-            # overwrite while the SHA-1 node id stayed distinct.
+            # can never desync. Slugifying ``doc.id`` instead would collide
+            # distinct ids ("foo bar" vs "foo-bar") onto the same page → silent
+            # overwrite, while the SHA-1 node id stayed distinct.
             doc_id = self._doc_id(slug, doc.id)
             pages.append(self._build_page(doc, doc_id))
             node = self._build_node(slug, doc, doc_id)
@@ -132,7 +132,9 @@ class CatalogIngestor:
         # same slug was ever git-indexed, over-counting the catalog size.
         doc_total = sum(
             1
-            for n in self._store.query_graph(slug, node_type=_CATALOG_NODE_TYPE)
+            for n in self._store.query_graph(
+                slug, scope=self._store.live_scope(slug), node_type=_CATALOG_NODE_TYPE
+            )
             if n.file.startswith(_CATALOG_FILE_PREFIX)
         )
         self._upsert_project(slug, total_pages=page_total, landing_id=landing_id)

@@ -10,7 +10,7 @@ regressing the latency path (draft p95 TTFT < 1.5s).
 :class:`RealtimeSessionRecorder` is the one atomic class both paths use to make
 that true. It owns the two halves of "session-full but fast":
 
-* **In-process trace.** It derives :class:`~mewbo_core.session_provenance.TraceProvenance`
+* **In-process trace.** It derives :class:`~mewbo_core.session.session_provenance.TraceProvenance`
   from the tags + context it is ABOUT to write (no store read — the session
   doesn't exist yet) and hands the route a ``langfuse_session_context`` opened on
   a pre-minted ``session_id``. The LLM call runs inside that context, so the
@@ -35,7 +35,7 @@ from typing import Any
 
 from mewbo_core.common import get_logger
 from mewbo_core.components import langfuse_session_context
-from mewbo_core.session_provenance import TraceProvenance
+from mewbo_core.session.session_provenance import TraceProvenance
 
 logging = get_logger(name="api.realtime.recorder")
 

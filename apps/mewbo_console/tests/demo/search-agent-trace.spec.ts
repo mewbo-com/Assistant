@@ -4,9 +4,14 @@ import { OSS_REPO_SCOUT_WS, RUN_OSS_AGENTS, searchRunHref } from "./search-helpe
 /**
  * Shot searchAgentTrace (04) — the Agent trace drawer (`TraceDrawer`, a
  * shadcn `Sheet` / Radix Dialog) opened over the run-oss-agents results
- * page, showing its 3 per-probe lanes (including the `scg-search`
- * coordinator lane — the root agent's own tool activity, `source_id === ""`,
- * per `components/agentic_search/CLAUDE.md` "Results-page top band").
+ * page, showing its 3 per-probe lanes (including the coordinator lane — the
+ * root agent's own tool activity, `source_id === ""`, per
+ * `components/agentic_search/CLAUDE.md` "Results-page top band"). Every
+ * lane's `name` field is `scg-search` (the source the run fanned across);
+ * `TraceDrawer.tsx:111` renders `agent.kind ?? agent.name`, and every seeded
+ * lane HAS a `kind` (`coordinator` for this one, `scg-path-probe` for the
+ * other two), so `scg-search` itself never appears anywhere in the UI —
+ * don't anchor on it.
  *
  * Same GET-snapshot-only deep-link contract as `search-results.spec.ts` — no
  * `page.route` stub needed; we wait for the terminal state before opening

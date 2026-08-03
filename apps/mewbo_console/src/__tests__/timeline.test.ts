@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { EventRecord } from "../types";
-import { buildTimeline, getActiveStreamText, getActiveTurn, getLastContext, turnHasWidget } from "../utils/timeline";
+import { buildTimeline, getActiveStreamText, getActiveTurn, getLastContext, isRunAccepted, turnHasWidget } from "../utils/timeline";
 import { buildLogs } from "../utils/logs";
 
 // Minimal helper — only fields the timeline builder reads.
@@ -888,6 +888,102 @@ describe("buildTimeline — widget_ready events render inline in the turn", () =
   });
 });
 
+describe("buildTimeline — generative_ui events render inline in the turn", () => {
+  const spec = { root: [{ component: "Text", props: { value: "hi" } }] };
+
+  test("generative_ui inside an active turn produces an entry between user and assistant", () => {
+    const entries = buildTimeline([
+      ev("2026-07-20T08:00:00Z", "user", { text: "show me the deploys" }),
+      ev("2026-07-20T08:00:05Z", "generative_ui", {
+        ui_id: "gui-1a2b3c4d",
+        session_id: "s1",
+        spec,
+        alt_text: "hi",
+        summary: "deploys",
+      }),
+      ev("2026-07-20T08:00:10Z", "assistant", { text: "done" }),
+    ]);
+    expect(entries.map((e) => e.role)).toEqual(["user", "generative_ui", "assistant"]);
+    const card = entries[1];
+    expect(card.generativeUi?.ui_id).toBe("gui-1a2b3c4d");
+    expect(card.generativeUi?.spec).toEqual(spec);
+    expect(card.generativeUi?.alt_text).toBe("hi");
+    expect(card.turnId).toBe("turn-1");
+  });
+
+  test("generative_ui outside an open turn is ignored (no orphan entry)", () => {
+    // The parse site sits BELOW the open-turn gate, like widget_ready: a
+    // generated card is emitted mid-run, so one with no turn open is an
+    // orphan rather than a legitimate between-turns event.
+    const entries = buildTimeline([
+      ev("2026-07-20T08:00:00Z", "generative_ui", {
+        ui_id: "gui-1a2b3c4d",
+        session_id: "s1",
+        spec,
+        alt_text: "hi",
+      }),
+    ]);
+    expect(entries).toEqual([]);
+  });
+
+  test("a re-emitted ui_id upserts in place instead of stacking a second card", () => {
+    const entries = buildTimeline([
+      ev("2026-07-20T08:00:00Z", "user", { text: "watch the build" }),
+      ev("2026-07-20T08:00:05Z", "generative_ui", {
+        ui_id: "gui-1a2b3c4d",
+        session_id: "s1",
+        spec,
+        alt_text: "running",
+      }),
+      ev("2026-07-20T08:00:09Z", "generative_ui", {
+        ui_id: "gui-1a2b3c4d",
+        session_id: "s1",
+        spec: { root: [{ component: "Text", props: { value: "bye" } }] },
+        alt_text: "passed",
+      }),
+    ]);
+    const cards = entries.filter((e) => e.role === "generative_ui");
+    expect(cards).toHaveLength(1);
+    expect(cards[0].generativeUi?.alt_text).toBe("passed");
+  });
+
+  test("distinct ui_ids in one turn each render", () => {
+    const entries = buildTimeline([
+      ev("2026-07-20T08:00:00Z", "user", { text: "two views" }),
+      ev("2026-07-20T08:00:05Z", "generative_ui", {
+        ui_id: "gui-first000",
+        session_id: "s1",
+        spec,
+        alt_text: "a",
+      }),
+      ev("2026-07-20T08:00:06Z", "generative_ui", {
+        ui_id: "gui-second00",
+        session_id: "s1",
+        spec,
+        alt_text: "b",
+      }),
+    ]);
+    const cards = entries.filter((e) => e.role === "generative_ui");
+    expect(cards.map((e) => e.generativeUi?.ui_id)).toEqual(["gui-first000", "gui-second00"]);
+  });
+
+  test("a payload missing ui_id or a root array is dropped", () => {
+    const entries = buildTimeline([
+      ev("2026-07-20T08:00:00Z", "user", { text: "go" }),
+      // No ui_id — there is nothing to upsert on.
+      ev("2026-07-20T08:00:05Z", "generative_ui", { session_id: "s1", spec, alt_text: "x" }),
+      // `root` is a single node, not the array the wire always carries.
+      ev("2026-07-20T08:00:06Z", "generative_ui", {
+        ui_id: "gui-bad00000",
+        session_id: "s1",
+        spec: { root: { component: "Text" } },
+        alt_text: "x",
+      }),
+    ]);
+    expect(entries.filter((e) => e.role === "generative_ui")).toEqual([]);
+  });
+});
+
 describe("buildTimeline — todos events render as an in-turn checklist", () => {
   test("todos event inside a turn produces one todos entry between user and assistant", () => {
     const entries = buildTimeline([
@@ -998,8 +1094,99 @@ describe("buildTimeline — ask-user questions render as an in-turn card", () =>
     expect(entries.filter((e) => e.role === "question")).toHaveLength(1);
   });
 
-  test("declined / interrupted / cancelled settle status with no answers", () => {
-    for (const outcome of ["declined", "interrupted", "cancelled"] as const) {
+  test("the optional timeout + notes-placeholder knobs ride the pending card", () => {
+    const entries = buildTimeline([
+      ev("2026-07-18T08:00:00Z", "user", { text: "help" }),
+      ev("2026-07-18T08:00:05Z", "user_question", {
+        call_id: "c1",
+        call_token: "tok",
+        questions: [q("Scope", "How far?")],
+        timeout_seconds: 120,
+        notes_placeholder: "Anything else I should know?",
+      }),
+    ]);
+    const question = entries.find((e) => e.role === "question")?.question;
+    expect(question?.timeoutSeconds).toBe(120);
+    expect(question?.notesPlaceholder).toBe("Anything else I should know?");
+  });
+
+  test("absent knobs stay undefined rather than becoming falsy values", () => {
+    const entries = buildTimeline([
+      ev("2026-07-18T08:00:00Z", "user", { text: "help" }),
+      ev("2026-07-18T08:00:05Z", "user_question", {
+        call_id: "c1",
+        call_token: "tok",
+        questions: [q("Scope", "How far?")],
+        timeout_seconds: null,
+        notes_placeholder: null,
+      }),
+    ]);
+    const question = entries.find((e) => e.role === "question")?.question;
+    expect(question?.timeoutSeconds).toBeUndefined();
+    expect(question?.notesPlaceholder).toBeUndefined();
+  });
+
+  test("an answered fold carries the notes and where the answer landed", () => {
+    const entries = buildTimeline([
+      ev("2026-07-18T08:00:00Z", "user", { text: "help" }),
+      ev("2026-07-18T08:00:05Z", "user_question", {
+        call_id: "c1",
+        call_token: "tok",
+        questions: [q("Scope", "How far?")],
+      }),
+      ev("2026-07-18T08:00:09Z", "user_question_answered", {
+        call_id: "c1",
+        outcome: "answered",
+        answered_via: "console",
+        answers: [{ selected_indexes: null, text: "this file" }],
+        notes: "prefer the smaller diff",
+        delivery: "run",
+      }),
+    ]);
+    const question = entries.find((e) => e.role === "question")?.question;
+    expect(question?.notes).toBe("prefer the smaller diff");
+    expect(question?.delivery).toBe("run");
+  });
+
+  test("a late answer re-folds a timed-out card to answered, keeping its questions", () => {
+    // The run stopping is not the question resolving: the same call_id can be
+    // settled twice — timed_out first, then answered when the user comes back.
+    const entries = buildTimeline([
+      ev("2026-07-18T08:00:00Z", "user", { text: "help" }),
+      ev("2026-07-18T08:00:05Z", "user_question", {
+        call_id: "c1",
+        call_token: "tok",
+        questions: [q("Scope", "How far?")],
+        notes_placeholder: "Anything else?",
+      }),
+      ev("2026-07-18T08:02:05Z", "user_question_answered", {
+        call_id: "c1",
+        outcome: "timed_out",
+        answered_via: null,
+        answers: null,
+      }),
+      ev("2026-07-18T08:30:00Z", "user_question_answered", {
+        call_id: "c1",
+        outcome: "answered",
+        answered_via: "console",
+        answers: [{ selected_indexes: null, text: "module wide" }],
+        delivery: "message",
+      }),
+    ]);
+    const question = entries.find((e) => e.role === "question")?.question;
+    expect(question?.status).toBe("answered");
+    expect(question?.answers).toEqual([{ selected_indexes: null, text: "module wide" }]);
+    expect(question?.delivery).toBe("message");
+    // Announce-time fields survive both folds — the card must still know what
+    // it asked and that it offered a notes box.
+    expect(question?.questions).toHaveLength(1);
+    expect(question?.callToken).toBe("tok");
+    expect(question?.notesPlaceholder).toBe("Anything else?");
+    expect(entries.filter((e) => e.role === "question")).toHaveLength(1);
+  });
+
+  test("timed_out / declined / interrupted / cancelled settle status with no answers", () => {
+    for (const outcome of ["timed_out", "declined", "interrupted", "cancelled"] as const) {
       const entries = buildTimeline([
         ev("2026-07-18T08:00:00Z", "user", { text: "help" }),
         ev("2026-07-18T08:00:05Z", "user_question", {
@@ -1012,11 +1199,14 @@ describe("buildTimeline — ask-user questions render as an in-turn card", () =>
           outcome,
           answered_via: null,
           answers: null,
+          notes: "stray",
         }),
       ]);
       const question = entries.find((e) => e.role === "question")?.question;
       expect(question?.status).toBe(outcome);
       expect(question?.answers).toBeUndefined();
+      // Notes belong to an answer; a run-stopped outcome has none to show.
+      expect(question?.notes).toBeUndefined();
     }
   });
 
@@ -1333,5 +1523,289 @@ describe("getLastContext — most-recent context event wins, never merged", () =
     const fallback = { project: "X" };
     expect(getLastContext(events, fallback)).toBe(fallback);
     expect(getLastContext([], undefined)).toBeUndefined();
+  });
+});
+
+describe("getLastContext — a project switch moves the effective context", () => {
+  // The pinned wire contract for auto-select: a switch is durable as a plain
+  // `context` event carrying the new project and cwd. No new event type, so no
+  // new plumbing — but "no plumbing needed" is a CLAIM, and these tests are the
+  // check on it rather than the assumption.
+  const switched: EventRecord[] = [
+    ev("2026-07-01T10:00:00Z", "context", { project: "auto", model: "opus" }),
+    ev("2026-07-01T10:00:05Z", "user", { text: "fix the flaky test in beacon" }),
+    ev("2026-07-01T10:00:20Z", "tool_result", {
+      tool_id: "switch_project",
+      tool_input: { project: "managed:p1" },
+      result: JSON.stringify({ project: "managed:p1", cwd: "/srv/beacon" }),
+    }),
+    ev("2026-07-01T10:00:21Z", "context", {
+      project: "managed:p1",
+      cwd: "/srv/beacon",
+      model: "opus",
+    }),
+    ev("2026-07-01T10:00:40Z", "assistant", { text: "Fixed." }),
+  ];
+
+  test("the effective project follows the switch", () => {
+    expect(getLastContext(switched)?.project).toBe("managed:p1");
+  });
+
+  test("a second switch wins over the first — a task can span several projects", () => {
+    const again: EventRecord[] = [
+      ...switched,
+      ev("2026-07-01T10:01:00Z", "context", { project: "relay", cwd: "/srv/relay" }),
+    ];
+    expect(getLastContext(again)?.project).toBe("relay");
+  });
+
+  test("⚠️ a two-key switch event WIPES every other context field", () => {
+    // Not a bug in this reader — `getLastContext` returns the most recent
+    // payload VERBATIM and never merges, mirroring the backend's
+    // `_load_last_context`. It is a constraint ON THE WRITER, and
+    // `tool_use_loop.rebind_workspace` honours it deliberately: it carries the
+    // previous payload forward. A two-key `{project, cwd}` patch would BLANK
+    // `model`, `fallback_models`, `mcp_tools`, `skill` and `app_id` for every
+    // console consumer, taking the model pill and the recovery model default
+    // with them. Pinned from this side so a regression to a patch fails here,
+    // naming the cause, instead of surfacing as "the model pill went blank
+    // after the agent switched project".
+    const twoKeyPatch: EventRecord[] = [
+      ev("2026-07-01T10:00:00Z", "context", { project: "auto", model: "opus" }),
+      ev("2026-07-01T10:00:21Z", "context", { project: "managed:p1", cwd: "/srv/beacon" }),
+    ];
+    expect(getLastContext(twoKeyPatch)?.model).toBeUndefined();
+    // The merged shape the writer is expected to emit keeps it.
+    expect(getLastContext(switched)?.model).toBe("opus");
+  });
+});
+
+describe("buildTimeline — a project switch is legible in the conversation", () => {
+  const base = (payload: Record<string, unknown>): EventRecord[] => [
+    ev("2026-07-01T10:00:00Z", "user", { text: "fix the flaky test" }),
+    ev("2026-07-01T10:00:20Z", "tool_result", payload),
+    ev("2026-07-01T10:00:40Z", "assistant", { text: "Fixed." }),
+  ];
+
+  // The REAL result shape, read off `project_switch.py:SwitchProjectTool._result`
+  // rather than assumed: fixed keys for a renderer plus the model's sentence as
+  // one `summary` field, every key always present and null when unknown.
+  const SWITCHED = {
+    tool_id: "switch_project",
+    tool_input: { project: "managed:p1" },
+    result: JSON.stringify({
+      project: "managed:p1",
+      name: "beacon",
+      kind: "managed",
+      cwd: "/srv/beacon",
+      repo: "git.example.com/acme/beacon",
+      branch: "main",
+      description: "",
+      previous_project: "relay",
+      previous_cwd: "/srv/relay",
+      project_instructions_found: true,
+      bound_tools: 14,
+      skills: 3,
+      summary: "Switched to project 'managed:p1' (managed).",
+    }),
+  };
+
+  test("renders its own entry rather than living inside the turn's tool group", () => {
+    const entries = buildTimeline(base(SWITCHED));
+    expect(entries.map((e) => e.role)).toEqual(["user", "project_switch", "assistant"]);
+  });
+
+  test("carries the resolved facts, normalized once for both surfaces", () => {
+    const entry = buildTimeline(base(SWITCHED)).find((e) => e.role === "project_switch");
+    expect(entry?.projectSwitch).toEqual({
+      project: "managed:p1",
+      name: "beacon",
+      cwd: "/srv/beacon",
+      repo: "git.example.com/acme/beacon",
+      branch: "main",
+      previous: "relay",
+      previousCwd: "/srv/relay",
+      projectInstructionsFound: true,
+    });
+    // The anchor every turn action keys off — an entry with no `ts` is not
+    // addressable (see the `plan` role, which deliberately carries none).
+    expect(entry?.ts).toBe("2026-07-01T10:00:20Z");
+  });
+
+  test("the raw event STAYS in the turn, so the trace panel still renders it", () => {
+    // This entry is a second PLACEMENT of one parse, not a diversion of the
+    // event away from the workspace panel.
+    const turn = buildTimeline(base(SWITCHED)).find((e) => e.role === "assistant")?.turn;
+    expect(turn?.events.some((e) => e.payload?.tool_id === "switch_project")).toBe(true);
+  });
+
+  test("a REFUSED switch renders nothing — the session did not move", () => {
+    const failed = base({
+      tool_id: "switch_project",
+      tool_input: { project: "ghost" },
+      success: false,
+      error: "Project 'ghost' is not known.",
+    });
+    expect(buildTimeline(failed).map((e) => e.role)).toEqual(["user", "assistant"]);
+  });
+
+  test("the tool's REAL error envelope is a refusal, and it is not JSON", () => {
+    // `_error_envelope` writes the shared envelope as a Python `str(dict)` repr,
+    // NOT `json.dumps` — a load-bearing asymmetry, since the loop's recognizer
+    // is `ast.literal_eval`. So it does not `JSON.parse`, and no amount of
+    // reading an `error` key out of the parsed result would catch it. What
+    // catches it is requiring `project` from the RESULT: the repr yields
+    // nothing, and the requested key stays confined to `tool_input`.
+    const enveloped = base({
+      tool_id: "switch_project",
+      tool_input: { project: "ghost" },
+      result: "{'error': {'code': 'not_found', 'message': 'no such project'}}",
+    });
+    expect(buildTimeline(enveloped).map((e) => e.role)).toEqual(["user", "assistant"]);
+  });
+
+  test("the tool INPUT is deliberately not a fallback for the result", () => {
+    // The input carries the requested project whether or not the switch
+    // succeeded, so falling back to it is precisely the path that would turn a
+    // refusal into a card claiming the session moved.
+    const unparseable = base({
+      tool_id: "switch_project",
+      tool_input: { project: "relay" },
+      result: "Switched.",
+    });
+    expect(buildTimeline(unparseable).map((e) => e.role)).toEqual(["user", "assistant"]);
+  });
+
+  test("names no project at all ⇒ no card, rather than a switch to nowhere", () => {
+    const nameless = base({ tool_id: "switch_project", result: "ok" });
+    expect(buildTimeline(nameless).map((e) => e.role)).toEqual(["user", "assistant"]);
+  });
+
+  test("a session's FIRST switch reports no previous KEY, only a directory", () => {
+    // `previous_project` is null before the first switch — the loop is handed a
+    // directory at construction, never a catalog key. The move must still read
+    // as a move, so the directory is what carries it.
+    const first = base({
+      tool_id: "switch_project",
+      result: JSON.stringify({
+        project: "relay",
+        name: "relay",
+        cwd: "/srv/relay",
+        previous_project: null,
+        previous_cwd: "/tmp/mewbo-scratch",
+      }),
+    });
+    const entry = buildTimeline(first).find((e) => e.role === "project_switch");
+    expect(entry?.projectSwitch?.previous).toBeUndefined();
+    expect(entry?.projectSwitch?.previousCwd).toBe("/tmp/mewbo-scratch");
+  });
+
+  test("drops a name that merely repeats the key", () => {
+    const same = base({
+      tool_id: "switch_project",
+      result: JSON.stringify({ project: "relay", name: "relay", cwd: "/srv/relay" }),
+    });
+    const entry = buildTimeline(same).find((e) => e.role === "project_switch");
+    expect(entry?.projectSwitch).toEqual({ project: "relay", cwd: "/srv/relay" });
+  });
+
+  test("several switches in one turn each get their own entry, in order", () => {
+    // A task can span projects, so the transcript has to show every move; a
+    // per-turn upsert (the `todos` idiom) would collapse them into the last one
+    // and hide where the middle of the turn actually ran.
+    const twice: EventRecord[] = [
+      ev("2026-07-01T10:00:00Z", "user", { text: "port the fix to both repos" }),
+      ev("2026-07-01T10:00:20Z", "tool_result", {
+        tool_id: "switch_project",
+        result: JSON.stringify({ project: "managed:p1", name: "beacon", cwd: "/srv/beacon" }),
+      }),
+      ev("2026-07-01T10:02:00Z", "tool_result", {
+        tool_id: "switch_project",
+        result: JSON.stringify({
+          project: "relay",
+          cwd: "/srv/relay",
+          previous_project: "managed:p1",
+        }),
+      }),
+      ev("2026-07-01T10:03:00Z", "assistant", { text: "Ported." }),
+    ];
+    const switches = buildTimeline(twice).filter((e) => e.role === "project_switch");
+    expect(switches.map((e) => e.projectSwitch?.project)).toEqual([
+      "managed:p1",
+      "relay",
+    ]);
+  });
+
+  test("the trace panel builds the SAME parse from the same event", () => {
+    // One parser, two surfaces — the `parseRunFailure` precedent. If these ever
+    // disagree, the conversation and the workspace panel are describing the
+    // same switch differently.
+    const logs = buildLogs(base(SWITCHED));
+    const row = logs.find((l) => l.type === "project_switch");
+    const entry = buildTimeline(base(SWITCHED)).find((e) => e.role === "project_switch");
+    expect(row && row.type === "project_switch" ? row.projectSwitch : null).toEqual(
+      entry?.projectSwitch,
+    );
+  });
+});
+
+describe("isRunAccepted — the accepted-but-not-yet-started window", () => {
+  // The engine emits `run_accepted` before the orchestrator's synchronous
+  // setup, so this marker is the ONLY thing in the transcript for that whole
+  // window: no `user` event, no open turn, no timeline row. Without a consumer
+  // the session page has nothing to paint.
+  const ACCEPTED = ev("2026-07-01T10:00:00Z", "run_accepted", {
+    session_id: "s1",
+    run_id: "s1:r1",
+  });
+
+  test("a lone acceptance marker is a starting run, and yields no timeline rows", () => {
+    expect(isRunAccepted([ACCEPTED])).toBe(true);
+    // The reason the state is needed at all: nothing else renders here.
+    expect(buildTimeline([ACCEPTED])).toEqual([]);
+  });
+
+  test("an empty transcript is not a starting run", () => {
+    expect(isRunAccepted([])).toBe(false);
+  });
+
+  test("engine chatter before the turn opens keeps it starting", () => {
+    // None of these mints a conversation row either, so the beat must survive
+    // them — otherwise the pane goes blank again the moment one arrives.
+    expect(
+      isRunAccepted([
+        ACCEPTED,
+        ev("2026-07-01T10:00:01Z", "context", { model: "gpt-5" }),
+        ev("2026-07-01T10:00:02Z", "llm_call_start", { depth: 0 }),
+      ]),
+    ).toBe(true);
+  });
+
+  test("the user event ends it — the pending beat owns the readout from there", () => {
+    expect(
+      isRunAccepted([ACCEPTED, ev("2026-07-01T10:00:03Z", "user", { text: "hi" })]),
+    ).toBe(false);
+  });
+
+  test("a settled turn is not a starting run", () => {
+    expect(
+      isRunAccepted([
+        ACCEPTED,
+        ev("2026-07-01T10:00:03Z", "user", { text: "hi" }),
+        ev("2026-07-01T10:00:04Z", "assistant", { text: "there" }),
+        ev("2026-07-01T10:00:05Z", "completion", { done: true, done_reason: "completed" }),
+      ]),
+    ).toBe(false);
+  });
+
+  test("a second run's acceptance is seen past a settled first turn", () => {
+    expect(
+      isRunAccepted([
+        ev("2026-07-01T10:00:00Z", "user", { text: "one" }),
+        ev("2026-07-01T10:00:01Z", "assistant", { text: "done" }),
+        ev("2026-07-01T10:00:02Z", "completion", { done: true, done_reason: "completed" }),
+        ev("2026-07-01T10:01:00Z", "run_accepted", { session_id: "s1", run_id: "s1:r2" }),
+      ]),
+    ).toBe(true);
   });
 });

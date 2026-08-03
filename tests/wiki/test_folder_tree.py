@@ -135,14 +135,43 @@ def test_symbol_first_contains_edge_wins_deterministically() -> None:
     assert tree.parent_of("s1") == "f1"
 
 
-def test_external_nodes_are_parentless() -> None:
-    files = [_file("f1", "a/mod.py")]
-    ext = make_graph_node(
-        slug=SLUG, node_id="ext1", type="External", name="os", file="", range=(0, 0)
+def _external(node_id: str, name: str):
+    return make_graph_node(
+        slug=SLUG, node_id=node_id, type="External", name=name, file="", range=(0, 0)
     )
-    tree = FolderTree.build(SLUG, files, [], external_nodes=[ext])
-    assert tree.parent_of("ext1") is None
+
+
+def test_external_nodes_fold_under_one_synthetic_bucket() -> None:
+    """Externals hang off a bucket Folder, NOT off null.
+
+    A null parent exempted every External node from the expand/collapse rule
+    that governs all real code, so the least interesting layer was the one that
+    always rendered. The bucket is a top-level Folder like any other, so the
+    same rule now folds it.
+    """
+    files = [_file("f1", "a/mod.py")]
+    tree = FolderTree.build(
+        SLUG, files, [], external_nodes=[_external("ext1", "os"), _external("ext2", "sys")]
+    )
+
+    bucket = tree.parent_of("ext1")
+    assert bucket == "folder:__external__"
+    assert tree.parent_of("ext2") == bucket
+    # One bucket for all of them, minted as a real Folder node…
+    bucket_nodes = [n for n in tree.folder_nodes if n.node_id == bucket]
+    assert len(bucket_nodes) == 1
+    assert bucket_nodes[0].name == "External"
+    # …sitting at the top level, exactly where a depth-1 real folder sits.
+    assert tree.parent_of(bucket) is None
+    # Externals carry no folderPath of their own (they are not on disk).
     assert tree.folder_path_of("ext1") is None
+
+
+def test_no_external_bucket_is_minted_without_externals() -> None:
+    """An empty external set must not leave a dangling bucket node behind."""
+    tree = FolderTree.build(SLUG, [_file("f1", "a/mod.py")], [])
+    assert all(n.node_id != "folder:__external__" for n in tree.folder_nodes)
+    assert "folder:__external__" not in tree.parents
 
 
 def test_file_contains_edge_does_not_override_directory_parent() -> None:
@@ -159,3 +188,24 @@ def test_empty_input_yields_empty_tree() -> None:
     assert tree.folder_nodes == ()
     assert tree.folder_edges == ()
     assert tree.parents == {}
+
+
+def test_persisted_external_nodes_also_fold_under_the_bucket() -> None:
+    """An External arriving with the AST nodes folds too, not just a synthesized one.
+
+    The resolver PERSISTS one External node per out-of-repo symbol, so it reaches
+    ``build`` through ``file_nodes`` rather than ``external_nodes``. Folding only
+    the synthesized population left every persisted one parentless — the exact
+    exemption the bucket exists to close, and invisible until symbol resolution
+    actually works and begins minting them.
+    """
+    files = [_file("f1", "src/app.py")]
+    persisted = _external("ext-persisted", "builtins.str")
+    synthesized = _external("ext-synth", "os")
+
+    tree = FolderTree.build(
+        SLUG, [*files, persisted], [], external_nodes=[synthesized]
+    )
+
+    assert tree.parent_of("ext-persisted") == "folder:__external__"
+    assert tree.parent_of("ext-synth") == "folder:__external__"

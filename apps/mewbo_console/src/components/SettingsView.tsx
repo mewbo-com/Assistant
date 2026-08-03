@@ -62,10 +62,18 @@ export function SettingsView() {
     schema,
     config,
     secrets,
+    storage,
     loading,
     error,
+    saveError,
     savePatch,
   } = useConfig();
+
+  // Absent `storage` (an old backend, or the GET simply hasn't landed yet)
+  // reads as writable — only an explicit `false` blocks Save. Computed once
+  // here and threaded to every `SettingsSection` so the gate can't drift
+  // per-facet; see the "shared container, not per-facet" rule this exists for.
+  const writable = storage ? storage.writable : true;
 
   const model = useMemo(
     () => (schema && config ? new SettingsModel(schema, config) : null),
@@ -76,20 +84,16 @@ export function SettingsView() {
   // section actually edited — a section absent from `formState` reads
   // straight from `config` via `sectionValue` below, live, every render.
   //
-  // This used to be pre-seeded from `config` by a `useEffect` that copied
-  // every section in once config arrived. That left a real window on a
-  // section's FIRST render, before that effect could run: `SettingsSection`
-  // received a bare `{}` for `value`, RJSF's `<Form>` computed ITS OWN schema
-  // defaults for any array field the section has (an empty `list[str]`
-  // defaults to `[]`), and fired `onChange` with that computed shape — which
-  // looks exactly like a real edit and got written into `formState`,
-  // permanently shadowing the real config value (e.g. `plugins.marketplaces`
-  // stuck at `[]` forever, no matter what was actually saved). Effects run
-  // child-before-parent, so RJSF's onChange — fired from the child `Form` —
-  // always won that race against this component's own seed effect; it only
-  // ever surfaced for a section landed on DIRECTLY (as the very first active
-  // facet) that also has an array field, which is exactly what exposed it:
-  // the default "models" facet's `llm` section has none.
+  // Never pre-seed `formState` from `config` via a mount effect: RJSF's
+  // `<Form>` computes ITS OWN schema defaults for any array field a section
+  // has (an empty `list[str]` defaults to `[]`) during its own mount, and
+  // fires `onChange` with that computed shape — indistinguishable from a
+  // real edit. Effects run child-before-parent, so that `onChange` always
+  // wins a race against a parent seed effect: a section rendered before its
+  // real config value seeded would get its array field written into
+  // `formState`, permanently shadowing the real config value (e.g.
+  // `plugins.marketplaces` stuck at `[]` forever, no matter what was
+  // actually saved).
   //
   // Resolving the fallback INLINE at read time instead closes the window
   // outright: a section's first render already sees real data, so RJSF's
@@ -133,9 +137,8 @@ export function SettingsView() {
   // Move focus to the pane heading whenever the active facet actually
   // CHANGES — a rail click, an external `?facet=` link, browser back/forward —
   // but never on first mount, which would otherwise steal focus the instant
-  // Settings opens. This used to live in this shell's own `selectFacet`
-  // click handler; now that facet selection itself moved to the NavRail, the
-  // shell can only learn about a change by watching the URL-derived value.
+  // Settings opens. Facet selection lives in the NavRail, so the shell can
+  // only learn about a change by watching the URL-derived value.
   const previousFacetRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (
@@ -183,9 +186,17 @@ export function SettingsView() {
     return true;
   });
 
-  const handleSectionSave = async (sectionId: string) => {
+  // Resolves `true`/`false` — `SettingsSection.handleSave` branches on this to
+  // decide whether the save actually happened before it stamps "Saved" (see
+  // that file's `onSave` doc). `useConfig.savePatch` already resolves `null`
+  // on a failed PATCH rather than throwing, but until this returned nothing
+  // that `null` never reached the caller: `onSave()` always resolved without
+  // throwing, so a 500 announced success anyway, cleared any typed secret
+  // (keyed off the `savedAt` stamp), and left the failure visible only in the
+  // `saveError` banner the user had no reason to look at yet.
+  const handleSectionSave = async (sectionId: string): Promise<boolean> => {
     const patch = model.patchFor(sectionId, sectionValue(sectionId));
-    if (!patch) return;
+    if (!patch) return true;
     // `savePatch`'s `onSuccess` already updates the ["config"] cache; re-seed
     // ONLY the saved section so it becomes non-dirty without touching siblings.
     const updated = await savePatch(patch);
@@ -194,7 +205,9 @@ export function SettingsView() {
         ...prev,
         [sectionId]: normalizeSection(updated.config[sectionId]),
       }));
+      return true;
     }
+    return false;
   };
 
   return (
@@ -217,7 +230,31 @@ export function SettingsView() {
         {/* Main pane */}
         <div className="flex-1 overflow-y-auto">
           <div className="max-w-3xl mx-auto px-6 py-6 space-y-6">
+            {/* Persistent, non-dismissable — applies to every facet (the
+                config store is one deployment-wide resource), so it lives at
+                this shared container level rather than being copied into each
+                facet/pane. Absent `storage` (old backend, or the GET hasn't
+                landed) reads as writable; only an explicit `false` shows it. */}
+            {!writable && storage && (
+              <ErrorAlert
+                error={storage.reason}
+                fallback="Settings cannot be saved in this deployment."
+                title="Settings are read-only"
+              />
+            )}
             {error && <ErrorAlert error={error} fallback="Failed to load settings" />}
+            {/* Suppressed while the read-only banner is showing: Save is
+                disabled in that state, so a lingering `saveError` from before
+                the store flipped read-only would only stack a second, more
+                confusing explanation on top of the one that actually applies
+                now. */}
+            {writable && saveError && (
+              <ErrorAlert
+                error={saveError}
+                fallback="Failed to save settings"
+                title="Couldn't save settings"
+              />
+            )}
 
             {/* Toolbar */}
             <div className="flex flex-wrap items-center gap-3">
@@ -291,6 +328,7 @@ export function SettingsView() {
                   original={normalizeSection(config[s.id])}
                   advanced={advanced}
                   secrets={secrets}
+                  writable={writable}
                   onChange={(next) =>
                     setFormState((prev) => ({ ...prev, [s.id]: next }))
                   }

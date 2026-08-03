@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from mewbo_core.orchestrator import Orchestrator
-from mewbo_core.session_store import SessionStore
+from mewbo_core.loop.orchestrator import Orchestrator
+from mewbo_core.session.session_store import SessionStore
 
 
 def _make_orchestrator(tmp_path):
@@ -28,7 +28,7 @@ class TestUserInitiatedCompactFailure:
         async def _raiser(events, mode, **kwargs):
             raise RuntimeError("mocked compaction boom")
 
-        with patch("mewbo_core.compact.compact_conversation", _raiser):
+        with patch("mewbo_core.session.compact.compact_conversation", _raiser):
             task_queue, state = orch.run(
                 user_query="/compact",
                 session_id=session_id,
@@ -44,9 +44,8 @@ class TestUserInitiatedCompactFailure:
         assert state.done_reason == "compact_failed"
 
     def test_compact_failure_does_not_raise(self, tmp_path) -> None:
-        """Regression guard: orchestrator.run must return normally even when
-        compact_conversation raises an adapter-style TypeError (the exact
-        shape the smoke test surfaced via the slack plugin)."""
+        """orchestrator.run must return normally even when compact_conversation
+        raises an adapter-style TypeError, the shape a plugin adapter produces."""
         orch, store = _make_orchestrator(tmp_path)
         session_id = store.create_session()
 
@@ -55,7 +54,7 @@ class TestUserInitiatedCompactFailure:
                 "_create_streamable_http_session() got an unexpected keyword argument 'oauth'"
             )
 
-        with patch("mewbo_core.compact.compact_conversation", _raiser):
+        with patch("mewbo_core.session.compact.compact_conversation", _raiser):
             task_queue, state = orch.run(
                 user_query="/compact",
                 session_id=session_id,
@@ -71,7 +70,7 @@ class TestUserInitiatedCompactFailure:
 class TestServerRegistryDispatch:
     """Any user-typed slash command that names a server-registry handler
     short-circuits the tool-use loop and surfaces ``result.body`` directly,
-    so the operation lives in one place (``mewbo_core.commands``) instead
+    so the operation lives in one place (``mewbo_core.session.commands``) instead
     of being re-implemented per UI."""
 
     def test_tag_routes_through_server_registry(self, tmp_path) -> None:
@@ -158,7 +157,7 @@ class TestAutoCompactThrashGuard:
         async def _explode(*args, **kwargs):
             raise AssertionError("compact_conversation must not be called")
 
-        with patch("mewbo_core.compact.compact_conversation", _explode):
+        with patch("mewbo_core.session.compact.compact_conversation", _explode):
             assert orch._maybe_auto_compact(session_id) is None
 
         # And the marker count is unchanged (no second auto compaction event).

@@ -32,7 +32,7 @@ object AuraMotion {
     /** M1: floating composer bar is settled by this point in the timeline. */
     const val barSlideSettleMs: Int = 340
 
-    /** [R4 2026-07-10] M1 phase-2 "settle": the invocation perimeter bloom decays 1→0 over this
+    /** [R4] M1 phase-2 "settle": the invocation perimeter bloom decays 1→0 over this
      * window (FastOutSlowIn — an exhale, not a linear wipe), starting when the 450ms ignite
      * completes. Top/side edges fade with it; the bottom term persists into the live states. */
     const val bloomSettleMs: Int = 950
@@ -81,7 +81,7 @@ object AuraMotion {
      * `retainState` reparse, which removes the blank-flash. */
     const val markdownStreamReparseMs: Int = 48
 
-    /** In-app bottom edge-glow run-end ease-OFF (user directive 2026-07-04 round 3): when a run
+    /** In-app bottom edge-glow run-end ease-OFF (user directive round 3): when a run
      * finishes, [com.mewbo.aura.ui.aurora.AuroraEdgeGlow] must fade to solid rest over AT LEAST 3s
      * rather than snap to black — an abrupt on→off luminance change reads as a flash and is a
      * photosensitivity trigger. Consumed caller-side as `AuroraEdgeGlow(dismissFadeMs = ...)` by

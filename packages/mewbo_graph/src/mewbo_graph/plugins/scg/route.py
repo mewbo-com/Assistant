@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mewbo_core.common import MockSpeaker, pydantic_to_openai_tool
-from mewbo_core.session_tools import DEFAULT_SESSION_TOOL_MODES
+from mewbo_core.tooling.session_tools import DEFAULT_SESSION_TOOL_MODES
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from mewbo_graph.plugins.scg._core import (
@@ -113,7 +113,7 @@ class ScgRouteTool(SessionToolBase):
         orchestrator/probe reads inline, so it never needs a second ``scg_memory``
         read. Absent (omitted) when the learned layer has nothing for the pathway.
         """
-        from mewbo_core.tool_registry import mcp_tool_id  # noqa: PLC0415
+        from mewbo_core.tooling.tool_registry import mcp_tool_id  # noqa: PLC0415
 
         data = recipe.model_dump(mode="json")
         source_ids = sorted({step.split("#", 1)[0] for step in recipe.steps})

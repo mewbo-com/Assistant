@@ -1,7 +1,7 @@
 """The :class:`PipelineRun` ledger seam — open at trigger fire, close at run end.
 
 Opens the ledger when a fired trigger re-engages an app maintainer and closes it
-at the maintainer run's end (spec §2.8).
+at the maintainer run's end.
 
 The ledger is the app sub-product's provenance chain, freshness signal,
 ``/system`` backing, and repair-loop input all at once — but it only becomes
@@ -21,7 +21,7 @@ seams ``backend.py`` already owns:
   the run actually ends, carrying its ``error`` — the outcome we classify on).
 
 On a ``failed`` close it hands the app + error to the lifecycle's
-``handle_pipeline_failure`` (spec §2.11 policy dispatch — repair/pause/notify).
+``handle_pipeline_failure`` (policy dispatch — repair/pause/notify).
 
 Collaborators are DI'd FIELDS (atomic-class rule): the run + app stores, a
 ``failure_handler`` (the lifecycle), and ``now_fn``. NOW is always a method arg
@@ -97,7 +97,7 @@ class PipelineFireResult:
     landed: str | None = None
 
 # The maintainer's data tool — every pipeline needs it to write its results, so a
-# non-empty per-pipeline allowlist is unioned with it (spec §2.10 least privilege).
+# non-empty per-pipeline allowlist is unioned with it (least privilege).
 # Kept as a local constant to avoid importing the heavier plugin module; it must
 # match ``mewbo_api.apps.plugin.app_data.APP_DATA_TOOL_ID``.
 _APP_DATA_TOOL_ID = "app_data"
@@ -127,7 +127,7 @@ class AppPipelineRunTracker:
     FIRE_COOLDOWN_SECONDS = 300
 
     # How many of a pipeline's most recent ledger rows the integrity check reads to
-    # establish "this pipeline used to write that collection". A BOUND on the scan,
+    # establish "this pipeline has written that collection before". A BOUND on the scan,
     # not a tuning knob: the baseline only needs enough history to distinguish a
     # regression from a collection that was never populated, and an unbounded
     # list_runs would grow with the app's whole lifetime on every scheduled close.
@@ -150,8 +150,8 @@ class AppPipelineRunTracker:
 
         *failure_handler* (the :class:`AppLifecycle`) dispatches the
         ``on_pipeline_failure`` policy on a failed close; ``None`` skips that
-        dispatch (the ledger still closes honestly). *pipeline_runner* (Phase
-        2) executes a ``mode="code"`` pipeline at the fire seam WITHOUT
+        dispatch (the ledger still closes honestly). *pipeline_runner*
+        executes a ``mode="code"`` pipeline at the fire seam WITHOUT
         re-engaging the maintainer LLM session; ``None`` means every fire takes
         the agentic re-engage path (a deployment without code execution wired).
         *run_starter* wakes the maintainer for an on-demand AGENTIC
@@ -168,9 +168,10 @@ class AppPipelineRunTracker:
         # persistent ``running`` row (:meth:`open_run` for a scheduled fire and
         # :meth:`_fire_agentic` for a manual one). Without it two near-simultaneous
         # opens for the same (app, pipeline) both pass the dedup guard and strand a
-        # second running row that ``close_runs`` never settles. Prod is gunicorn
-        # ``--workers 1 --threads 8``, so one in-process lock is sufficient
-        # serialization; a coarse lock is the smallest correct scope at fire/​fire
+        # second running row that ``close_runs`` never settles. Prod is gunicorn with a
+        # SINGLE worker, so one in-process lock is sufficient serialization — the
+        # guarantee comes from there being one process, not from how many threads it
+        # serves; a coarse lock is the smallest correct scope at fire/​fire
         # frequency (an open is rare — a manual fire or a trigger tick).
         self._open_lock = threading.Lock()
 
@@ -207,7 +208,7 @@ class AppPipelineRunTracker:
             )
             self.run_store.open_run(run)
 
-    # -- code-pipeline fire seam (Phase 2) ----------------------------
+    # -- code-pipeline fire seam ---------------------------------------
 
     def run_code_pipeline_fire(
         self, trigger_id: str | None, *, now: datetime | None = None
@@ -273,7 +274,7 @@ class AppPipelineRunTracker:
         *require_effect* (default ``False`` — the scheduled-fire behavior is
         UNCHANGED) gates whether a SUCCESSFUL run is durably persisted: when
         ``True``, only a run that had a real effect (``cache="miss"`` AND a
-        non-empty ``docs_written``) is saved to the ledger — the Phase 2
+        non-empty ``docs_written``) is saved to the ledger — the anti-spam
         ruling for the on-request REST invoke path, where a cache hit or a
         read-only render must never mint a row (a polling client on a
         ``cache_ttl_seconds=0`` pipeline would otherwise spam the ledger on every
@@ -300,6 +301,15 @@ class AppPipelineRunTracker:
         try:
             result = runner.execute(app, pipeline, dict(params), now=now)
         except PipelineExecutionError as exc:
+            # A failed run is not a run that wrote nothing. ``docs_written`` is
+            # normally read off the ``PipelineResult``, which only success ever
+            # produces — so a timeout or a mid-run raise used to close the row with
+            # an EMPTY count while the documents it had already written sat in the
+            # collection, making /system freshness, ``stale`` and
+            # ``unwritten_collections`` all describe a run that never happened.
+            # The runner carries the partial count out on the error instead.
+            for collection, count in exc.docs_written.items():
+                run.record_write(collection, count)
             run.close(now=now, status="failed", error=str(exc))
             self.run_store.save(run)  # a failure is never suppressed by require_effect
             if dispatch_failure and self.failure_handler is not None:
@@ -331,7 +341,7 @@ class AppPipelineRunTracker:
         The single seam three sites call — the ``POST .../pipelines/<name>/fire``
         route, ``AppLifecycle``'s go-live seed, and its re-arm seed — so an
         explicit refresh (and the first seeded run at go-live) rides EXACTLY the
-        same execution path a schedule would (spec §2.1: no new engine).
+        same execution path a schedule would (no new engine).
 
         * ``mode="code"`` runs the engine synchronously via :meth:`record_code_run`
           (``kind="on_request"``, ``dispatch_failure=False``, ``require_effect=False``
@@ -597,15 +607,14 @@ class AppPipelineRunTracker:
     def pipeline_scope(self, trigger_id: str | None) -> tuple[list[str], bool] | None:
         """The ``(allowed_tools, strict_tool_scope)`` a pipeline fire runs under.
 
-        Enforces ``PipelineSpec.tools_allowlist`` (spec §2.10) as AUTHORITATIVE
-        least privilege (Phase 1 — the default flipped from permissive):
+        Enforces ``PipelineSpec.tools_allowlist`` as AUTHORITATIVE
+        least privilege (the default flipped from permissive):
 
         * NOT an app pipeline ⇒ ``None`` (the caller keeps the session's grants).
         * EMPTY allowlist ⇒ the MINIMUM scope ``["app_data"]`` under strict scope.
-          A pipeline that declared no tools can now write its data and nothing
-          else — a pipeline that wants more (a connector, ``web_search``, a file
-          read) must DECLARE it. This is the security-default flip: an undeclared
-          unattended fire is no longer permissive.
+          A pipeline that declared no tools writes its data and nothing else; a
+          pipeline that wants more (a connector, ``web_search``, a file read)
+          must DECLARE it. An undeclared unattended fire is never permissive.
         * NON-EMPTY allowlist ⇒ that list unioned with ``app_data`` (which every
           pipeline needs to write results), under strict scope so it caps
           built-ins too, not just MCP tools.

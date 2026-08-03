@@ -349,13 +349,25 @@ describe("getAnswer", () => {
 // ── requestWikiRefresh ────────────────────────────────────────────────────
 
 describe("requestWikiRefresh", () => {
-  it("POSTs an empty body to /v1/wiki/projects/<slug>/refresh", async () => {
+  // Asserted on the SERIALIZED BODY, never on the argument or a typed fixture.
+  // The defect was precisely that the field never reached the wire: the client
+  // posted a literal `{}`, so the server always defaulted to `auto` and a
+  // fingerprinted project could not be rebuilt from the UI at all. A test that
+  // checked the call signature would have passed throughout.
+  it("transmits the default mode on the wire", async () => {
     fetchSpy.mockResolvedValueOnce(jsonResp({ queued: true }));
     await requestWikiRefresh("owner/repo");
     const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("/v1/wiki/projects/owner%2Frepo/refresh");
     expect(init.method).toBe("POST");
-    expect(JSON.parse(init.body as string)).toEqual({});
+    expect(JSON.parse(init.body as string)).toEqual({ mode: "auto" });
+  });
+
+  it("transmits an explicit full rebuild on the wire", async () => {
+    fetchSpy.mockResolvedValueOnce(jsonResp({ queued: true }));
+    await requestWikiRefresh("owner/repo", "full");
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ mode: "full" });
   });
 
   it("throws validation error when slug is empty", async () => {

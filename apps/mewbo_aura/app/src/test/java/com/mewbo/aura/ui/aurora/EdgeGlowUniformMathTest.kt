@@ -96,10 +96,9 @@ class EdgeGlowUniformMathTest {
         assertEquals(expected, EdgeGlowUniformMath.VISIBILITY_TRANSITION_MS)
     }
 
-    // the old angle-based 4-stop hue wheel (and its huePhase/RESTING_EXTENT_FRACTION
-    // uniform math) is gone entirely - color is now a plain two-stop blend by the bloom's own
-    // intensity (see AuroraEdgeGlow.kt's shader), which removes the whole periodic-wrong-hue bug
-    // class rather than bounding it. The tests below cover what replaced it: horizontal
+    // Color is a plain two-stop blend by the bloom's own intensity (see AuroraEdgeGlow.kt's
+    // shader), never an angle/phase-driven wheel - that removes the whole periodic-wrong-hue bug
+    // class rather than bounding it. The tests below cover the two things that DO vary: horizontal
     // center-weighting and the waviness noise modulation.
 
     @Test

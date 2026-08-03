@@ -15,6 +15,13 @@ interface TerminalCardProps {
   defaultExpanded?: boolean;
   model?: string;
   agentId?: string;
+  /**
+   * The command is still running — dispatched, no result yet. Suppresses every
+   * readout the card cannot honestly make (there is no exit code, output or
+   * duration) and colours the chrome with the in-progress tone instead of the
+   * success tone, which a finished-looking green card would otherwise imply.
+   */
+  pending?: boolean;
 }
 
 function shortenCwd(cwd: string): string {
@@ -47,9 +54,13 @@ export function TerminalCard({
   defaultExpanded = false,
   model,
   agentId,
+  pending = false,
 }: TerminalCardProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const isError = exitCode !== undefined && exitCode !== 0;
+  // A known exit code wins: once the result has landed the card is settled,
+  // whatever a stale `pending` flag says.
+  const isPending = pending && exitCode === undefined;
   const hasOutput = !!(stdout || stderr);
   const outputLines = countLines(stdout || '') + countLines(stderr || '');
 
@@ -58,7 +69,11 @@ export function TerminalCard({
       className={`rounded-lg overflow-hidden font-mono border border-[hsl(var(--border))] border-l-[3px] transition-colors ${
         hasOutput ? 'cursor-pointer' : ''
       } ${
-        isError ? 'border-l-[hsl(var(--destructive))]' : 'border-l-[hsl(var(--success)/0.6)]'
+        isError
+          ? 'border-l-[hsl(var(--destructive))]'
+          : isPending
+            ? 'border-l-[hsl(var(--primary)/0.6)]'
+            : 'border-l-[hsl(var(--success)/0.6)]'
       }`}
       onClick={() => hasOutput && setExpanded((p) => !p)}
     >
@@ -66,7 +81,18 @@ export function TerminalCard({
       <div className={`flex items-center gap-2 px-3 py-1.5 ${TITLE_BG}`}>
         {/* Traffic-light dots */}
         <div className="flex items-center gap-1.5 shrink-0">
-          <span className={`w-2.5 h-2.5 rounded-full ${isError ? 'bg-[hsl(var(--destructive))]' : 'bg-[hsl(var(--success))]'}`} />
+          <span
+            className={`w-2.5 h-2.5 rounded-full ${
+              isError
+                ? 'bg-[hsl(var(--destructive))]'
+                : isPending
+                  // Reuses the ONE sanctioned run-state aliveness keyframe
+                  // rather than adding a second infinite animation; it already
+                  // stills itself under prefers-reduced-motion.
+                  ? 'bg-[hsl(var(--primary))] session-cmp-pulse'
+                  : 'bg-[hsl(var(--success))]'
+            }`}
+          />
           <span className={`w-2.5 h-2.5 rounded-full ${isError ? 'bg-[hsl(var(--destructive)/0.3)]' : 'bg-[hsl(var(--code-fg-subtle))]/30'}`} />
           <span className={`w-2.5 h-2.5 rounded-full ${isError ? 'bg-[hsl(var(--destructive)/0.3)]' : 'bg-[hsl(var(--code-fg-subtle))]/30'}`} />
         </div>
@@ -94,6 +120,13 @@ export function TerminalCard({
         {durationMs !== undefined && (
           <span className="font-sans text-2xs text-[hsl(var(--code-fg-subtle))] shrink-0 hidden sm:inline">
             {formatDuration(durationMs)}
+          </span>
+        )}
+
+        {/* Running label — the card's only claim while the command is in flight */}
+        {isPending && (
+          <span className="font-sans text-2xs text-[hsl(var(--primary-text))] shrink-0">
+            Running
           </span>
         )}
 

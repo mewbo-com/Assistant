@@ -481,8 +481,8 @@ def test_runner_resolves_echo_when_scg_disabled(monkeypatch):
 def test_runner_resolves_orchestrated_once_source_mapped(monkeypatch):
     """Mapping the first source flips resolution to orchestrated — NO restart.
 
-    Regression: the swap used to happen only at init, so a process that mapped
-    its first source stayed in echo mode until restarted.
+    Swapping only at init leaves a process that mapped its first source in echo
+    mode until it is restarted.
     """
     from mewbo_api.agentic_search.runner import EchoSearchRunner, get_search_runner
     from mewbo_api.agentic_search.scg.orchestrated_runner import (

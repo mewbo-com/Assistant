@@ -16,12 +16,12 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from mewbo_core.agent_context import AgentContext
+from mewbo_core.agents.agent_context import AgentContext
+from mewbo_core.agents.hypervisor import AgentHypervisor
 from mewbo_core.classes import ActionStep
-from mewbo_core.hypervisor import AgentHypervisor
-from mewbo_core.llm_resilience import CircuitBreaker, RetryBudget, RetryStrategy
-from mewbo_core.model_control import ModelControlArgs, ModelControlTool
-from mewbo_core.tool_use_loop import ToolUseLoop
+from mewbo_core.llm.llm_resilience import CircuitBreaker, RetryBudget, RetryStrategy
+from mewbo_core.loop.tool_use_loop import ToolUseLoop
+from mewbo_core.tooling.model_control import ModelControlArgs, ModelControlTool
 
 # Sibling helpers (tests/ is on sys.path under pytest).
 from test_tool_use_loop import (
@@ -464,7 +464,7 @@ def _build_loop(
         fallback_models=fallback_models,
     )
     with patch(
-        "mewbo_core.tool_use_loop.get_config_value",
+        "mewbo_core.loop.tool_use_loop.get_config_value",
         side_effect=_config_side_effect(self_steering=self_steering),
     ):
         return ToolUseLoop(
@@ -572,9 +572,9 @@ class TestEndToEndSwitch:
             fallback_models=("mid", "rescue"),
         )
         with (
-            patch("mewbo_core.tool_use_loop.build_chat_model") as mock_build,
+            patch("mewbo_core.loop.tool_use_loop.build_chat_model") as mock_build,
             patch(
-                "mewbo_core.tool_use_loop.get_config_value",
+                "mewbo_core.loop.tool_use_loop.get_config_value",
                 side_effect=_config_side_effect(self_steering=True),
             ),
         ):

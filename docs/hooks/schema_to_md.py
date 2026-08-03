@@ -252,21 +252,15 @@ def _render_class_section(
     return "\n".join(lines)
 
 
-def on_pre_build(**_: object) -> None:
-    """MkDocs hook: regenerate docs/configuration.md before each build."""
-    if not SCHEMA_PATH.exists():
-        log.warning(
-            "schema_to_md: %s not found; skipping configuration.md generation",
-            SCHEMA_PATH,
-        )
-        return
+def render_markdown(schema: dict) -> str:
+    """Render the whole reference page from a parsed schema, writing nothing.
 
-    try:
-        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
-    except Exception as exc:
-        log.warning("schema_to_md: failed to parse %s: %s", SCHEMA_PATH, exc)
-        return
-
+    Split out of :func:`on_pre_build` so the page can be BUILT without being
+    written: a freshness test that had to regenerate first would touch the repo
+    as a side effect, and could "pass" by overwriting the very drift it exists
+    to report. ``configuration.md`` is a committed file generated only at
+    docs-build time, so nothing else notices when it falls behind the schema.
+    """
     defs = schema.get("$defs", {})
     top_level_props = schema.get("properties", {})
 
@@ -296,8 +290,26 @@ def on_pre_build(**_: object) -> None:
 
         sections.append(_render_class_section(key, class_def, defs))
 
+    return "\n".join(sections)
+
+
+def on_pre_build(**_: object) -> None:
+    """MkDocs hook: regenerate docs/configuration.md before each build."""
+    if not SCHEMA_PATH.exists():
+        log.warning(
+            "schema_to_md: %s not found; skipping configuration.md generation",
+            SCHEMA_PATH,
+        )
+        return
+
+    try:
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log.warning("schema_to_md: failed to parse %s: %s", SCHEMA_PATH, exc)
+        return
+
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    new_content = "\n".join(sections)
+    new_content = render_markdown(schema)
     if OUTPUT_PATH.exists() and OUTPUT_PATH.read_text(encoding="utf-8") == new_content:
         log.debug("schema_to_md: %s unchanged; skipping write", OUTPUT_PATH)
         return

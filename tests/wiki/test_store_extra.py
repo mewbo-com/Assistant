@@ -7,8 +7,8 @@ JsonWikiStore:
 - _load_events() malformed-JSONL line recovery.
 - delete_page() removes index entry even when file is already absent.
 - prune_pages() drops obsolete pages, keeps retained ones.
-- save_job_plan / get_job_plan / get_job_submitted_count /
-  increment_job_submitted_count / save_job_submission / get_job_submission.
+- save_job_plan / get_job_plan / get_job_submitted_count / claim_job_page /
+  get_job_page_ids / save_job_submission / get_job_submission.
 - delete_edges_by_source_file returns 0 when file has no nodes.
 - list_jobs when jobs_root is absent.
 - list_pages for nonexistent slug.
@@ -32,7 +32,9 @@ from typing import Any
 
 import mongomock
 import pytest
+from mewbo_graph.wiki.store import PageClaim
 from mewbo_graph.wiki.types import (
+    CommitScope,
     Frontmatter,
     IndexingJob,
     NavEntry,
@@ -43,6 +45,11 @@ from mewbo_graph.wiki.types import (
 )
 
 # ── helpers ────────────────────────────────────────────────────────────────────
+
+# The slug every page-claim call is scoped to. It is an argument because the
+# claim falls back to page ATTRIBUTION for a job that predates claim records,
+# and attribution is stored per-slug.
+SLUG = "org/repo"
 
 
 def _project(slug: str = "org/repo", indexed_at: str = "2026-01-01T00:00:00Z") -> Project:
@@ -78,13 +85,15 @@ def _job(job_id: str = "job-001", slug: str = "org/repo") -> IndexingJob:
     )
 
 
-def _qa(answer_id: str = "ans-001") -> QaAnswer:
+def _qa(answer_id: str = "ans-001", slug: str = "", status: str = "running") -> QaAnswer:
     return QaAnswer(
         answer_id=answer_id,
+        slug=slug,
         from_page_id="overview",
         summary_sources=["src/main.py"],
         model="anthropic/claude-sonnet-4-6",
         blocks=[],
+        status=status,
     )
 
 
@@ -111,6 +120,14 @@ def store(request, tmp_path):
 
 
 # ── WikiStoreBase NotImplementedError defaults ─────────────────────────────────
+
+# Methods carrying a REQUIRED keyword-only argument. The value is irrelevant —
+# the base raises before reading it — but it must be supplied, or the call dies
+# on a TypeError that would pass this test for the wrong reason.
+_REQUIRED_KWARGS: dict[str, dict[str, Any]] = {
+    "query_graph": {"scope": CommitScope.every()},
+    "list_edges": {"scope": CommitScope.every()},
+}
 
 
 @pytest.mark.parametrize(
@@ -169,7 +186,7 @@ def test_base_raises_not_implemented(method: str, args: tuple) -> None:
         def delete_page(self, s, pid): ...  # type: ignore[override]
         def create_job(self, j): ...  # type: ignore[override]
         def get_job(self, jid): ...  # type: ignore[override]
-        def update_job(self, jid, **f): ...  # type: ignore[override]
+        def _write_job_patch(self, jid, patch): ...  # type: ignore[override]
         def list_jobs(self, s=None): ...  # type: ignore[override]
         def append_job_event(self, jid, ev): ...  # type: ignore[override]
         def load_job_events(self, jid, after_idx=-1): ...  # type: ignore[override]
@@ -180,7 +197,9 @@ def test_base_raises_not_implemented(method: str, args: tuple) -> None:
         def save_job_plan(self, jid, plan): ...  # type: ignore[override]
         def get_job_plan(self, jid): ...  # type: ignore[override]
         def get_job_submitted_count(self, jid): ...  # type: ignore[override]
-        def increment_job_submitted_count(self, jid): ...  # type: ignore[override]
+        def claim_job_page(self, slug, jid, pid): ...  # type: ignore[override]
+        def get_job_page_ids(self, slug, jid): ...  # type: ignore[override]
+        def page_ids_for_job(self, slug, jid): ...  # type: ignore[override]
         def save_job_submission(self, jid, sub): ...  # type: ignore[override]
         def get_job_submission(self, jid): ...  # type: ignore[override]
         def save_project_settings(self, slug, settings): ...  # type: ignore[override]
@@ -195,6 +214,7 @@ def test_base_raises_not_implemented(method: str, args: tuple) -> None:
         def save_qa(self, qa): ...  # type: ignore[override]
         def update_qa_fields(self, qa): ...  # type: ignore[override]
         def get_qa(self, aid): ...  # type: ignore[override]
+        def list_qa(self, status=None): ...  # type: ignore[override]
         def attach_qa_session(self, aid, sid): ...  # type: ignore[override]
         def get_qa_session(self, aid): ...  # type: ignore[override]
         def find_qa_by_session(self, sid): ...  # type: ignore[override]
@@ -203,7 +223,7 @@ def test_base_raises_not_implemented(method: str, args: tuple) -> None:
 
     stub = _Stub()
     with pytest.raises(NotImplementedError):
-        getattr(stub, method)(*args)
+        getattr(stub, method)(*args, **_REQUIRED_KWARGS.get(method, {}))
 
 
 # ── JsonWikiStore: _load_json malformed recovery ──────────────────────────────
@@ -351,15 +371,35 @@ def test_json_submitted_count_starts_at_zero(tmp_path: Path) -> None:
     assert store.get_job_submitted_count("job-cnt") == 0
 
 
-def test_json_increment_submitted_count_monotonic(tmp_path: Path) -> None:
+def test_json_claiming_distinct_pages_counts_each_once(tmp_path: Path) -> None:
     from mewbo_graph.wiki.store import JsonWikiStore
 
     store = JsonWikiStore(root_dir=tmp_path / "wiki")
     store.create_job(_job("job-inc"))
-    assert store.increment_job_submitted_count("job-inc") == 1
-    assert store.increment_job_submitted_count("job-inc") == 2
-    assert store.increment_job_submitted_count("job-inc") == 3
+    assert store.claim_job_page(SLUG, "job-inc", "a") == PageClaim(count=1, is_new=True)
+    assert store.claim_job_page(SLUG, "job-inc", "b") == PageClaim(count=2, is_new=True)
+    assert store.claim_job_page(SLUG, "job-inc", "c") == PageClaim(count=3, is_new=True)
     assert store.get_job_submitted_count("job-inc") == 3
+    assert store.get_job_page_ids(SLUG, "job-inc") == frozenset({"a", "b", "c"})
+
+
+def test_json_reclaiming_a_page_neither_counts_nor_forgets(tmp_path: Path) -> None:
+    """A re-submit must return the standing count, not a second increment."""
+    from mewbo_graph.wiki.store import JsonWikiStore
+
+    store = JsonWikiStore(root_dir=tmp_path / "wiki")
+    store.create_job(_job("job-re"))
+    store.claim_job_page(SLUG, "job-re", "a")
+    assert store.claim_job_page(SLUG, "job-re", "a") == PageClaim(count=1, is_new=False)
+    assert store.get_job_submitted_count("job-re") == 1
+
+
+def test_json_claim_on_a_missing_job_raises(tmp_path: Path) -> None:
+    from mewbo_graph.wiki.store import JsonWikiStore
+
+    store = JsonWikiStore(root_dir=tmp_path / "wiki")
+    with pytest.raises(KeyError):
+        store.claim_job_page(SLUG, "ghost", "a")
 
 
 def test_json_job_submission_round_trip(tmp_path: Path) -> None:
@@ -586,13 +626,17 @@ def test_mongo_get_job_plan_missing_job_returns_none() -> None:
     assert store.get_job_plan("ghost") is None
 
 
-def test_mongo_submitted_count_and_increment() -> None:
+def test_mongo_submitted_count_and_claim() -> None:
     store = _mongo_store()
     store.create_job(_job("job-inc"))
     assert store.get_job_submitted_count("job-inc") == 0
-    assert store.increment_job_submitted_count("job-inc") == 1
-    assert store.increment_job_submitted_count("job-inc") == 2
+    assert store.claim_job_page(SLUG, "job-inc", "a") == PageClaim(count=1, is_new=True)
+    assert store.claim_job_page(SLUG, "job-inc", "b") == PageClaim(count=2, is_new=True)
+    # The claim is conditional on the id being absent, so a re-submit is a
+    # no-op even though it is the SAME single round-trip as a first claim.
+    assert store.claim_job_page(SLUG, "job-inc", "a") == PageClaim(count=2, is_new=False)
     assert store.get_job_submitted_count("job-inc") == 2
+    assert store.get_job_page_ids(SLUG, "job-inc") == frozenset({"a", "b"})
 
 
 def test_mongo_get_submitted_count_missing_job_returns_zero() -> None:
@@ -600,10 +644,57 @@ def test_mongo_get_submitted_count_missing_job_returns_zero() -> None:
     assert store.get_job_submitted_count("ghost") == 0
 
 
-def test_mongo_increment_submitted_count_missing_job_raises() -> None:
+def test_mongo_claim_missing_job_raises_rather_than_reporting_a_no_op() -> None:
+    """An unmatched conditional update means "already claimed" OR "no such job"."""
     store = _mongo_store()
     with pytest.raises(KeyError):
-        store.increment_job_submitted_count("ghost")
+        store.claim_job_page(SLUG, "ghost", "a")
+
+
+def test_mongo_page_ids_of_an_unknown_job_is_empty() -> None:
+    store = _mongo_store()
+    assert store.get_job_page_ids(SLUG, "ghost") == frozenset()
+
+
+def test_mongo_a_job_with_no_claim_record_recovers_it_from_attribution() -> None:
+    """``{"$ne": id}`` MATCHES a document missing the field entirely.
+
+    So on Mongo too, a job written before claim records existed would have
+    claimed its way up from zero while its already-written pages sat
+    unaccounted. Attribution (the ``job_id`` column ``save_page`` stamps) is
+    what the seed recovers them from.
+    """
+    store = _mongo_store()
+    store.create_job(_job("job-legacy"))
+    for page_id in ("a", "b", "c"):
+        store.save_page(SLUG, _page(page_id), job_id="job-legacy")
+    # No claim record — exactly the shape a pre-upgrade job carries.
+    assert store._col("wiki_jobs").find_one(
+        {"job_id": "job-legacy"}
+    ).get("submitted_page_ids") is None
+
+    assert store.get_job_page_ids(SLUG, "job-legacy") == frozenset({"a", "b", "c"})
+    # The counter continues from what it wrote rather than restarting at one...
+    assert store.claim_job_page(SLUG, "job-legacy", "d") == PageClaim(count=4, is_new=True)
+    # ...and re-writing an already-written page still does not double-count.
+    assert store.claim_job_page(SLUG, "job-legacy", "a") == PageClaim(count=4, is_new=False)
+    assert store.get_job_submitted_count("job-legacy") == 4
+
+
+def test_mongo_a_fresh_job_does_not_adopt_another_index_s_pages() -> None:
+    """The seed is scoped by ``job_id``, so an empty claim stays empty.
+
+    A missing claim record and an empty one are different answers: recovering
+    the first must never let a brand-new job inherit the pages some earlier
+    index of the same slug left behind.
+    """
+    store = _mongo_store()
+    store.create_job(_job("job-old"))
+    store.create_job(_job("job-new"))
+    store.save_page(SLUG, _page("a"), job_id="job-old")
+
+    assert store.get_job_page_ids(SLUG, "job-new") == frozenset()
+    assert store.claim_job_page(SLUG, "job-new", "a") == PageClaim(count=1, is_new=True)
 
 
 def test_mongo_job_submission_round_trip() -> None:
@@ -666,6 +757,39 @@ def test_mongo_qa_session_round_trip() -> None:
     assert store.find_qa_by_session("s1") is None
 
 
+def test_mongo_list_qa_filtered_by_status() -> None:
+    store = _mongo_store()
+    store.save_qa(_qa("running-1", status="running"))
+    store.save_qa(_qa("running-2", status="running"))
+    store.save_qa(_qa("done-1", status="complete"))
+
+    running = store.list_qa(status="running")
+    assert {a.answer_id for a in running} == {"running-1", "running-2"}
+
+    everything = store.list_qa()
+    assert {a.answer_id for a in everything} == {"running-1", "running-2", "done-1"}
+
+
+def test_json_list_qa_absent_root_returns_empty(tmp_path: Path) -> None:
+    """list_qa returns [] when no qa/ directory exists yet."""
+    store = _json_store(tmp_path)
+    assert store.list_qa() == []
+    assert store.list_qa(status="running") == []
+
+
+def test_json_list_qa_filtered_by_status(tmp_path: Path) -> None:
+    store = _json_store(tmp_path)
+    store.save_qa(_qa("running-1", status="running"))
+    store.save_qa(_qa("running-2", status="running"))
+    store.save_qa(_qa("done-1", status="complete"))
+
+    running = store.list_qa(status="running")
+    assert {a.answer_id for a in running} == {"running-1", "running-2"}
+
+    everything = store.list_qa()
+    assert {a.answer_id for a in everything} == {"running-1", "running-2", "done-1"}
+
+
 def test_mongo_get_qa_session_missing_returns_none() -> None:
     store = _mongo_store()
     assert store.get_qa_session("ghost") is None
@@ -685,7 +809,7 @@ def test_mongo_upsert_nodes_empty_list_is_noop() -> None:
     # Should not raise — the Mongo driver does override this method.
     store.upsert_nodes("org/repo", [])
     # Query returns empty (nothing was upserted).
-    result = store.query_graph("org/repo")
+    result = store.query_graph("org/repo", scope=CommitScope.every())
     assert result == []
 
 

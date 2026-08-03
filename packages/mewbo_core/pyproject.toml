@@ -22,7 +22,7 @@ dependencies = [
   # proxy stack whenever `tools` are present (main.py → responses/mcp/… →
   # litellm.proxy.litellm_pre_call_utils → fastapi), which ModuleNotFoundErrors
   # on any client-only install. Took down every tool-bearing call on the
-  # deployed API (2026-07-14). Lift when upstream stops importing proxy
+  # deployed API. Lift once upstream stops importing proxy
   # modules from the client path.
   "litellm>=1.81.0,<1.92",
   "loguru>=0.7.2,<1.0.0",

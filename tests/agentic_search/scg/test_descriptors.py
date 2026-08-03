@@ -69,7 +69,7 @@ def _patch_merged_config(monkeypatch, payload: dict) -> None:
     import mewbo_core.config as core_config
 
     monkeypatch.setattr(
-        core_config, "get_merged_mcp_config", lambda cwd=None: dict(payload)
+        core_config, "get_merged_mcp_config", lambda cwd=None, trust_cwd=True: dict(payload)
     )
 
 

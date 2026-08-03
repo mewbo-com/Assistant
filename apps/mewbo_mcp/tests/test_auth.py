@@ -11,7 +11,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from mewbo_core.key_store import KeyStore
+from mewbo_core.secrets.key_store import KeyStore
 from mewbo_mcp.auth import (
     AuthError,
     authenticate,
@@ -62,21 +62,21 @@ def test_extract_bearer_token_no_request_raises():
 
 
 def test_validate_master_token(monkeypatch, tmp_path):
-    monkeypatch.setenv("MASTER_API_TOKEN", "msk-master")
+    monkeypatch.setenv("MEWBO_MASTER_API_TOKEN", "msk-master")
     store = KeyStore(path=str(tmp_path / "keys.json"))
     # No raise = accepted.
     validate_token("msk-master", key_store=store)
 
 
 def test_validate_stored_key_accepted(monkeypatch, tmp_path):
-    monkeypatch.setenv("MASTER_API_TOKEN", "msk-master")
+    monkeypatch.setenv("MEWBO_MASTER_API_TOKEN", "msk-master")
     store = KeyStore(path=str(tmp_path / "keys.json"))
     plaintext, _ = store.create_key("agent-A")
     validate_token(plaintext, key_store=store)  # no raise
 
 
 def test_validate_revoked_key_rejected(monkeypatch, tmp_path):
-    monkeypatch.setenv("MASTER_API_TOKEN", "msk-master")
+    monkeypatch.setenv("MEWBO_MASTER_API_TOKEN", "msk-master")
     store = KeyStore(path=str(tmp_path / "keys.json"))
     plaintext, record = store.create_key("agent-B")
     store.revoke_key(record["id"])
@@ -85,7 +85,7 @@ def test_validate_revoked_key_rejected(monkeypatch, tmp_path):
 
 
 def test_validate_unknown_token_rejected(monkeypatch, tmp_path):
-    monkeypatch.setenv("MASTER_API_TOKEN", "msk-master")
+    monkeypatch.setenv("MEWBO_MASTER_API_TOKEN", "msk-master")
     store = KeyStore(path=str(tmp_path / "keys.json"))
     with pytest.raises(AuthError):
         validate_token("mk_not_a_real_key", key_store=store)
@@ -103,7 +103,7 @@ def test_validate_empty_token_rejected(tmp_path):
 
 
 def test_authenticate_returns_token_for_passthrough(monkeypatch, tmp_path):
-    monkeypatch.setenv("MASTER_API_TOKEN", "msk-master")
+    monkeypatch.setenv("MEWBO_MASTER_API_TOKEN", "msk-master")
     store = KeyStore(path=str(tmp_path / "keys.json"))
     plaintext, _ = store.create_key("agent-C")
     ctx = _ctx({"authorization": f"Bearer {plaintext}"})
@@ -111,7 +111,7 @@ def test_authenticate_returns_token_for_passthrough(monkeypatch, tmp_path):
 
 
 def test_authenticate_rejects_bad_token(monkeypatch, tmp_path):
-    monkeypatch.setenv("MASTER_API_TOKEN", "msk-master")
+    monkeypatch.setenv("MEWBO_MASTER_API_TOKEN", "msk-master")
     store = KeyStore(path=str(tmp_path / "keys.json"))
     ctx = _ctx({"authorization": "Bearer mk_bad"})
     with pytest.raises(AuthError):

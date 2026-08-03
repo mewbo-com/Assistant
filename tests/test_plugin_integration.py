@@ -67,10 +67,10 @@ def test_plugin_components_fan_out(tmp_path):
         )
     )
 
-    from mewbo_core.agent_registry import AgentRegistry, parse_agent_file
+    from mewbo_core.agents.agent_registry import AgentRegistry, parse_agent_file
     from mewbo_core.hooks import HookManager, merge_plugin_hooks
-    from mewbo_core.plugins import discover_installed_plugins
-    from mewbo_core.skills import SkillRegistry
+    from mewbo_core.tooling.plugins import discover_installed_plugins
+    from mewbo_core.tooling.skills import SkillRegistry
 
     plugins = discover_installed_plugins(registry_paths=[registry_file])
     assert len(plugins) == 1

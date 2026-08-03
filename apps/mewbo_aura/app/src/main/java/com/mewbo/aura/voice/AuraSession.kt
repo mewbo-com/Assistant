@@ -143,10 +143,10 @@ class AuraSession(context: Context) :
             setViewTreeLifecycleOwner(this@AuraSession)
             setViewTreeSavedStateRegistryOwner(this@AuraSession)
             setContent {
-                // Reduced-motion BUG FIX [R4 2026-07-10]: this host called AuraTheme() bare, so
-                // the stored setting silently defaulted to false for every overlay invocation
-                // while MainActivity honored it — the overlay always animated. initial=false
-                // keeps the pre-load frame identical to the old behavior (never blocks show).
+                // Reduced-motion setting must thread through explicitly - a bare AuraTheme() call
+                // here would silently default to false for every overlay invocation regardless of
+                // the stored setting. initial=false keeps the pre-load frame from ever blocking
+                // show while the real value is still loading.
                 val reducedMotion by settingsStore.reducedMotion.collectAsState(initial = false)
                 AuraTheme(reducedMotion = reducedMotion) {
                     val uiState by machine.state.collectAsState()
@@ -265,7 +265,7 @@ class AuraSession(context: Context) :
         launchApp(sessionId = sessionId, draft = null, modality = modality)
 
     /** [AssistTurnMachine.pullUpToApp]'s `onPullUp` callback (the composer pill's swipe-up gesture,
-     * user directive 2026-07-04): the machine has already made the routing DECISION - a non-null
+     * user directive): the machine has already made the routing DECISION - a non-null
      * [sessionId] means "route to THIS invocation's session" (the same path [handleHandoff] takes),
      * a null one means "land on a fresh new chat". [draft] (blank already collapsed to null upstream)
      * is the composer's typed-but-unsent text, carried into the app for its composer to seed from. */

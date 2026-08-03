@@ -41,6 +41,7 @@ import { useWikiPage, useWikiProjectBySlug } from "./api/hooks";
 import { buildHref, type PlatformId } from "./router";
 import { DEFAULT_WIKI_SLUG } from "./slug";
 import { useStoredModel } from "./useStoredModel";
+import { useStoredQaMode } from "./useStoredQaMode";
 
 interface WikiScreenProps {
   pageId: string;
@@ -61,6 +62,7 @@ export function WikiScreen({ pageId, slug, platform }: WikiScreenProps) {
   const [refreshSignal, setRefreshSignal] = useState(0);
   const [tocOpen, setTocOpen] = useState(false);
   const [model, setModel] = useStoredModel();
+  const [mode, setMode] = useStoredQaMode();
 
   const page = pageQuery.data;
   const repoSlug = slug ?? DEFAULT_WIKI_SLUG;
@@ -295,6 +297,8 @@ export function WikiScreen({ pageId, slug, platform }: WikiScreenProps) {
           placeholder={`Ask MewboWiki about ${repoSlug}`}
           model={model}
           onModelChange={setModel}
+          mode={mode}
+          onModeChange={setMode}
           onAsk={onAsk}
         />
       )}

@@ -20,6 +20,7 @@ import { cardSurface } from './ui/card-surface';
 import { SummaryBlock } from './SummaryBlock';
 import { MarkdownContent } from './MessageBubble';
 import { LogEventCard, AccentColor } from './LogEventCard';
+import { ProjectSwitchCard } from './ProjectSwitchCard';
 import { RunFailedCard } from './RunFailedCard';
 import { ModelLabel } from './ModelLabel';
 import { TerminalCard } from './TerminalCard';
@@ -31,6 +32,7 @@ import type { RunStatus } from './InputBar';
 import { ChatRow, Handle } from './ChatRow';
 import { CheckAgentsCard } from './CheckAgentsCard';
 import { SpawnAgentCard } from './SpawnAgentCard';
+import { SpawnAgentBatchCard } from './SpawnAgentBatchCard';
 import { useAutoScroll } from '../hooks/useAutoScroll';
 import {
   EventRecord,
@@ -50,6 +52,7 @@ import {
   CheckAgentsLogEntry,
   RootSteerLogEntry,
   SpawnSubmitLogEntry,
+  SpawnBatchLogEntry,
   LlmRetryLogEntry,
   LlmFallbackLogEntry,
   RecoveryHaltLogEntry,
@@ -180,15 +183,17 @@ function renderAgentResult(log: AgentResultLogEntry) {
   const status = log.agentResultStatus || 'completed';
   const accent: AccentColor =
     status === 'completed' ? 'emerald' :
-    status === 'failed' ? 'red' :
-    status === 'cannot_solve' ? 'amber' :
-    'amber';
+    status === 'failed' || status === 'rejected' ? 'red' :
+    'amber'; // cancelled / cannot_solve / any future status — a non-destructive stop
 
   const stepsLabel = log.stepsUsed !== undefined ? `${log.stepsUsed} steps` : '';
-  const badgeText = status === 'completed' ? 'Completed' :
-    status === 'failed' ? 'Failed' :
-    status === 'cannot_solve' ? 'Cannot solve' :
-    'Partial';
+  // Humanized directly from the status string rather than a per-value ternary
+  // with an "else" fallback. The old fallback ("Partial") mislabeled every
+  // status the chain didn't special-case — including `rejected` and
+  // `cancelled`, both real `AgentResult.status` values `spawn_agent.py`
+  // assigns — because no non-test Python anywhere ever sets
+  // `status="partial"`, despite the historical docstring listing it.
+  const badgeText = status.replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
 
   return (
     <LogEventCard
@@ -291,6 +296,7 @@ function renderShell(log: ShellLogEntry) {
         durationMs={log.shellDurationMs}
         model={log.model}
         agentId={log.agentId}
+        pending={log.pending}
       />
     );
   }
@@ -303,7 +309,13 @@ function renderShell(log: ShellLogEntry) {
       key={log.id}
       icon={<Terminal className="w-4 h-4 text-[hsl(var(--muted-foreground))]" />}
       title={<span className="flex items-center gap-2">{log.title || 'tool'}<ModelLabel modelId={log.model} className={MODEL_TAG_CLASS} /><AgentIdChip agentId={log.agentId} /></span>}
-      badge={hasError ? <Badge color="red">Error</Badge> : undefined}
+      badge={
+        log.pending
+          // `primary` is the in-progress state tone (see BADGE_COLOR_MAP); the
+          // row keeps the tool's own accent so settling doesn't recolor it.
+          ? <Badge color="primary">Running</Badge>
+          : hasError ? <Badge color="red">Error</Badge> : undefined
+      }
       timestamp={log.timestamp}
       accent={hasError ? 'red' : toolAccent(toolName)}
     >
@@ -631,6 +643,22 @@ function renderSpawnSubmit(log: SpawnSubmitLogEntry) {
   );
 }
 
+function renderSpawnBatch(log: SpawnBatchLogEntry) {
+  return (
+    <SpawnAgentBatchCard
+      key={log.id}
+      caller={log.spawnBatchCaller}
+      agents={log.spawnBatchAgents}
+      spawned={log.spawnBatchSpawned}
+      rejected={log.spawnBatchRejected}
+      dispatched={log.spawnBatchDispatched}
+      durationMs={log.spawnBatchDurationMs}
+      timestamp={log.timestamp}
+      rawText={log.spawnBatchRawText}
+    />
+  );
+}
+
 function renderRootSteer(log: RootSteerLogEntry) {
   const fullId = log.steerTargetFullId || log.steerTargetPrefix || '';
   const targetLabel = fullId
@@ -759,9 +787,22 @@ export function LogsView({
           if (log.type === 'check_agents') return renderCheckAgents(log);
           if (log.type === 'root_steer') return renderRootSteer(log);
           if (log.type === 'spawn_submit') return renderSpawnSubmit(log);
+          if (log.type === 'spawn_batch') return renderSpawnBatch(log);
           if (log.type === 'compact') return renderCompaction(log);
           if (log.type === 'llm_retry') return renderLlmRetry(log);
           if (log.type === 'llm_fallback') return renderLlmFallback(log);
+          if (log.type === 'project_switch') {
+            // Same card the conversation renders — one component, two
+            // placements, so the panel and the transcript can never describe
+            // the same switch differently.
+            return (
+              <ProjectSwitchCard
+                key={log.id}
+                meta={log.projectSwitch}
+                timestamp={log.timestamp}
+              />
+            );
+          }
           if (log.type === 'recovery_halt') return renderRecoveryHalt(log);
           if (log.type === 'system') return renderReflection(log);
 

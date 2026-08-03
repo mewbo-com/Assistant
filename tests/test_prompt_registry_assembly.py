@@ -1,18 +1,17 @@
 """Golden byte-equality tests for the migrated ``planning.*`` / ``catalog.*`` prompts.
 
-Phase 1 of the central prompt registry is a VERBATIM extraction: the
-hardcoded section wrappers in ``planning.py:PromptBuilder.build`` and the catalog
-header/line f-strings in ``skills.py`` / ``agent_registry.py`` / ``hypervisor.py``
-move into ``prompts/registry/{assembly,catalog}.yaml`` with ZERO behaviour change.
-Each ``EXPECTED`` below is the ORIGINAL literal copied verbatim; the test asserts
-``render(...)`` reproduces it byte-for-byte for representative inputs. If a render
-drifts by even one character (a stripped newline, a re-flowed line), the golden
-fails — which is the whole point.
+``prompts/registry/{assembly,catalog}.yaml`` own the section wrappers
+``planning.py:PromptBuilder.build`` emits and the catalog header/line text in
+``skills.py`` / ``agent_registry.py`` / ``hypervisor.py``. Each ``EXPECTED``
+below is a frozen literal; the test asserts ``render(...)`` reproduces it
+byte-for-byte for representative inputs. A drift of even one character (a
+stripped newline, a re-flowed line) fails the golden — which is the whole
+point.
 """
 
 from __future__ import annotations
 
-from mewbo_core.prompt_registry import get_prompt_registry
+from mewbo_core.llm.prompt_registry import get_prompt_registry
 
 # ---------------------------------------------------------------------------
 # Verbatim copies of the ORIGINAL literals (the migration's source of truth).

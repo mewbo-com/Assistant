@@ -64,8 +64,8 @@ class AuthSettings(BaseModel):
     """The parsed, validated ``api.auth`` block.
 
     ``enabled`` is the master switch: while it is ``False`` (the default), the
-    AuthKit resolves every request to the legacy full-power principal and the
-    server behaves byte-for-byte as it did before IAM existed. ``authenticators``
+    AuthKit resolves every request to the unrestricted full-power principal, so
+    no route is identity-gated. ``authenticators``
     is the full discriminated union — each entry parses to its concrete kind with
     that kind's own validators — so the config seam accepts every authenticator
     the kernel knows, independently of whether that kind's optional driver extra

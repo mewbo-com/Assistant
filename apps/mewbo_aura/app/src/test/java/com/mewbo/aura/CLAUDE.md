@@ -11,12 +11,12 @@ them.
 
 Do not trust general kotlinx-coroutines-test documentation/blog posts on this point without
 re-verifying against the actual pinned version here: a bare `backgroundScope.launch { ran = 1 };
-advanceUntilIdle(); assertEquals(1, ran)` FAILS in this project (verified directly, scratch probe).
+advanceUntilIdle; assertEquals(1, ran)` FAILS in this project (verified directly, scratch probe).
 `backgroundScope` therefore cannot be the scope for any machine/class-under-test whose coroutines
-need to actually execute under `advanceTimeBy`/`advanceUntilIdle`/`runCurrent`.
+need to actually execute under `advanceTimeBy`/`advanceUntilIdle()`/`runCurrent`.
 
 **House idiom for any machine-owning class with an infinite `init`-block collector** (e.g.
-`AssistTurnMachine`'s `speech.speakingKey.collect { ... }`, which by design outlives every single
+`AssistTurnMachine`'s `speech.speakingKey.collect {... }`, which by design outlives every single
 test body — production parity, since `AuraSession`'s real scope lives for the whole session):
 
 ```kotlin
@@ -46,13 +46,13 @@ implementation.
 ## Testing a `ViewModel` (only `viewModelScope` launches) — plain `setMain`, NOT `machineScope()`
 
 `viewModelScope` dispatches on `Dispatchers.Main`, so a `@HiltViewModel` test drives it by installing
-the test scheduler AS Main: `Dispatchers.setMain(StandardTestDispatcher())` in `@Before` (+ `resetMain()`
+the test scheduler AS Main: `Dispatchers.setMain(StandardTestDispatcher)` in `@Before` (+ `resetMain()`
 in `@After`), and `runTest(dispatcher)` per test so `advanceUntilIdle()` runs the VM's `init`/`refresh()`
 launches on that ONE shared scheduler. The `machineScope()` idiom above is NOT needed here — it exists
 only for a class with an infinite `init`-block collector that would otherwise trip `runTest`'s leak check
 (`AssistTurnMachine`). A `ViewModel` whose coroutines all COMPLETE (a one-shot `refresh()` that ends when
 the fetch returns) has no such collector, so the plain MainDispatcher idiom suffices. `SessionsViewModelTest`
- is the reference implementation; its KDoc states the distinction explicitly.
+  is the reference implementation; its KDoc states the distinction explicitly.
 
 ## `ScriptedTranscriber`: one script per `listen()` call, never a shared replay-from-zero or a shared consumption cursor
 
@@ -63,16 +63,15 @@ needing TWO separate capture turns (e.g. a first-then-second-interaction scenari
 `startListening()` call its OWN script, not reuse one shared script list across two `.listen()`
 invocations:
 
+Two shapes that look right and are not:
+
 - **Shared replay-from-zero** (a `flow { for (event in script) {...} }` rebuilt fresh on every
-  `.listen()` call, referencing the SAME list) — the FIRST fix attempt's failure mode: the SECOND
-  `startListening()` call restarts the same script from index 0, so it emits the FIRST turn's events
-  again instead of the second turn's. A real second capture's events are silently swallowed by
-  replaying stale ones.
-- **Shared consumption cursor** (a single mutable index into one script list, advanced as events are
-  emitted) — the SECOND fix attempt's failure mode: the first capture's still-draining collector (see
-  above — it's never cancelled) keeps consuming from the SAME cursor concurrently with the second
-  capture's fresh collector, so the second turn's events get consumed-and-discarded by the wrong
-  collector instead of ever reaching the second capture's own consumer.
+  `.listen()` call, referencing the SAME list) — the SECOND `startListening()` restarts the script
+  from index 0 and emits the FIRST turn's events again, silently swallowing the real second capture.
+- **Shared consumption cursor** (a single mutable index into one script list, advanced per emitted
+  event) — the first capture's still-draining collector (never cancelled) keeps consuming from the SAME
+  cursor concurrently with the second capture's fresh collector, so the second turn's events get
+  consumed-and-discarded by the wrong collector.
 
 **Working shape**: `vararg scripts: List<Pair<Long, TranscriberEvent>>`, with a private `nextScript`
 index incremented once per `.listen()` CALL (not per emitted event) — each call gets its own
@@ -106,9 +105,9 @@ actually need URI semantics (a plain string id is often enough); reach for Mocki
 ## Backend timestamps: numeric offset (`+00:00`), never bare `Z`
 
 The real backend emits Python `datetime.isoformat()` — microsecond precision plus an explicit
-NUMERIC offset, e.g. `2026-07-02T03:34:42.633140+00:00`. `java.time.Instant.now().toString()`
+NUMERIC offset, e.g. `2026-07-02T03:34:42.633140+00:00`. `java.time.Instant.now.toString`
 produces a BARE `Z` suffix instead, which happens to still parse fine through
-`Timestamps.parseInstantOrNull` — meaning a naive test fixture built from `Instant.now().toString()`
+`Timestamps.parseInstantOrNull` — meaning a naive test fixture built from `Instant.now.toString`
 can mask a real regression in that parser's numeric-offset path without ever failing. Any test
 fixture standing in for a backend-supplied timestamp (`SessionSummary.updatedAt`/`createdAt`, event
 `ts` fields) should use the SAME numeric-offset shape the live device actually sends, e.g.:
@@ -127,8 +126,9 @@ ONE shared parser for this reason — it tries `OffsetDateTime.parse` (accepts b
 offset via `ISO_OFFSET_DATE_TIME`) FIRST, falling back to `Instant.parse` only for a bare
 no-offset instant string. Every ts-comparison call site (`TranscriptReducer`'s echo window,
 `ui/sessions/RelativeTime`, `AssistTurnMachine.recentSessionOrNull`) goes through this ONE function —
-this shipped as three separately-and-silently-broken copies before being unified (`data/CLAUDE.md`,
-` `). Never reintroduce a second, local `Instant.parse` call anywhere in this codebase; route
+it shipped as three separately-and-silently-broken copies before being unified
+([`data/model/CLAUDE.md`](../../../../../main/java/com/mewbo/aura/data/model/CLAUDE.md)). Never
+reintroduce a second, local `Instant.parse` call anywhere in this codebase; route
 through `Timestamps.parseInstantOrNull` even in a test fixture, so a JVM-only test can't mask a
 real device-only failure mode the way a bare `Instant.parse` naively would.
 

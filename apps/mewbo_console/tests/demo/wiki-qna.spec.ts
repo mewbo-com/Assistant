@@ -39,8 +39,23 @@ test("wikiQna — stored Q&A snapshot", async ({ page, demo }) => {
   await expect(page.getByText("Repository Structure")).toBeVisible();
 
   // Left-column cited-sources rail (visually uppercased via CSS; the DOM
-  // text itself is mixed-case "Cited sources").
+  // text itself is mixed-case "Cited sources"). The label alone is satisfied
+  // by an EMPTY rail (zero SourceCards) — it names the section, not its
+  // contents — so pin the rail's SourceCard count too. The seeded answer
+  // cites 5 sources (Project Overview / Agentic Search Engine / Source
+  // Capability Graph (SCG) / Channels & Integrations / Mewbo API Server);
+  // each renders as a `<details>` inside the rail's own `space-y-2.5` list.
+  // The sticky rail container ALSO holds a sixth, unrelated `<details>` — the
+  // "Retrieval details" footer accordion — as a direct child of the rail
+  // itself rather than of that list (verified against a live render: an
+  // unscoped `details` count under the rail resolves to 6, not 5), so the
+  // list wrapper is the scope, not the rail.
   await expect(page.getByText(/cited sources/i)).toBeVisible();
+  await expect(
+    page.locator(
+      'div[class*="max-h-[calc(100vh-3rem)]"] div[class*="space-y-2.5"] > details',
+    ),
+  ).toHaveCount(5);
 
   await demo.capturePage("wikiQna");
 });

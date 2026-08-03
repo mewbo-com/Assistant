@@ -7,5 +7,13 @@
     "timeout_seconds": 60,
     "fail_fast": false,
     "run_on_resume": true
+  },
+  "container": {
+    "egress": {
+      "allow": [
+        "cdn.playwright.dev",
+        "playwright.download.prss.microsoft.com"
+      ]
+    }
   }
 }

@@ -13,7 +13,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from mewbo_core import llm as llm_module
+from mewbo_core.llm import llm as llm_module
 
 
 def _tools(*names: str) -> list[dict]:

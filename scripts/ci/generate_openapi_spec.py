@@ -14,14 +14,31 @@ Enrichment:
 - light sanitation of summaries/descriptions (RST literals, trailing periods)
   as defense against future docstring drift
 
-The output file is committed. CI regenerates it best-effort before the docs
-build; when the API app is not importable there, the committed copy serves.
-Exits with code 0 (unchanged) or 1 (updated / error), matching
-``generate_config_schema.py``.
+The output file is committed and is regenerated before the docs site builds.
+
+Exit codes (matched with ``generate_config_schema.py``):
+
+- ``0`` — the artifact is already current, OR it was rewritten. Rewriting is
+  this script's job, so it is success. Which of the two happened is reported on
+  stdout, where a human or a log reader can see it.
+- non-zero — a genuine error, surfacing as an uncaught traceback.
+
+Conflating "regenerated" with "failed" under one exit code forces every caller
+to mask this script with ``|| true``, which then also swallows real breakage.
+
+``--check`` writes nothing and exits non-zero when the committed artifact would
+change — a local check to run before opening a change, rather than an enforced
+gate. The captured schema varies with whether a Mongo-backed session store
+exists, since the Web IDE namespace registers only when one does and an
+environment without it yields a spec carrying no IDE paths. Gating on that would
+fail for environmental reasons more often than for genuine staleness, which is
+why no workflow invokes it. The non-zero is also coarse on purpose — "stale" and
+"the generator failed" share it — so fail closed on it rather than branching.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import sys
@@ -359,6 +376,18 @@ class OpenApiSpecExporter:
 
 def main() -> int:
     """Export the enriched OpenAPI spec to docs/openapi.json."""
+    parser = argparse.ArgumentParser(
+        description="Generate docs/openapi.json from the live Flask-RESTX schema."
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Write nothing; exit non-zero if the committed spec is stale.",
+    )
+    args = parser.parse_args()
+
+    # Errors below are deliberately left to propagate: an uncaught traceback is
+    # the non-zero exit that tells a caller the artifact was never produced.
     new_spec = OpenApiSpecExporter.render()
 
     if SPEC_OUTPUT_PATH.exists():
@@ -366,10 +395,15 @@ def main() -> int:
             print(f"OpenAPI spec unchanged: {SPEC_OUTPUT_PATH}")
             return 0
 
+    if args.check:
+        print(f"OpenAPI spec STALE: {SPEC_OUTPUT_PATH}")
+        print("Regenerate with: uv run python scripts/ci/generate_openapi_spec.py")
+        return 1
+
     SPEC_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     SPEC_OUTPUT_PATH.write_text(new_spec, encoding="utf-8")
     print(f"OpenAPI spec updated: {SPEC_OUTPUT_PATH}")
-    return 1
+    return 0
 
 
 if __name__ == "__main__":

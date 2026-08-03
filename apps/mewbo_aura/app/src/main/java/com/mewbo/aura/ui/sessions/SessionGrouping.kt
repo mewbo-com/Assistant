@@ -7,6 +7,7 @@ import java.time.ZoneId
 
 /** Drawer/recents section header, in fixed display order. */
 enum class SessionSectionHeader(val label: String) {
+    PINNED("Pinned"),
     TODAY("Today"),
     PREVIOUS_7_DAYS("Previous 7 days"),
     OLDER("Older"),
@@ -18,7 +19,15 @@ data class SessionSection(val header: SessionSectionHeader, val sessions: List<S
 /**
  * Buckets [SessionSummary] rows into calendar-day sections for the drawer/recents list.
  *
- * Recency timestamp per session is `updatedAt` if non-blank else `createdAt`, parsed via
+ * **A pinned session gets its own [SessionSectionHeader.PINNED] bucket, ahead of every date bucket,
+ * and is EXCLUDED from date bucketing entirely** — never both, or a pinned row would render twice
+ * and read as a duplicate rather than emphasis. Date bucketing alone is not enough to keep a pin
+ * visible: a session pinned three weeks ago would otherwise sort into [SessionSectionHeader.OLDER],
+ * exactly where a pin exists to prevent it from hiding. Within the pinned bucket, most-recently-pinned
+ * first (`pinnedAt` descending); a session whose `pinnedAt` failed to parse falls to the end of the
+ * bucket rather than crashing the sort.
+ *
+ * Recency timestamp per UNPINNED session is `updatedAt` if non-blank else `createdAt`, parsed via
  * [Timestamps.parseInstantOrNull] — the ONE shared ISO parser every other ts-comparison call site
  * in this codebase (`TranscriptReducer`, `ui/sessions/RelativeTime`, `AssistTurnMachine`) routes
  * through, precisely because a naive/local `Instant.parse` accepts numeric UTC offsets on desktop
@@ -31,13 +40,15 @@ object SessionGrouping {
         val today = now.atZone(zone).toLocalDate()
         val previousWindowStart = today.minusDays(7)
 
+        val (pinned, unpinned) = sessions.partition { it.pinned }
+
         val buckets = linkedMapOf(
             SessionSectionHeader.TODAY to mutableListOf<SessionSummary>(),
             SessionSectionHeader.PREVIOUS_7_DAYS to mutableListOf(),
             SessionSectionHeader.OLDER to mutableListOf(),
         )
 
-        for (session in sessions) {
+        for (session in unpinned) {
             val recencyIso = session.updatedAt.ifBlank { session.createdAt }
             val instant = Timestamps.parseInstantOrNull(recencyIso)
             val header = when {
@@ -54,8 +65,14 @@ object SessionGrouping {
             buckets.getValue(header).add(session)
         }
 
-        return buckets
+        val sections = mutableListOf<SessionSection>()
+        if (pinned.isNotEmpty()) {
+            val ordered = pinned.sortedByDescending { Timestamps.parseInstantOrNull(it.pinnedAt ?: "") }
+            sections.add(SessionSection(SessionSectionHeader.PINNED, ordered))
+        }
+        buckets
             .filterValues { it.isNotEmpty() }
-            .map { (header, list) -> SessionSection(header, list) }
+            .mapTo(sections) { (header, list) -> SessionSection(header, list) }
+        return sections
     }
 }

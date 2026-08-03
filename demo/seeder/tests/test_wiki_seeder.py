@@ -19,6 +19,7 @@ import pytest
 from mewbo_demo_seeder.wiki import WikiSeedBundle, WikiSeeder
 from mewbo_graph.wiki.resume import ResumePlan
 from mewbo_graph.wiki.store import MongoWikiStore
+from mewbo_graph.wiki.types import CommitScope
 
 _BUNDLE_PATH = Path(__file__).resolve().parents[1] / "bundles" / "wiki-poc.json"
 _T0 = datetime(2026, 7, 14, 9, 30, 0, tzinfo=timezone.utc)
@@ -27,8 +28,6 @@ _GROVE = "github.com/bearlike/Grove"
 _ASSISTANT = "github.com/bearlike/Assistant"
 # Which IndexingJob.status values the ``GET /v1/wiki/jobs/active`` route keeps.
 _ACTIVE = {"queued", "scanning", "finalizing", "interrupted"}
-# ...and which ``GET /v1/wiki/jobs/recoverable`` keeps (before the is_noop filter).
-_RECOVERABLE = {"failed", "interrupted", "cancelled"}
 
 
 @pytest.fixture
@@ -130,8 +129,10 @@ def test_seed_populates_grove_graph_deterministically(
 ) -> None:
     """The graph endpoint reads a dense, deterministic node/edge set for Grove."""
     _seed(store, bundle)
-    nodes = store.query_graph(_GROVE)
-    edges = store.list_edges(_GROVE)
+    # ``every()`` — the seeded world is one generation per slug, so the union
+    # IS the live set; these counts are the same read they always were.
+    nodes = store.query_graph(_GROVE, scope=CommitScope.every())
+    edges = store.list_edges(_GROVE, scope=CommitScope.every())
     assert len(nodes) == 760
     assert len(edges) > 760  # CONTAINS + CALLS
     # Every edge endpoint resolves to a real node (no dangling refs the view drops).
@@ -141,7 +142,7 @@ def test_seed_populates_grove_graph_deterministically(
     assert any(n.type == "File" for n in nodes)
     assert {n.type for n in nodes} >= {"File", "Class", "Method", "Function"}
     # Secondary projects carry no graph (only Grove needs the Code Galaxy).
-    assert store.query_graph(_ASSISTANT) == []
+    assert store.query_graph(_ASSISTANT, scope=CommitScope.every()) == []
 
 
 # ── The indexing-progress card (get_job + load_job_events) ─────────────────────
@@ -174,24 +175,27 @@ def test_seed_populates_recoverable_band(store: MongoWikiStore, bundle: WikiSeed
     """The landing "Incomplete indexes — N resumable" band is non-empty.
 
     Reproduces the exact ``/jobs/recoverable`` filter + ``LandingScreen``
-    subtraction that were returning 0: a recoverable STATUS is not enough — the
+    subtraction that were returning 0: being resumable is not enough — the
     job's ``ResumePlan`` must be non-no-op (reusable artifacts), and the job must
     not also be active. Each recoverable slug carries a seeded graph, so its plan
-    reuses ``graph`` and it survives both gates.
+    reuses ``graph`` and it survives both gates. Calls the model's own
+    ``is_resumable`` predicate rather than a re-typed status literal — the same
+    predicate the route and ``WikiResume.resume`` both gate on, so a job listed
+    here is never one ``POST .../resume`` would then refuse. ``cancelled`` is
+    NOT resumable (a deliberate user stop), which is why none of the seeded
+    ``cancelled`` jobs below count toward the band.
     """
     _seed(store, bundle)
     jobs = store.list_jobs()
     active_slugs = {j.slug for j in jobs if j.status in _ACTIVE}
 
-    # The route's own predicate: recoverable status AND ResumePlan non-no-op.
+    # The route's own predicate: resumable AND ResumePlan non-no-op.
     recoverable = [
-        j
-        for j in jobs
-        if j.status in _RECOVERABLE and not ResumePlan.build(store, j).is_noop()
+        j for j in jobs if j.is_resumable and not ResumePlan.build(store, j).is_noop()
     ]
     # LandingScreen.visibleRecoverable = recoverable MINUS active slugs.
     visible = [j for j in recoverable if j.slug not in active_slugs]
-    assert len(visible) == 16
+    assert len(visible) == 13
 
     # Spot-check the reused-artifact hint the band renders (skip=['graph']).
     plan = ResumePlan.build(store, store.get_job("job-vault-sync-0001"))

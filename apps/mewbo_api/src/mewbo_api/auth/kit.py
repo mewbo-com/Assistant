@@ -17,9 +17,9 @@ the Flask request cycle. It does three jobs:
    the per-route requirement every guarded handler declares.
 
 Every refusal this module returns is minted by the typed error classes in
-``mewbo_api.errors`` rather than spelled inline, so the three legacy auth bodies
-have exactly ONE definition each and a second surface cannot invent a third
-spelling of them.
+``mewbo_api.errors`` rather than spelled inline, so the three auth bodies have
+exactly ONE definition each and a second surface cannot invent a third spelling
+of them.
 
 Design: a PLAIN atomic class (not Pydantic). It holds live, in-process
 collaborators (the key store, IAM stores, the request's credential reader, a
@@ -29,8 +29,7 @@ are injected as fields; the IAM stores are created LAZILY on first use, so a
 disabled deployment does ZERO store I/O and never writes an ``iam_*.json`` file.
 
 When auth is disabled (the default), ``resolve`` returns a cached, full-power
-legacy principal and the guards behave exactly as before IAM existed — the
-byte-identical-when-disabled law.
+principal and the guards gate nothing — the byte-identical-when-disabled law.
 """
 
 from __future__ import annotations
@@ -42,7 +41,7 @@ from typing import TYPE_CHECKING, Any
 
 from flask import g as flask_g
 from mewbo_core.common import get_logger
-from mewbo_core.key_store import KeyScopes
+from mewbo_core.secrets.key_store import KeyScopes
 from mewbo_iam import (
     ADMIN_ROLE,
     AccessDeniedEvent,
@@ -69,7 +68,7 @@ from mewbo_api.errors import AuthenticationRequired, PermissionDenied
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from flask import Request
     from mewbo_core.config import AppConfig
-    from mewbo_core.key_store import KeyStoreBase, PublicKeyRecord
+    from mewbo_core.secrets.key_store import KeyStoreBase, PublicKeyRecord
 
     from mewbo_api.auth.federated import FederatedRuntime
     from mewbo_api.auth.ldap_login import LdapLoginService
@@ -84,7 +83,7 @@ logging = get_logger(name="mewbo-api.auth")
 # rendered refusal, which is where every body a guard returns is now minted.
 Guard = Callable[[], "tuple[dict[str, Any], int] | None"]
 
-# The one authenticator-kind → (probe modules, extra) table used to fail boot
+# The one authenticator-kind → (probe modules, extra) table. It fails boot
 # loudly when auth is enabled with a kind whose optional driver isn't installed.
 # api_key and trusted_header need no extra — they have no driver to install. Every
 # module in the tuple must import — oidc needs authlib (the RP flow) AND joserfc
@@ -108,9 +107,9 @@ _API_KEY_METHOD = AuthMethod(kind="api_key", issuer=None)
 # Cached, frozen principals for the two no-I/O paths. Principal is frozen, so a
 # module constant is safe to share across every request.
 #
-# * legacy — the identity every request resolves to while auth is DISABLED:
-#   full-power (admin), unrestricted scopes (None, never ()), so behavior is
-#   identical to the pre-IAM server.
+# * disabled-auth — the identity every request resolves to while auth is OFF:
+#   full-power (admin), unrestricted scopes (None, never ()), so nothing is
+#   gated.
 # * master — the break-glass identity for a request bearing the master token
 #   while auth is ENABLED.
 _LEGACY_PRINCIPAL = Principal(
@@ -407,7 +406,7 @@ class AuthKit:
         signed session cookie resolved to its user record; (4) the
         **trusted-header** channel — identity asserted by a reverse proxy, gated
         on the direct peer's address. Auth disabled short-circuits to the cached
-        legacy full-power principal (no reads, no store I/O). This never REJECTS —
+        full-power principal (no reads, no store I/O). This never REJECTS —
         an unauthenticated request resolves to ``None`` and the per-route guards
         decide.
 
@@ -430,7 +429,7 @@ class AuthKit:
         """
         if not self._settings.enabled:
             return _LEGACY_PRINCIPAL
-        # 1. api-key channel — the exact pre-OIDC contract.
+        # 1. api-key channel.
         token = (
             self._credential_reader(request) if request is not None else self._credential_reader()
         )
@@ -549,7 +548,7 @@ class AuthKit:
     def _principal_from_record(self, record: PublicKeyRecord) -> Principal | None:
         """Map a resolved key record to a principal, honoring the three-state law.
 
-        Absent identity fields ⇒ a legacy full-power key: roles default to
+        Absent identity fields ⇒ a full-power key: roles default to
         ``("admin",)`` and scopes to ``None`` (unrestricted). ``scopes`` keeps
         its three states — absent/``None`` → ``None`` (unrestricted), ``[]`` →
         ``()`` (explicitly none); the two are NEVER collapsed. ``team_id`` is
@@ -586,16 +585,15 @@ class AuthKit:
             auth_method=_API_KEY_METHOD,
         )
 
-    # ── key-auth guards (exact legacy wire contract) ────────────────────────
+    # ── key-auth guards ─────────────────────────────────────────────────────
     def require_api_key(self) -> tuple[dict[str, Any], int] | None:
         """Authorize a protected route — the drop-in for the old ``_require_api_key``.
 
         A request is authorized by the master token (break-glass) OR a non-revoked,
-        unexpired stored key. Same bodies and statuses as before: missing
-        credential → ``401 {"message": "API token is not provided."}``; a bad
-        credential → ``401 {"message": "Unauthorized"}``; success → ``None``.
-        Uses the expiry-aware ``resolve_key`` (identical to the old ``verify_key``
-        for legacy keys, which carry no expiry).
+        unexpired stored key. Missing credential →
+        ``401 {"message": "API token is not provided."}``; a bad credential →
+        ``401 {"message": "Unauthorized"}``; success → ``None``. Uses the
+        expiry-aware ``resolve_key``; a key record with no expiry never expires.
 
         Both bodies are minted by :class:`~mewbo_api.errors.AuthenticationRequired`
         rather than spelled here, so the strings have ONE definition. The guard
@@ -691,10 +689,10 @@ class AuthKit:
         self-mint escalation this closes: since the intersection can only
         subtract from what the role already grants, a broader `scopes` value
         can never manufacture a permission the role does not hold. `scopes is
-        None` (unrestricted-legacy — the disabled-auth and master principals,
-        and any key minted before scoping existed) is a no-op here, so this is
+        None` (unrestricted — the disabled-auth and master principals, and any
+        key record carrying no ``scopes`` field) is a no-op here, so this is
         byte-identical for every principal that never carried scopes to begin
-        with. `KeyScopes` is the ONE matcher (`mewbo_core.key_store`) every
+        with. `KeyScopes` is the ONE matcher (`mewbo_core.secrets.key_store`) every
         scope check in the codebase shares, including the self-mint delegation
         check this mirrors — never re-derive the three-state/wildcard rule here.
         """

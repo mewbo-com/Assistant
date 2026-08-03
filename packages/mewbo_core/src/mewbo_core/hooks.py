@@ -17,12 +17,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from mewbo_core.classes import ActionStep
 from mewbo_core.common import MockSpeaker, get_logger
+from mewbo_core.contracts.types import EventRecord
 from mewbo_core.permissions import PermissionDecision
-from mewbo_core.types import EventRecord
 
 if TYPE_CHECKING:
+    from mewbo_core.agents.hypervisor import AgentHandle
     from mewbo_core.config import HookEntry, HooksConfig
-    from mewbo_core.hypervisor import AgentHandle
 
 logger = get_logger(name="core.hooks")
 
@@ -65,11 +65,11 @@ class OutcomeAssertion(BaseModel):
     and nothing more.
 
     **Absence is not an assertion.** A hook that returns ``None`` — every
-    command hook, every http hook, every hook written before this channel —
+    command hook, every http hook, and any python hook that declines to judge —
     reports nothing, which is why the contract is an OPTIONAL RETURN and not a
     boolean: "did not report" and "reported success" must never collapse into
-    each other, or adding the channel would itself invent an assertion for
-    every existing hook.
+    each other, or the channel would invent an assertion for every hook that
+    does not use it.
 
     ``reason`` is a PRODUCT-OWNED token and deliberately not a ``Literal``:
     core would otherwise have to learn every product's vocabulary before that
@@ -262,9 +262,10 @@ class HookManager:
         session's purpose was not achieved. Returning ``None`` asserts nothing
         — see that class for why absence must stay distinguishable from success.
 
-        This return value used to be discarded, which is why a job that never
-        reached its terminal state still presented as a clean completion: the
-        hook could SEE the failure and had nowhere to put it.
+        The return value is COLLECTED, not discarded — discarding it is how a
+        job that never reached its terminal state still presents as a clean
+        completion, with the hook able to SEE the failure and nowhere to put
+        it.
 
         Failure-isolated per hook like every other lifecycle dispatch, and
         deliberately strict about what it accepts: a hook returning something
@@ -670,7 +671,7 @@ def merge_plugin_hooks(
     Substitutes ${CLAUDE_PLUGIN_ROOT} in command strings.
     """
     from mewbo_core.config import HookEntry
-    from mewbo_core.plugins import substitute_plugin_vars
+    from mewbo_core.tooling.plugins import substitute_plugin_vars
 
     raw_hooks = hooks_json.get("hooks", {})
     for cc_event, entry_groups in raw_hooks.items():

@@ -1,0 +1,39 @@
+Tool: Shell Session
+
+Observe and steer a command started with `aider_shell_tool` and
+`run_in_background: true`. That call returns a `shell_id`; every operation here
+names it.
+
+Operations:
+- `read`   — output produced since `cursor`. Pass back the `cursor` from your
+             previous read to get ONLY what is new; omit it to get everything
+             retained. `wait_ms` waits briefly for more output instead of
+             returning empty. `filter` shows only matching lines and never
+             consumes anything.
+- `write`  — send text to the program's stdin (a newline is appended unless
+             `newline: false`). The reply is read back in the same call, so
+             answering a prompt costs one step, not two.
+- `kill`   — stop the process and everything it spawned.
+- `list`   — what is running right now, with no `shell_id` needed.
+
+Guidelines:
+- Background anything that outlives the foreground timeout: a dev server, a
+  build, a watcher, a long test run. A foreground command that times out is
+  killed and its work is lost.
+- `status` is read from the process itself, so an empty read does NOT mean the
+  command finished — a buffered program can print nothing for a long time.
+  Check `status` and `exit_code`, never the presence of output.
+- `missed_characters` in a read means output was evicted before you read it.
+  It is gone; read more often, or narrow the command's own output.
+- Kill what you no longer need. Sessions are capped, and a store full of running
+  commands refuses new ones rather than stopping work you did not ask to stop.
+- To drive an interactive program, start it with `tty: true` — otherwise it may
+  not prompt at all.
+
+Example:
+Call `aider_shell_tool` with args:
+  {"command": "npm run dev", "run_in_background": true}
+then `shell_session_tool` with args:
+  {"operation": "read", "shell_id": "shell_1", "wait_ms": 5000}
+and later:
+  {"operation": "read", "shell_id": "shell_1", "cursor": 812, "filter": "error"}
