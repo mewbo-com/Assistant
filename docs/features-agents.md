@@ -1,6 +1,10 @@
 # Sub-agents
 
-Mewbo can spawn child agents to work on independent subtasks in parallel. The root agent acts as an orchestrator: it delegates bounded work to sub-agents, monitors their progress, collects structured results, and synthesises a final answer. Sub-agents inherit the parent's permission policy, tool registry, and session context, so they can pick up a task and run with it without re-authorising every tool call.
+## Run subtasks in parallel
+
+Mewbo spawns child agents to run independent subtasks in parallel. The root agent delegates bounded
+work and writes the final answer from what comes back. A sub-agent inherits the parent's permission
+policy, tool registry and session context, so its tool calls need no fresh authorisation.
 
 For setup and installation, see [Getting Started](getting-started.md).
 
@@ -8,14 +12,13 @@ For setup and installation, see [Getting Started](getting-started.md).
 
 ## Spawning a sub-agent
 
-The root agent spawns sub-agents by calling the `spawn_agent` tool. Pass a task description; everything else is optional.
+Call the `spawn_agent` tool with a task description.
 
 ```json
 {
   "task": "Run the full test suite and report any failures",
   "model": "anthropic/claude-haiku-4-5",
   "allowed_tools": ["read_file", "aider_shell_tool"],
-  "denied_tools": [],
   "acceptance_criteria": "Exit code 0 and no FAILED lines in output"
 }
 ```
@@ -29,11 +32,20 @@ The root agent spawns sub-agents by calling the `spawn_agent` tool. Pass a task 
 | `acceptance_criteria` | string | No | How to verify the task is complete (appended to the task description) |
 | `agent_type` | string | No | Name of a registered agent definition (e.g. `feature-dev:code-reviewer`); loads a pre-built system prompt, tool scope, and model |
 
-Agent definitions themselves are `.md` files with YAML frontmatter, registered from `~/.claude/agents/`, `.claude/agents/`, and any installed plugin's `agents/` directory. A frontmatter `requires-capabilities` entry gates the definition to sessions that advertise the matching capability. The agent does not appear in the `agent_type` catalog otherwise (see [Plugins & Marketplace → Capability gating](features-plugins.md#capability-gating)). Plugin-contributed agent bodies can reference `${CLAUDE_PLUGIN_ROOT}`, `${SESSION_ID}`, and plugin-specific environment-variable placeholders; these are substituted at spawn time with a single linear `replace` pass. No template engine is used.
+/// table-caption
+The `spawn_agent` schema. Only `task` is required.
+///
+
+Agent definitions are `.md` files with YAML frontmatter, registered from `~/.claude/agents/`,
+`.claude/agents/`, and any installed plugin's `agents/` directory. A frontmatter
+`requires-capabilities` entry keeps the definition out of the `agent_type` catalog unless the session
+advertises a matching capability. See
+[Plugins & Marketplace → Capability gating](features-plugins.md#capability-gating).
 
 ### Blocking vs. non-blocking
 
-**When the root agent spawns, the call is non-blocking.** The call returns immediately with an agent ID, whether or not a concurrency slot is free:
+**A spawn from the root agent returns immediately.** It hands back an agent ID whether or not a
+concurrency slot is free.
 
 ```json
 {
@@ -44,21 +56,43 @@ Agent definitions themselves are `.md` files with YAML frontmatter, registered f
 }
 ```
 
-`status` is `"submitted"` regardless of whether a slot was free at spawn time: the agent is registered and visible to `check_agents` either way, and starts running on its own the moment a slot frees up if none was available yet. Reaching `agent.max_concurrent` (see [Configuration](#configuration)) is never a reason a spawn fails, and a parent waiting on a child does not itself consume a slot for that wait; only a running agent does.
+```mermaid
+stateDiagram-v2
+    [*] --> rejected: declined at admission
+    [*] --> submitted: accepted
+    submitted --> running: a slot frees
+    submitted --> cancelled: cancelled before dispatch
+    running --> completed
+    running --> failed
+    running --> cancelled: steer_agent
+    completed --> [*]
+    failed --> [*]
+    cancelled --> [*]
+    rejected --> [*]
+```
 
-A spawn is refused outright instead, `status: "rejected"` with no `agent_id`, only when the outcome would be identical on retry: an unresolvable `project`, an unknown `agent_type`, or a model this deployment cannot serve. The response names the reason so the caller does not retry unchanged.
+/// figure-caption
+Every sub-agent walks this. Four of the six states are terminal.
+///
 
-The agent runs in the background. Use `check_agents` to poll or wait for completion.
+An agent is visible to `check_agents` from the moment it is `submitted`. Reaching
+`agent.max_concurrent` defers a spawn rather than failing it. `rejected` is reserved for a decision
+identical on retry, so it means an unresolvable `project`, an unknown `agent_type`, or a model this
+deployment cannot serve. The response names which one. Only a running agent consumes a slot, so a
+parent blocked on a child holds none.
 
-**When a sub-agent itself spawns a deeper agent, the call is blocking.** The deeper call waits for the child to reach a terminal state, including any time it spends `submitted` before a slot frees, and returns the result inline, so a mid-level agent reads the outcome the moment it is available. Concurrency never fails a blocking spawn either; only the same permanent-refusal reasons above do.
+**A spawn from inside a sub-agent blocks instead.** The deeper call waits for a terminal state and
+returns the result inline. The same three reasons refuse it.
 
-Sub-agents run until the model returns a text response without any more tool calls. That is natural completion. There is no hard step limit. Safety comes from per-call timeouts, stall detection, and the session-wide step budget.
+A sub-agent runs until the model returns text with no further tool calls. There is no step limit. A
+timeout on every model call, stall detection and the session step budget bound it instead.
 
 ---
 
 ## Spawning multiple sub-agents at once
 
-`spawn_agents` fans a batch of independent sub-agents out from one call, the preferred path over issuing several separate `spawn_agent` calls since it guarantees every entry is admitted together in one turn. Each entry takes the same fields as `spawn_agent`.
+`spawn_agents` fans a batch of independent sub-agents out from one call. Each entry takes the same
+fields as `spawn_agent`.
 
 ```json
 {
@@ -70,7 +104,8 @@ Sub-agents run until the model returns a text response without any more tool cal
 }
 ```
 
-Every entry that is not a permanent refusal is admitted in the same call: it gets its own `agent_id` and comes back `status: "submitted"`, whether or not a concurrency slot is free for it yet, and each one starts running on its own as a slot becomes available. A 26-entry batch against the default `agent.max_concurrent` of 20, for example, admits all 26: 20 start running right away, 6 stay `"submitted"` until a slot frees, and none are `"rejected"`. The response reports each entry plus totals:
+Acceptance is atomic. Either the whole batch is admitted or none of it is, and capacity never decides
+which. The response below is a 26-entry batch against the default `agent.max_concurrent` of 20.
 
 ```json
 {
@@ -89,19 +124,15 @@ Every entry that is not a permanent refusal is admitted in the same call: it get
 }
 ```
 
-`accepted` is how many entries became real agents; `spawned` carries the same
-number under its historical name. `dispatched` and `deferred` split that total
-into the ones running now and the ones waiting for a slot — a scheduling fact
-reported as a count, never as a per-agent `status`, so no client has to learn a
-state beyond the six an agent can actually be in.
-
-`status` is `"rejected"` only for a permanent refusal, the same reasons a single `spawn_agent` call can be refused for. A rejected entry's `agent_id` is `null` and its `reason` field names why, without affecting its siblings. `agent_ids` preserves order, so index `i` always names `tasks[i]`. Monitor every entry with `check_agents`; a `submitted` entry not yet running reports the same way as one that already is.
+`dispatched` and `deferred` are scheduling counts, never a per-agent `status`, so no client learns a
+seventh state. A rejected entry carries `agent_id: null` and a `reason` without affecting its
+siblings. `agent_ids` preserves order, so index `i` always names `tasks[i]`.
 
 ---
 
 ## Checking and steering agents (root only)
 
-Two root-only tools let the orchestrator observe and influence running sub-agents.
+A sub-agent can neither watch nor steer its siblings.
 
 ### check_agents
 
@@ -112,7 +143,7 @@ Returns the full agent tree with status, progress notes, and completed results.
 | `wait` | boolean | `false` | Block until at least one running agent finishes |
 | `timeout` | number | `30` | Maximum seconds to wait when `wait=true` |
 
-**Example response (abbreviated):**
+**Example response, abbreviated.**
 
 ```
 Agents: 2 running, 1 completed | Budget: 47/500 steps
@@ -125,7 +156,7 @@ Agents: 2 running, 1 completed | Budget: 47/500 steps
 
 ### steer_agent
 
-Sends a message to a running agent or cancels it. Agent IDs may be given in full or as a unique 8-character prefix.
+Sends a message to a running agent, or cancels it.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -133,13 +164,12 @@ Sends a message to a running agent or cancels it. Agent IDs may be given in full
 | `action` | string | Yes | `"message"` to inject natural-language feedback; `"cancel"` to stop the agent |
 | `message` | string | Conditionally | Required when `action="message"` |
 
-A steering message is queued and delivered to the agent between its next tool steps. It never interrupts an in-flight tool call.
+A steering message is queued and delivered between the agent's next two tool steps. It never
+interrupts a tool call already in flight.
 
 ---
 
 ## What a sub-agent returns
-
-When a sub-agent finishes, its result is a structured object:
 
 | Field | Type | Description |
 |---|---|---|
@@ -150,13 +180,15 @@ When a sub-agent finishes, its result is a structured object:
 | `warnings` | array | Non-fatal issues encountered |
 | `artifacts` | array | File paths the agent touched |
 
-The `summary` is designed to be short enough that the root agent can keep many completed children in context without blowing up the window; `content` is available when you need the full output.
+/// table-caption
+The one structured object a finished sub-agent returns to its parent.
+///
+
+The cap on `summary` is what lets the root agent hold many finished children in context at once.
 
 ---
 
 ## Configuration
-
-All keys live under `agent` in [`configs/app.json`](configuration.md#agent).
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -168,11 +200,17 @@ All keys live under `agent` in [`configs/app.json`](configuration.md#agent).
 | `agent.llm_call_retries` | integer | `2` | Retries on the primary model before cascading to `llm.fallback_models` |
 | `agent.default_denied_tools` | array | `[]` | Tool IDs denied to all sub-agents globally |
 
-`agent.max_concurrent` bounds how many agents may run at once, not how many may be spawned: a spawn beyond it is never refused, it is admitted immediately with a real `agent_id` and starts running on its own once a slot frees up. Whether that is one `spawn_agent` call too many or a wide `spawn_agents` batch, the extra agents wait their turn rather than being turned away. The pool is per-run, not global: concurrent sessions never contend with each other over it, so this setting only ever bounds the width of a single session's own fan-out. Raise it when a workload's natural fan-out regularly exceeds the default, for example a wide review batch, or an orchestrator whose sub-agents each spawn agents of their own, so more of it runs in parallel instead of waiting its turn. Lower it, as in the first example below, when a deployment's own resources (LLM gateway concurrency, host CPU/memory) are the binding constraint rather than wall-clock time.
+/// table-caption
+Every key lives under `agent` in [`configs/app.json`](configuration.md#agent).
+///
 
-**Example.** Limit sub-agents to a fast model and cap concurrency for a resource-constrained environment:
+The concurrency pool is per run rather than global, so two sessions never contend over it.
 
-```json
+**Example.** Cap concurrency and pin sub-agents to a fast model, where the LLM gateway or the host is
+the binding constraint rather than wall clock time. Raise the same knob instead when a workload's
+natural fan-out beats the default, as a wide review batch does.
+
+```json title="configs/app.json"
 {
   "agent": {
     "max_concurrent": 5,
@@ -182,17 +220,8 @@ All keys live under `agent` in [`configs/app.json`](configuration.md#agent).
 }
 ```
 
-**Example.** Raise concurrency for a workload with wide, genuinely parallel fan-out:
-
-```json
-{
-  "agent": {
-    "max_concurrent": 50
-  }
-}
-```
-
-At the maximum depth, `spawn_agent` is removed from the tool schema entirely, so the model cannot nest further even if it tries.
+At `agent.max_depth`, `spawn_agent` is dropped from the tool schema, so no deeper spawn can be
+requested at all.
 
 ---
 

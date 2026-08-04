@@ -180,6 +180,34 @@
     --surface: 40 6% 6%; /* #10100e — recessed (below bg) */
     --surface-deep: 40 7% 4.5%; /* #0c0c0b — deepest layer */
 
+    /* ── Diagram tokens ─────────────────────────────────────────────────
+       Diagrams are DATA, not chrome, and the two want opposite things from
+       a colour. Chrome tokens are tuned to recede: `--card` is the surface a
+       diagram sits ON, and `--border-strong` is a hairline sized for a large
+       panel. Pointed at mermaid they filled every node with the colour of
+       its own container (measured 1.00:1 in light mode) and outlined it at
+       1.25:1, where WCAG 1.4.11 asks 3:1 for the boundary of a meaningful
+       graphical object.
+
+       Authored as literal hex rather than `H S% L%`: these are values chosen
+       against a measured contrast target, not members of the palette ramp,
+       and mermaid consumes them directly. `resolveColor` accepts both.
+
+       Shared VERBATIM with the mkdocs-shadcn docs theme (v1.7.1) so a
+       diagram reads identically in the console and in the docs. One family,
+       two products: change both together.
+
+         node border vs fill    light 3.53   dark 3.23
+         node fill vs surface   light 1.14   dark 1.22
+         edge line vs surface   light 4.60   dark 5.46
+         label vs fill          light 19.8   dark 14.6 */
+    --diagram-surface: #121110;
+    --diagram-node-bg: #26241f;
+    --diagram-node-border: #767269;
+    --diagram-line: #8d8a80;
+    --diagram-label: #f8f8f6;
+    --diagram-cluster: #1c1b18;
+
     /* ── Semantic: orchestration (from Anthropic palette) ── */
     --permission: 213 80% 79%; /* _blue-200 — Anthropic accent-000 */
     --plan-mode: 158 52% 49%; /* _aqua-300 — Anthropic aqua for plan context */
@@ -411,6 +439,15 @@
        LIGHTER than --surface, so "deepest layer" was actually the shallowest
        and the workspace panel had no recess at all. */
     --surface-deep: 48 25% 89.5%;
+
+    /* Diagram tokens — light. See the :root block for why these exist and
+       the measured ratios they hold. */
+    --diagram-surface: #f2f0ea;
+    --diagram-node-bg: #ffffff;
+    --diagram-node-border: #8c8880;
+    --diagram-line: #6f6c64;
+    --diagram-label: #0a0a0a;
+    --diagram-cluster: #e7e4db;
 
     /* ── Semantic: orchestration (from Anthropic palette) ── */
     --permission: 213 77% 47%; /* darkened from _blue-400: 3.49:1 as text on cream */
@@ -1160,4 +1197,48 @@
 @media (prefers-reduced-motion: reduce) {
   [class*="animate-[wiki-"] { animation: none !important; }
   .src-card-flash { animation: none !important; }
+}
+
+/* ── Mermaid diagram labels ───────────────────────────────────────────────
+   `mermaid-renderer.ts` sets `flowchart.htmlLabels`, so node and edge labels
+   are real HTML inside a foreignObject and can be styled. Without these
+   rules a label that wraps onto several lines is set at the browser's
+   default leading, which is far too loose inside a node box and leaves a
+   multi-line node looking broken beside a single-line one.
+
+   Scoped to the two mermaid mounts — the inline block and the zoom modal —
+   rather than applied globally, so nothing else that happens to render a
+   `.nodeLabel` is caught by them. */
+.mermaid-surface .nodeLabel,
+.mermaid-surface .edgeLabel,
+.mermaid-surface .label {
+  line-height: 1.35;
+  overflow-wrap: break-word;
+}
+
+/* Mermaid emits label text wrapped in a <p>; the console's prose rules would
+   otherwise give it a paragraph's margins inside the node box. */
+.mermaid-surface .nodeLabel p,
+.mermaid-surface .edgeLabel p,
+.mermaid-surface .label p {
+  margin: 0;
+  line-height: inherit;
+}
+
+.mermaid-surface foreignObject > div {
+  text-align: center;
+}
+
+/* Node outlines at 1px read thin even once the colour clears 3:1 — a 90px
+   box's boundary carries more meaning than a panel hairline does. Mermaid
+   writes stroke-width as an INLINE style attribute, which a stylesheet rule
+   cannot outrank, so this is one of the narrow cases !important is for.
+   Edge paths keep mermaid's own width: they are already the most visible
+   thing on the canvas and thickening them muddies the arrowheads. */
+.mermaid-surface .node rect,
+.mermaid-surface .node polygon,
+.mermaid-surface .node circle,
+.mermaid-surface .node ellipse,
+.mermaid-surface .node path {
+  stroke-width: 1.25px !important;
 }

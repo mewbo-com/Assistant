@@ -10,6 +10,10 @@ on:
       - "apps/mewbo_ha_conversation/**"
       - "tests/**"
       - "demo/seeder/**"
+      # The generators under scripts/ci are the only other way a COMMITTED
+      # generated artifact drifts from its source, and both have a freshness
+      # test in tests/ — which cannot run on a change this filter excludes.
+      - "scripts/ci/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/coverage.yml"
@@ -54,12 +58,20 @@ jobs:
         run: |
           uv sync --all-extras --group dev
 
+      # pytest-cov's own flags, NOT `coverage run -m pytest`. The bare form
+      # instruments only the outer process, so the moment this run is
+      # distributed the workers — spawned through execnet — go uncounted and the
+      # report silently collapses toward zero for everything they executed.
+      # pytest-cov starts coverage inside each worker and combines the data
+      # itself. `--cov-report=` suppresses its own terminal output; the report
+      # and xml steps below read ${COVERAGE_FILE} exactly as before.
       - name: Run pytest with coverage
         run: |
-          .venv/bin/coverage run \
-            --data-file "${COVERAGE_FILE}" \
-            --source=mewbo_core,mewbo_tools,mewbo_ha_conversation \
-            -m pytest
+          .venv/bin/python -m pytest \
+            --cov=mewbo_core \
+            --cov=mewbo_tools \
+            --cov=mewbo_ha_conversation \
+            --cov-report=
           .venv/bin/coverage report --data-file "${COVERAGE_FILE}" --skip-covered
           .venv/bin/coverage xml --data-file "${COVERAGE_FILE}" -o coverage.xml
 

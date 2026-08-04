@@ -26,18 +26,19 @@ export interface SettingsSectionProps {
   advanced: boolean;
   /** Full dot-path → is-set map from `GET /api/config` (drives secret widgets). */
   secrets: Record<string, boolean>;
-  /**
-   * Whether the server can actually persist a PATCH right now (`storage.writable`
-   * from `useConfig`). Defaults to `true` so existing callers/tests that don't
-   * pass it are unaffected; the shell is the one place that computes `false`.
-   */
-  writable?: boolean;
   onChange: (next: Record<string, unknown>) => void;
   /**
    * Persist the section. Resolves `true` on success, `false` on a failed
    * PATCH (the server's reason is already surfaced by the shell's
-   * `saveError` banner) — the caller MUST branch on this, since a rejected
+   * `saveError` alert) — the caller MUST branch on this, since a rejected
    * save must not announce "Saved" or clear the field the user just typed.
+   *
+   * That alert is the only thing standing between a user and a silent
+   * failure, which is why Save is NOT gated on the store's writability: this
+   * section used to take a `writable` prop and disable Save when the config
+   * directory was read-only, and a disabled control explains nothing once the
+   * banner that came with it is gone. Attempting the save is safe — the
+   * server validates, refuses, and changes nothing.
    */
   onSave: () => Promise<boolean>;
 }
@@ -49,7 +50,6 @@ export function SettingsSection({
   original,
   advanced,
   secrets,
-  writable = true,
   onChange,
   onSave,
 }: SettingsSectionProps) {
@@ -94,7 +94,7 @@ export function SettingsSection({
             type="button"
             variant="primary"
             size="md"
-            disabled={!dirty || saving || !writable}
+            disabled={!dirty || saving}
             onClick={handleSave}
             leadingIcon={
               saving ? (

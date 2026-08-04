@@ -1,5 +1,7 @@
 # Structured Outputs
 
+## Get JSON that fits a schema
+
 ```mermaid
 flowchart LR
     A([Client]) -->|"query + schema"| B["POST /v1/structured"]
@@ -14,9 +16,9 @@ flowchart LR
     D -->|"policy fires"| P["structured exception"]
 ```
 
-Structured Outputs lets you run an agentic Mewbo session constrained to a JSON Schema you provide. Instead of a free-form answer, the session must emit a validated object matching your schema. This makes it the right choice for automated pipelines, agent-to-agent communication, and anywhere you need machine-readable output rather than prose.
+Structured Outputs runs an agentic Mewbo session constrained to a JSON Schema you provide. The session emits a validated object matching that schema instead of free text. Reach for it when a pipeline, another agent, or any consumer downstream needs machine readable output rather than prose.
 
-Two endpoints plus a mode cover the latency spectrum. Pick by how much work the answer needs:
+Two endpoints plus a mode cover the latency spectrum. Pick by how much work the answer needs.
 
 | Endpoint or mode | What you get | Profile |
 |---|---|---|
@@ -28,9 +30,9 @@ All three are session-backed. Every run leaves an auditable transcript and a Lan
 
 ## How it works
 
-POST a query and a JSON Schema to [/v1/structured](endpoint:POST /v1/structured). Mewbo starts an agentic session internally. The session can call grounding tools, search connected sources, and use its knowledge to assemble the answer. When it is ready, the session calls an [EmitStructuredResponse](repo:packages/mewbo_core/src/mewbo_core/loop/structured_response.py) tool that validates the payload against your schema. If the object does not match, the model is asked to fix it through the normal tool-result loop. No special control mechanism is needed.
+POST a query and a JSON Schema to [/v1/structured](endpoint:POST /v1/structured). The session assembles the answer, then calls [EmitStructuredResponse](repo:packages/mewbo_core/src/mewbo_core/loop/structured_response.py) to validate it against your schema. A mismatch returns as an ordinary tool result and the model is asked to fix it, so no separate control mechanism sits underneath.
 
-The POST returns a run handle right away. Runs that finish within a few seconds come back inline with `status: "completed"` and the output attached. For everything else, poll [GET /v1/structured/{run_id}](endpoint:GET /v1/structured/{run_id}), or attach to the live event stream (see below).
+The POST returns a run handle right away. A run that finishes within a few seconds comes back inline with `status: "completed"` and the output attached. Everything else is polled from [GET /v1/structured/{run_id}](endpoint:GET /v1/structured/{run_id}) or watched over the live event stream.
 
 **Request fields**
 
@@ -44,7 +46,7 @@ The POST returns a run handle right away. Runs that finish within a few seconds 
 
 **Extract all public API endpoints from a codebase**
 
-Send a [POST /v1/structured](endpoint:POST /v1/structured):
+Send a [POST /v1/structured](endpoint:POST /v1/structured).
 
 ```json
 {
@@ -71,7 +73,7 @@ Send a [POST /v1/structured](endpoint:POST /v1/structured):
 }
 ```
 
-The response comes back immediately with a run handle:
+The run handle comes back immediately.
 
 ```json
 {
@@ -81,7 +83,7 @@ The response comes back immediately with a run handle:
 }
 ```
 
-Poll [GET /v1/structured/{run_id}](endpoint:GET /v1/structured/{run_id}) until `status` is `completed`, then read `output`:
+Poll [GET /v1/structured/{run_id}](endpoint:GET /v1/structured/{run_id}) until `status` is `completed`, then read `output`.
 
 ```json
 {
@@ -89,7 +91,6 @@ Poll [GET /v1/structured/{run_id}](endpoint:GET /v1/structured/{run_id}) until `
   "status": "completed",
   "output": {
     "endpoints": [
-      { "path": "/v1/users", "method": "GET" },
       { "path": "/v1/users", "method": "POST", "body_schema": { "type": "object" } }
     ]
   }
@@ -100,17 +101,17 @@ Failures always come back as a structured envelope, `{"error": {"code": ..., "re
 
 ### Watching a run live
 
-You do not have to poll. The run handle is `<session_id>:r<seq>`, so everything before the first colon is the id of the backing session. Attach to [GET /api/sessions/{session_id}/stream](endpoint:GET /api/sessions/{session_id}/stream) and the session's events arrive over SSE as they happen: tool calls, sub-agent probe fan-out, and the final output. The stream is push-based, not a poll loop, so events land the moment they are appended. Polling [GET /v1/structured/{run_id}](endpoint:GET /v1/structured/{run_id}) stays available for callers that prefer it.
+The run handle is `<session_id>:r<seq>`, so everything before the first colon is the backing session's id. Attach to [GET /api/sessions/{session_id}/stream](endpoint:GET /api/sessions/{session_id}/stream) instead of polling and the events arrive over Server-Sent Events as they happen, from tool calls and sub-agent probe fan-out through to the final output.
 
 ## Workspace grounding
 
-Pass `workspace` and the session is grounded in your data, not the model's general knowledge. You get the same provenance guarantees as [Agentic Search](../features-search.md), packaged into a typed, schema-validated result. The value you pass picks the grounding mode.
+Pass `workspace` and the session is grounded in your data rather than the model's general knowledge. You get the same provenance guarantees as [Agentic Search](../features-search.md), in a typed result validated against your schema. The value you pass picks the grounding mode.
 
 **Wiki grounding.** A wiki slug grounds the run in that project's indexed sources through the default retrieval path. This is the baseline grounded run.
 
-**Graph-first grounding.** An [Agentic Search](../features-search.md) workspace whose sources are mapped into the Source Capability Graph routes the run graph-first. It is still one ordinary agentic session, but it is granted the workspace-scoped graph: routing tools plus the workspace's connector tools. The session consults the graph before anything else. `scg_route` proposes qualified pathways, scoped to the workspace's own sources only. The session then fans out one `scg-path-probe` sub-agent per promising pathway, aggregates what the probes bring back, and emits the schema-validated object.
+**Graph-first grounding.** Map an [Agentic Search](../features-search.md) workspace's sources into the Source Capability Graph and the run routes graph first, granted that workspace's slice of the graph and its connector tools. `scg_route` proposes pathways over those sources only. One `scg-path-probe` sub-agent fans out per pathway, and the probe results are aggregated into the emitted object.
 
-Graph-first runs record their audit trail. [GET /v1/structured/{run_id}](endpoint:GET /v1/structured/{run_id}) carries an additive `provenance` block alongside the output:
+Graph-first runs record their audit trail. [GET /v1/structured/{run_id}](endpoint:GET /v1/structured/{run_id}) carries an additive `provenance` block alongside the output.
 
 ```json
 "provenance": {
@@ -120,29 +121,29 @@ Graph-first runs record their audit trail. [GET /v1/structured/{run_id}](endpoin
 }
 ```
 
-It tells the story: graph consulted, probes executed, object emitted. Runs that fan out no probes simply omit the block, so the wire shape only carries provenance when there is something to carry.
+A run that fans out no probes omits the block, so provenance rides the wire only when there is something to carry.
 
-Eligibility is automatic. Graph-first requires the SCG feature on (`scg.enabled`) and at least one of the workspace's sources mapped. Anything else, a wiki slug, an unmapped workspace, SCG off, or any resolution failure, falls back silently to the default grounded path. The wire shape is identical either way.
+Eligibility is automatic. Graph-first needs `scg.enabled` on and at least one of the workspace's sources mapped. A wiki slug, an unmapped workspace, SCG off, or any resolution failure falls back silently to the default grounded path. The wire shape is identical either way.
 
 > [!TIP] What makes an answer grounded
-> Workspace grounding means the agent traverses your indexed sources before writing a single token of the output object. Graph-first runs go further: the pathway and probe provenance in the result shows exactly which routes through your sources produced the answer.
+> Your indexed sources are traversed before a single token of the output object is written.
 
 ## Fast synthesis mode
 
-When you want a schema-validated object in one round trip, add `"mode": "synthesis"` to the request body. The synthesis path skips the agent loop entirely. No tools are bound. The server fetches grounding citations for your query, issues a single model call with the emit tool, and validates the result against your schema. One validation failure triggers one reask. A second failure returns a `422` with the structured error envelope. The response is returned inline, so no polling is required.
+Add `"mode": "synthesis"` to the request body. The server fetches grounding citations, issues one model call with the emit tool, and validates the result. One validation failure triggers one reask. A second returns a `422` with the structured error envelope.
 
-Request body: `query` (required), `schema` (required), `mode: "synthesis"` (required to select this path), `workspace` (an optional wiki slug for grounding), and `model` (an optional LiteLLM model id override).
+`mode` joins the same `query` and `schema` the agentic path takes. `workspace` grounds it on a wiki slug.
 
 ```json
 {
   "query": "List every public REST endpoint this project exposes.",
-  "schema": { "type": "object", "properties": { "endpoints": { "type": "array", "items": { "type": "object" } } }, "required": ["endpoints"] },
+  "schema": { "type": "object", "properties": { "endpoints": { "type": "array" } }, "required": ["endpoints"] },
   "workspace": "my-api-codebase",
   "mode": "synthesis"
 }
 ```
 
-The response arrives inline, without polling:
+The response arrives inline, with no polling.
 
 ```json
 {
@@ -156,17 +157,17 @@ The response arrives inline, without polling:
 }
 ```
 
-`output` validates the schema you provided. `citations` lists the grounding sources used. The `run_id` handle (`<session_id>:r1`) still resolves via [GET /v1/structured/{run_id}](endpoint:GET /v1/structured/{run_id}) if you need to re-fetch it.
+`output` validates against the schema you provided and `citations` lists the grounding sources used. The `run_id` handle still resolves via [GET /v1/structured/{run_id}](endpoint:GET /v1/structured/{run_id}) if you need to re-fetch it.
 
-Each synthesis run mints a real session. The `run_id` prefix keys the run's transcript and its Langfuse trace, so a synthesis run is just as auditable as a full agentic one. Persistence is write-behind: the transcript is stored after the response is sent, so session backing adds nothing to the latency path.
+Each synthesis run mints a real session, and the `run_id` prefix keys its transcript and Langfuse trace. The transcript is written behind the response, so session backing costs nothing on the latency path.
 
 ## Draft streaming
 
-Sometimes you do not need a schema. You need a readable draft on screen as fast as possible. [POST /v1/draft/stream](endpoint:POST /v1/draft/stream) streams a free-text answer token by token over Server-Sent Events. It is tool-light by design: one streaming model call, no tool use, no agent loop. Pass a `workspace` wiki slug and the server retrieves grounding context once, before streaming begins.
+[POST /v1/draft/stream](endpoint:POST /v1/draft/stream) streams a free-text answer token by token over Server-Sent Events, for when you want a readable draft on screen and no schema. It makes one streaming model call, with no tool use and no agent loop. Pass a `workspace` wiki slug and the server retrieves grounding context once, before streaming begins.
 
-Request body: `query` (required), `workspace` (an optional wiki slug for grounding), and `model` (an optional LiteLLM model id override).
+The body takes a required `query`, an optional `workspace` wiki slug for grounding, and an optional `model` override.
 
-The response is `text/event-stream`. Each token arrives as its own frame, and a terminal frame closes the stream:
+The response is `text/event-stream`. Each token arrives as its own frame and a terminal frame closes the stream.
 
 ```
 data: {"token": "The"}
@@ -178,17 +179,17 @@ data: {"token": " exposes"}
 data: {"done": true, "session_id": "9e2d47c1c0a94d3b8f6a5e1b2c3d4e5f"}
 ```
 
-If the stream fails mid-flight you get an honest error frame instead of the done frame:
+A stream that fails mid flight sends an error frame instead of the done frame.
 
 ```
 data: {"error": "<reason>"}
 ```
 
-Drafts are session-backed too. The `session_id` rides the terminal `done` frame, and it is also sent up front in the `X-Mewbo-Session` response header before the first token. The header is exposed for cross-origin reads, so browser clients can grab it immediately. Pure SSE consumers can wait for the done frame instead. The full transcript persists write-behind after the last token, and a stream that died mid-flight is recorded as `failed`, never as a false `completed`.
+The `session_id` also arrives up front in the `X-Mewbo-Session` response header, exposed for cross-origin reads so a browser client has it before the first token. The transcript persists after the last token, and a stream that died mid flight is recorded as `failed` rather than a false `completed`.
 
 ## Policy integration
 
-Named [Policies](../features-policies.md) can be activated per-request via the `policies` field:
+Activate named [Policies](../features-policies.md) per request with the `policies` field.
 
 ```json
 {
@@ -198,10 +199,10 @@ Named [Policies](../features-policies.md) can be activated per-request via the `
 }
 ```
 
-If a policy fires, the endpoint returns the structured exception in the response body instead of the schema output. The caller always receives a typed, parseable result regardless of which path was taken. This is a clean contract for quality-gated workflows.
+When a policy fires, the endpoint returns the structured exception in the response body instead of the schema output. Either path gives the caller a typed result it can parse, which is what makes this usable as a quality gate.
 
 > [!NOTE] Terminal policies and structured outputs
-> A policy with `isTerminal: true` will end the session immediately on a violation and surface the structured exception as the run's final output. See [Policies](../features-policies.md#terminal-violations) for details.
+> A policy with `isTerminal: true` ends the session immediately on a violation and surfaces the structured exception as the run's final output. See [Policies](../features-policies.md#terminal-violations) for details.
 
 ## Run lifecycle
 
@@ -212,49 +213,39 @@ If a policy fires, the endpoint returns the structured exception in the response
 | `failed` | The session ended without emitting a valid object. |
 | `canceled` | The run was canceled before it completed. |
 
-A run that reaches a terminal state without a valid object answers [GET /v1/structured/{run_id}](endpoint:GET /v1/structured/{run_id}) with a `422` and the structured error envelope. Output present always reports `completed`. The emit tool only fires on success, so a payload is proof of completion.
+A run that reaches a terminal state without a valid object answers [GET /v1/structured/{run_id}](endpoint:GET /v1/structured/{run_id}) with a `422` and the structured error envelope. The emit tool fires only on success, so an output present is proof the run completed.
 
 ## REST reference
 
-```
-POST   /v1/structured                    Run a schema-constrained agentic query (async, returns run_id)
-POST   /v1/structured  {mode:synthesis}  Retrieval-only synthesis, one round trip (inline response)
-GET    /v1/structured/{run_id}           Fetch run status, output, and graph-first provenance
-POST   /v1/draft/stream                  Token-streaming draft answer over SSE
-GET    /api/sessions/{session_id}/stream Live SSE feed of a run's backing session
-```
-
-Full parameters, response shapes, and ready-to-run request samples for every endpoint live in the [REST API Reference](../rest-api.md).
+Every field, response shape and error model for these four endpoints is in the [REST API Reference](../rest-api.md), generated from the live server.
 
 ## MCP tools
 
-Two tools on the [MCP Server](../clients-mcp.md) expose this endpoint to agents on your fleet:
+Two tools on the [MCP Server](../clients-mcp.md) expose this endpoint to agents on your fleet.
 
 | Tool | Purpose |
 |---|---|
 | `structured_query(query, schema, workspace?, tool_ids?)` | Start a structured run. Returns a `run_id` immediately. |
 | `get_structured_run(run_id)` | Fetch the current status and result of a run. Re-engage after a timeout. |
 
-`structured_query` posts to the same [/v1/structured](endpoint:POST /v1/structured) endpoint, so workspace grounding and graph-first routing apply to MCP callers unchanged.
-
-See [MCP Server](../clients-mcp.md) for authentication and setup.
+`structured_query` posts to the same [/v1/structured](endpoint:POST /v1/structured) endpoint, so workspace grounding and graph-first routing reach MCP callers unchanged. See [MCP Server](../clients-mcp.md) for authentication and setup.
 
 ## Enabling it
 
-Structured Outputs is part of `mewbo-api`. Full workspace grounding requires the wiki extras:
+Structured Outputs ships in `mewbo-api`. Full workspace grounding needs the wiki extras.
 
 ```bash
 uv sync --extra wiki
 uv run mewbo-api
 ```
 
-Without the extras the endpoint still works for schema-constrained sessions. Workspace grounding is silently skipped when the extra is absent. Graph-first grounding additionally needs the Source Capability Graph: enable `scg.enabled` and map at least one of the workspace's sources. See [Agentic Search](../features-search.md).
+Without the extras the endpoint still serves schema-constrained sessions, and workspace grounding is silently skipped. Graph-first grounding additionally needs the Source Capability Graph. Enable `scg.enabled` and map at least one of the workspace's sources. See [Agentic Search](../features-search.md).
 
 > [!NOTE] Going deeper
-> Structured runs are ordinary agentic sessions under the hood. They use the same [ToolUseLoop](repo:packages/mewbo_core/src/mewbo_core/loop/tool_use_loop.py) and [Sub-agent](../features-agents.md) model. The schema constraint and `EmitStructuredResponse` tool are layered on top, not a separate execution path. The graph-first discipline is the same story: a capability grant plus a playbook on the same loop, not a second engine.
+> A structured run is an ordinary agentic session on the same [ToolUseLoop](repo:packages/mewbo_core/src/mewbo_core/loop/tool_use_loop.py) and [Sub-agent](../features-agents.md) model. The schema constraint, `EmitStructuredResponse` and graph-first routing are layered on that one loop, not a second engine.
 
 ## Next steps
 
-- [Building a Client](building-a-client.md): the full session lifecycle over HTTP.
-- [Automation](automation.md): drive issue pickup and PR workflows through the API.
-- [Full API reference](../rest-api.md): every route, parameter, and response shape.
+- [Building a Client](building-a-client.md) walks the full session lifecycle over HTTP.
+- [Automation](automation.md) drives issue pickup and PR workflows through the API.
+- The [full API reference](../rest-api.md) carries every route, parameter, and response shape.

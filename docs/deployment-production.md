@@ -1,35 +1,39 @@
 # Production Setup
 
-Running Mewbo in production means hardening the default Docker Compose setup with TLS termination, proper authentication tokens, CORS restriction, and observability. This page covers the production checklist and the nginx reverse proxy configuration.
+## Production hardening
+
+The default Compose stack ships a public example token, a wildcard CORS origin and default MongoDB credentials. Close those first.
 
 ## Security Checklist
 
-1. **Rotate `MEWBO_MASTER_API_TOKEN`**. The example value is public. Generate a strong random token:
+1. **Rotate `MEWBO_MASTER_API_TOKEN`**. The example value is public. Generate a strong random token.
    ```bash
    openssl rand -hex 32
    ```
-   Set it in `.env` as both `MEWBO_MASTER_API_TOKEN` and `MEWBO_VITE_API_KEY` (they must match).
+   Set it in `.env` as both `MEWBO_MASTER_API_TOKEN` and `MEWBO_VITE_API_KEY`, which must match.
 
-2. **Restrict `CORS_ORIGIN`**. The default `*` allows any origin. In production, set it to your actual domain:
-   ```dotenv
+2. **Restrict `CORS_ORIGIN`**. The default `*` allows any origin. In production, set it to your actual domain.
+   ```dotenv title=".env"
    CORS_ORIGIN=https://mewbo.example.com
    ```
 
 3. **Use TLS**. Terminate TLS at a reverse proxy such as nginx, Caddy, or Traefik. Never expose the API or console ports directly on a public interface.
 
-4. **Set `GITHUB_TOKEN` in `.env`**. If you mount git repositories, the [`10-git-setup.sh`](repo:docker/init.d/10-git-setup.sh) init script uses this token to configure `gh CLI` authentication. That lets `git fetch/push/pull` work without prompts.
+4. **Set `GITHUB_TOKEN` in `.env`**. If you mount git repositories, [`10-git-setup.sh`](repo:docker/init.d/10-git-setup.sh) uses this token to configure `gh CLI` authentication, so `git fetch`, `push` and `pull` run without prompts.
 
-5. **Change MongoDB credentials**. Update `MONGO_INITDB_ROOT_USERNAME` and `MONGO_INITDB_ROOT_PASSWORD` in `.env` from their defaults. Then update `MEWBO_MONGODB_URI` to match.
+5. **Change MongoDB credentials**. Update `MONGO_INITDB_ROOT_USERNAME` and `MONGO_INITDB_ROOT_PASSWORD` in `.env` from their defaults, then update `MEWBO_MONGODB_URI` to match.
 
-6. **Consider per-user accounts**. A shared master token cannot tell one caller from another. If you need per-user identity, roles, or an audit trail, see [Authentication & Access](authentication.md). It is opt-in, and leaving it off keeps the shared-token behavior above.
+6. **Consider per user accounts**. A shared master token cannot tell one caller from another. For per user identity, roles or an audit trail, see [Authentication & Access](authentication.md). It is opt in.
 
 ## Secrets management (optional)
 
-A production deployment doesn't have to keep secrets in a plaintext `.env` on disk. `MEWBO_ENV_FILE` lets a deployment point at a file rendered somewhere else — from a secrets manager into a private location at deploy time — instead of the repo-root `.env`. `[Makefile](repo:Makefile)` ships `ssm-bootstrap` and `redeploy` targets as one working example of this pattern: binding a checkout to a secrets project once, then having every subsequent `make redeploy` resolve secrets fresh at deploy time and rebuild the stack, with nothing sensitive ever committed or left sitting in the working tree. Swap in whatever secrets manager your own deployment already uses — the load-bearing piece is `MEWBO_ENV_FILE`, not the specific tool.
+Secrets do not have to sit in a plaintext `.env` on disk. `MEWBO_ENV_FILE` points the stack at a file rendered elsewhere, for example by a secrets manager writing into a private location at deploy time.
+
+[`Makefile`](repo:Makefile) ships `ssm-bootstrap` and `redeploy` targets as one working example. A checkout binds to a secrets project once, then every `make redeploy` resolves secrets fresh and rebuilds the stack, with nothing sensitive committed to the tree. The load bearing piece is `MEWBO_ENV_FILE`, so swap in whatever secrets manager you already use.
 
 ## TLS with nginx
 
-The repository includes a ready-to-use nginx reverse proxy config. Install it on the host machine (outside Docker):
+The repository ships a working nginx reverse proxy config. Install it on the host, outside Docker, after setting your `server_name`, `ssl_certificate` and `ssl_certificate_key`.
 
 ```bash
 sudo ln -s /path/to/mewbo/docker/nginx-reverse-proxy.conf \
@@ -37,95 +41,9 @@ sudo ln -s /path/to/mewbo/docker/nginx-reverse-proxy.conf \
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-Edit the file to set your `server_name`, `ssl_certificate`, and `ssl_certificate_key` before enabling it.
-
-**Full nginx server block (from [`docker/nginx-reverse-proxy.conf`](repo:docker/nginx-reverse-proxy.conf)):**
-
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name mewbo.example.com;
-
-    ssl_certificate     /path/to/your/server.crt;
-    ssl_certificate_key /path/to/your/server.key;
-
-    # Web IDE: WebSocket upgrade + long timeout
-    location /ide/ {
-        proxy_pass http://127.0.0.1:5126;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_read_timeout 3600s;
-        proxy_buffering off;
-    }
-
-    # Console (frontend SPA)
-    location / {
-        proxy_pass http://127.0.0.1:3001;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    # API: SSE streaming endpoints need no buffering
-    location /api/sessions/ {
-        proxy_pass http://127.0.0.1:5125;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Connection '';
-        proxy_http_version 1.1;
-        proxy_buffering off;
-        proxy_cache off;
-        chunked_transfer_encoding off;
-        proxy_read_timeout 300s;
-    }
-
-    # API: all other endpoints
-    location /api/ {
-        proxy_pass http://127.0.0.1:5125/api/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    # Wiki SSE: indexing + QA event streams need no buffering
-    location ~ ^/v1/wiki/(index|qa)/[^/]+/stream$ {
-        proxy_pass http://127.0.0.1:5125;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Connection '';
-        proxy_http_version 1.1;
-        proxy_buffering off;
-        proxy_cache off;
-        chunked_transfer_encoding off;
-        proxy_read_timeout 300s;
-    }
-
-    # Wiki API: all other wiki endpoints
-    location /v1/wiki/ {
-        proxy_pass http://127.0.0.1:5125/v1/wiki/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-
-# HTTP → HTTPS redirect
-server {
-    listen 80;
-    server_name mewbo.example.com;
-    return 301 https://$host$request_uri;
-}
-```
+[`docker/nginx-reverse-proxy.conf`](repo:docker/nginx-reverse-proxy.conf) already routes the console, the API,
+the wiki event streams and the Web IDE. These are the settings that break Mewbo when a hand written
+config omits them.
 
 ### Key nginx settings for Mewbo
 
@@ -138,15 +56,15 @@ server {
 | `proxy_read_timeout 3600s` + WebSocket headers on `/ide/` | code-server uses WebSockets; upgrade headers and a long timeout are required. |
 | `proxy_buffering off` on `/ide/` | Prevents nginx from interfering with the WebSocket connection. |
 
-Since both the API (`5125`) and console (`3001`) use host networking, `127.0.0.1` is reachable from the host-level nginx.
+The API and console both use host networking, so nginx on the host reaches them at `127.0.0.1`.
 
 ## Observability with Langfuse
 
-Langfuse provides LLM-level tracing for every session. Each multi-turn session appears as one trace group, making it straightforward to see which tools were called, what the model reasoned, and where errors occurred.
+Langfuse gives you LLM level tracing. A multi turn session appears as one trace group carrying every tool call, every model response and every error.
 
-Add Langfuse config to [`configs/app.json`](repo:configs/app.example.json):
+Add Langfuse config to [`configs/app.json`](repo:configs/app.example.json).
 
-```json
+```json title="configs/app.json"
 {
   "langfuse": {
     "enabled": true,
@@ -157,16 +75,16 @@ Add Langfuse config to [`configs/app.json`](repo:configs/app.example.json):
 }
 ```
 
-For a self-hosted Langfuse instance, set `host` to your deployment URL. By default [`configs/app.json`](repo:configs/app.example.json) is mounted **read-write** into the API container: editing the file on the host and running `docker compose up -d` picks up the change (no rebuild needed), and the same writable mount is what lets the console's Settings page and [PATCH /api/config](endpoint:PATCH /api/config) save configuration changes back to disk. Mounting the directory read-only is a valid choice for an operator who wants configuration to be host-controlled only, but it means every Settings save and every `PATCH /api/config` call fails with a 500 rather than persisting. Decide that tradeoff deliberately rather than discovering it as an error.
+For a self hosted Langfuse instance, set `host` to your deployment URL.
+
+By default [`configs/app.json`](repo:configs/app.example.json) mounts read write, so editing it on the host and running `docker compose up -d` picks up the change with no rebuild. That writable mount is also what lets the console's Settings page and [PATCH /api/config](endpoint:PATCH /api/config) save back to disk. Mount it read only to keep configuration host controlled, and accept that every save then fails with a 500.
 
 > [!IMPORTANT] Mount the directory, not a single file
-> Bind-mount the whole `configs/` directory, not `configs/app.json` as a standalone file. A configuration save replaces `app.json` with an atomic rename, and renaming over a path that is itself a bind-mount point fails with `EBUSY`. Mounting the parent directory keeps that rename inside a single filesystem, so saves stay atomic. This is the shape [`docker-compose.yml`](repo:docker-compose.yml) uses by default; don't narrow it to a single-file bind when writing your own override.
+> Mount the whole `configs/` directory, not `configs/app.json` as a standalone file. A configuration save replaces `app.json` with an atomic rename, and renaming over a path that is itself a mount point fails with `EBUSY`. This is the shape [`docker-compose.yml`](repo:docker-compose.yml) uses by default, so do not narrow it in your own override.
 
 ### Filtering traces by provenance
 
-Every trace is tagged at run start with provenance facets, so you can slice the Langfuse dashboard by what produced the traffic. Use them to answer operator questions directly: which product is burning tokens, which repo's wiki indexing failed, which client surface sent a bad request.
-
-Facets appear as `key:value` trace tags. The available keys:
+Every trace is tagged at run start, so you can slice the dashboard by which product is burning tokens or which client surface sent a bad request. Facets appear as `key:value` trace tags.
 
 | Facet | Example values |
 |-------|----------------|
@@ -180,50 +98,43 @@ Facets appear as `key:value` trace tags. The available keys:
 | `workspace` | Structured-response or search workspace. |
 | `model` | Model id the session was created with. |
 
-Trace metadata carries a superset of the tags. It adds high-cardinality fields that would bloat the tag list: `worktree` (for sessions running in an ephemeral managed worktree), per-product ids such as `wiki_id` and `search_id`, channel and thread ids, and the session's `capabilities`. Filter on metadata when you need a specific id.
+Higher cardinality facets land in trace metadata instead of the tag list. Filter on metadata when you want one specific id.
 
-API clients can stamp their surface by sending an optional `X-Mewbo-Surface` header on requests. The API defaults it to `api` when absent. The header is already in the CORS allow-list, so browser clients can send it cross-origin. A path that never stamps a surface shows up as `surface:unknown` rather than untagged, which keeps un-instrumented clients findable.
+API clients stamp their surface with an optional `X-Mewbo-Surface` header, defaulting to `api` when absent. It is already in the CORS allow list, so browser clients can send it cross origin. A path that never stamps a surface shows up as `surface:unknown` rather than untagged, which keeps uninstrumented clients findable.
 
-See [Troubleshooting](troubleshooting.md) for the recommended sequence: MongoDB transcript → Langfuse traces → config → Docker env.
+See [Troubleshooting](troubleshooting.md) for the recommended sequence, from the MongoDB transcript to Langfuse traces to config to Docker env.
 
 ## Health Monitoring
 
-The API does not expose a dedicated health endpoint. Use one of these approaches to verify liveness:
+The API exposes no dedicated health endpoint. For uptime checks and alerting, probe [`GET /api/tools`](endpoint:GET /api/tools) with your API key. It returns a populated list when the API is healthy.
 
 ```bash
-# Check if the API responds
 curl -sk http://localhost:5125/api/tools -H "X-API-Key: your-token" | jq length
-
-# Stream container logs
-docker compose logs -f api
-
-# Check container status
-docker compose ps
 ```
 
-For external monitoring (uptime checks, alerting), probe [`GET /api/tools`](endpoint:GET /api/tools) with your API key. It returns a non-empty list when the API is healthy.
+For logs and container state, see [Troubleshooting](troubleshooting.md).
 
 ## API Token Rotation
 
-To rotate `MEWBO_MASTER_API_TOKEN`:
+Rotate `MEWBO_MASTER_API_TOKEN` in two steps.
 
-1. Update `.env`:
-   ```dotenv
+1. Update `.env` with the new value.
+   ```dotenv title=".env"
    MEWBO_MASTER_API_TOKEN=new-strong-random-token
    MEWBO_VITE_API_KEY=new-strong-random-token
    ```
-2. Apply without rebuilding:
+2. Apply without rebuilding.
    ```bash
    docker compose up -d
    ```
 
-The console reads `MEWBO_VITE_API_KEY` from the injected `runtime-config.js` at startup. No image rebuild is needed. Existing browser sessions will get a 401 and prompt for the new key on the next request.
+The console reads `MEWBO_VITE_API_KEY` from the injected `runtime-config.js` at startup, so no image rebuild is needed. Existing browser sessions get a 401 and prompt for the new key on the next request.
 
-If secrets are managed outside the tree (see "Secrets management" below), rotate the value at the source instead and redeploy — editing a local `.env` does nothing once a deployment stops reading it.
+Where secrets are managed outside the tree, rotate the value at the source instead and redeploy. Editing a local `.env` does nothing once a deployment stops reading it.
 
 ## Resource Limits
 
-Every service in [`docker-compose.yml`](repo:docker-compose.yml) ships with memory and CPU limits, so a runaway process cannot take down the host:
+Every service in [`docker-compose.yml`](repo:docker-compose.yml) ships with memory and CPU limits, so a runaway process cannot take down the host.
 
 | Service | Memory limit | CPU limit |
 |---------|-------------|-----------|
@@ -233,9 +144,9 @@ Every service in [`docker-compose.yml`](repo:docker-compose.yml) ships with memo
 | `console` | `256M` | `0.5` |
 | `ide-proxy` | `128M` | `0.5` |
 
-The API gets the largest envelope because it does the heavy lifting: LLM orchestration, wiki indexing, sub-agent fan-out, and Web IDE management. Raise its memory limit if you index very large repositories. Adjust any limit in `docker-compose.override.yml`:
+The API gets the largest envelope because LLM orchestration, wiki indexing, sub-agent fan out and Web IDE management all run inside it. Raise its memory limit if you index very large repositories. Override any limit like this.
 
-```yaml
+```yaml title="docker-compose.override.yml"
 services:
   api:
     deploy:

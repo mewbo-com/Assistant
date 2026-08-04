@@ -1,21 +1,10 @@
 # Compaction
 
-LLM context windows are finite. As a session grows, older turns have to make room for newer work. Otherwise you hit the model's context limit and the run falls over. Mewbo handles this automatically with **compaction**: it summarises older conversation turns into a compact record and injects that summary into each subsequent prompt. The session carries on without losing the thread of work, just with less raw history and more digested history.
+## Keep a long session going
 
-Compaction is transparent. You do not have to intervene, and nothing about how you use the session changes after it runs.
+A long session hits the model's context limit and the run fails. Compaction is what stops that. Older turns are summarised into a compact record that rides along in each following prompt, so the session carries on without losing the thread of work.
 
-**Quick example.** Compact the current session manually:
-
-```
-/compact
-```
-
-Or via the REST API:
-
-```
-POST /api/sessions/{session_id}/query
-{"query": "/compact"}
-```
+It runs on its own, and nothing about how you use the session changes after it does. You can also force it, from any surface.
 
 ---
 
@@ -23,9 +12,9 @@ POST /api/sessions/{session_id}/query
 
 ### Automatic
 
-Auto-compact fires when the most recent root prompt crosses `token_budget.auto_compact_threshold` (default 80% of the model's context window). Mewbo evaluates this after every LLM call using the actual `input_tokens` reported by the provider, not a character-count estimate, so the threshold is accurate even for models with unusual tokenisation.
+Automatic compaction fires when the most recent root prompt crosses `token_budget.auto_compact_threshold`, which defaults to 80 percent of the model's context window. The check runs after every LLM call against the `input_tokens` the provider reports, not a character count estimate, so the threshold holds even for models with unusual tokenisation.
 
-The context window bar in the console shows how full the window is right now and marks the compact threshold. When the bar reaches that marker, compaction runs before the next turn.
+The console's [context window bar](features-token-usage.md#the-context-window-bar-console) marks that threshold. Compaction runs when the fill reaches the marker.
 
 ### Manual
 
@@ -39,30 +28,26 @@ The context window bar in the console shows how full the window is right now and
 
 ## Two modes: PARTIAL and FULL
 
-Compaction has two modes that trade off differently between context detail and context freshness.
+The two modes trade context detail against context freshness.
 
 ### PARTIAL (default for auto-compact)
 
-Keeps the most recent events verbatim (configurable via `context.recent_event_limit`, default 8) and summarises everything older. The model retains full detail for the current state and a digested summary of what led up to it.
-
-Best for **ongoing work**. The recent context stays intact, so the model does not lose track of the file it is editing or the error it is chasing.
+Keeps the most recent events verbatim, `context.recent_event_limit` of them with a default of 8, and summarises everything older. Recent context stays intact, so the model does not lose the file it is editing or the error it is chasing. That makes it the mode for work in progress.
 
 ### FULL
 
-Summarises the entire transcript, including recent events. Produces a clean-slate prompt.
-
-Best for **natural task completion** or when you want to reset context pressure before starting a new sub-task in the same session.
+Summarises the entire transcript, recent events included, and builds the next prompt from a clean slate. Use it when a task has finished, or to reset context pressure before a new phase of work in the same session.
 
 ### Forcing a mode
 
-Pass the mode explicitly:
+Pass the mode explicitly.
 
 ```
 /compact full
 /compact partial
 ```
 
-Or via the API:
+Or use the API.
 
 ```
 POST /api/sessions/{id}/query
@@ -73,9 +58,9 @@ POST /api/sessions/{id}/query
 
 ## Caveman mode
 
-Enable `compaction.caveman_mode` to activate a terser summary prompt. It drops articles, filler phrases, pleasantries, and hedging from the prose while preserving code blocks, file paths, URLs, CLI commands, and error strings verbatim. On prose-heavy sessions it reduces compaction output tokens by roughly 30–60% without losing the load-bearing detail.
+`compaction.caveman_mode` switches to a terser summary prompt. It drops articles, filler and hedging from the prose while preserving code blocks, file paths, URLs, commands and error strings verbatim. On prose-heavy sessions it cuts compaction output tokens by roughly 30 to 60 percent.
 
-```json
+```json title="configs/app.json"
 "compaction": {
   "caveman_mode": true
 }
@@ -85,29 +70,29 @@ Enable `compaction.caveman_mode` to activate a terser summary prompt. It drops a
 
 ## After the summary
 
-Once the summary is produced, Mewbo scans the summarised events for files that were read or edited and re-reads the most recently touched ones into the compacted context. That way, if the model was mid-way through editing a file when compaction fired, it can pick up with the current contents in view rather than having to re-read it.
+The most recently touched files are read back into the compacted context, so a file the model was partway through editing arrives with its current contents already in view. [Compaction pipeline](core-orchestration.md#compaction) gives the limits on that.
 
-Compaction is also resilient to sub-agents. Running and completed sub-agent state lives outside the LLM conversation, so compaction never loses track of a spawned worker. The agent tree, their progress notes, and their results all survive.
+Sub-agents survive it untouched. Their state lives outside the LLM conversation, so the agent tree, the progress notes and the results are all still there afterwards.
 
 ---
 
 ## Routing compaction to a different model
 
-By default compaction uses the session's own model. You can route it to a cheaper or faster model, such as a small Haiku-class model for summarising. Set `llm.compact_models`:
+Compaction uses the session's own model by default. `llm.compact_models` routes it to a cheaper or faster one instead, such as a small Haiku class model for summarising.
 
-```json
+```json title="configs/app.json"
 "llm": {
   "compact_models": ["anthropic/claude-haiku-4-5-20251001", "default"]
 }
 ```
 
-Models are tried in priority order; on failure the next entry is used. `"default"` resolves to the running agent's model.
+Models are tried in priority order and the next entry takes over on failure. `"default"` resolves to the running agent's model.
 
 ---
 
 ## Seeing compactions in the UI
 
-Each compaction appears as a distinct pill in the web console timeline. The context window bar popover includes a **Compactions** row showing how many have run and the total tokens saved across them, so you can tell at a glance how much room has been reclaimed over the life of the session.
+Each compaction is a distinct pill in the console timeline, and the context bar popover carries a Compactions row with the run count and the total tokens reclaimed over the life of the session.
 
 ---
 
@@ -116,13 +101,11 @@ Each compaction appears as a distinct pill in the web console timeline. The cont
 | Key | Default | Description |
 |-----|---------|-------------|
 | `token_budget.auto_compact_threshold` | `0.8` | Fraction of the context window (0.0–1.0) at which auto-compact fires. |
-| `token_budget.default_context_window` | `128000` | Fallback context window in tokens when the model is not in LiteLLM's catalogue. |
-| `token_budget.model_context_windows` | `{}` | Per-model overrides. Use to cap below the model's real max or for proxy-only models. |
 | `context.recent_event_limit` | `8` | Events kept verbatim in PARTIAL mode. Everything older is summarised. |
 | `llm.compact_models` | `["default"]` | Priority-ordered model list for compaction. `"default"` = agent's own model. |
 | `compaction.caveman_mode` | `false` | Enable terse summarization prompt (~30–60% fewer output tokens). |
 
-See [configuration.md](configuration.md#token-budget) for the full schema.
+Window sizing lives on [Token Usage](features-token-usage.md#configuration), and [configuration.md](configuration.md#token-budget) has the full schema.
 
 > [!NOTE] How it works internally
 > See [Architecture Overview → Compaction pipeline](core-orchestration.md#compaction).

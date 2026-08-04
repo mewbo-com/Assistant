@@ -1878,8 +1878,7 @@ class TestWallDeadlineWatchdog:
             )
             over_handle.started_at = time.monotonic() - 150.0  # over
             # A real, not-yet-done asyncio.Task — cancel_agent() is a no-op
-            # diagnostic without one. Blocks on an Event (never asyncio.sleep)
-            # so patching asyncio.sleep below can't interfere with it.
+            # diagnostic without one.
             never = asyncio.Event()
             over_task = asyncio.create_task(never.wait())
             over_handle.asyncio_task = over_task
@@ -1888,8 +1887,11 @@ class TestWallDeadlineWatchdog:
             await registry.register(over_handle)
 
             # Drive exactly ONE watchdog sweep with no real waiting: the fake
-            # sleep raises CancelledError on its second call, which the
-            # watchdog's own except clause treats as normal shutdown.
+            # wait raises CancelledError on its second call, which the
+            # watchdog's own except clause treats as normal shutdown. Injected
+            # into THIS loop rather than patched onto ``asyncio``, whose
+            # ``sleep`` every other coroutine in the process also awaits —
+            # a fake that cancels would not stay inside this test.
             call_n = {"i": 0}
 
             async def _fake_sleep(_delay):
@@ -1897,8 +1899,8 @@ class TestWallDeadlineWatchdog:
                 if call_n["i"] > 1:
                     raise asyncio.CancelledError()
 
-            with patch("mewbo_core.loop.tool_use_loop.asyncio.sleep", side_effect=_fake_sleep):
-                await loop._watchdog()
+            loop._watchdog_sleep = _fake_sleep
+            await loop._watchdog()
 
             assert warn_handle.status == "running"  # warn alone never cancels
             assert not warn_handle.message_queue.empty()

@@ -12,7 +12,7 @@ import platform as _platform
 import queue as _queue_mod
 import re
 import time as _time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import date as _date
 from pathlib import Path
@@ -355,6 +355,7 @@ class ToolUseLoop:
         contract: DelegationContract | None = None,
         verification: CommandVerification | None = None,
         verifier_runner: VerifierRunner | None = None,
+        watchdog_sleeper: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         """Initialize the tool-use loop.
 
@@ -434,6 +435,10 @@ class ToolUseLoop:
             verifier_runner: Injected ``VerifierRunner`` (defaults to
                 ``CommandVerifierRunner``). A test passes a recording fake so
                 the gate is exercised without a real subprocess.
+            watchdog_sleeper: Injected wait between watchdog sweeps (defaults
+                to ``asyncio.sleep``). A test drives one sweep by passing a
+                fake, so it never has to patch the stdlib module every other
+                coroutine in the process also awaits through.
         """
         self._ctx = agent_context
         # The run's stop signal, wrapping the SAME predicate the between-turns
@@ -519,6 +524,12 @@ class ToolUseLoop:
         # so every natural completion is accepted unchecked. The runner
         # is injected (default ``CommandVerifierRunner``) so a test drives the
         # gate with a recording fake and never spawns a real subprocess.
+        # The watchdog's poll wait, injected as a collaborator. A caller that
+        # must drive a sweep without waiting for one replaces THIS, rather
+        # than ``asyncio.sleep`` on the stdlib module — that object is shared
+        # by every module and every running loop in the process, so patching
+        # it reaches coroutines this loop has nothing to do with.
+        self._watchdog_sleep = watchdog_sleeper or asyncio.sleep
         self._verification = verification
         self._verifier_runner: VerifierRunner = verifier_runner or CommandVerifierRunner()
         self._verification_active = verification is not None and CommandVerification.gate_active(
@@ -2771,7 +2782,7 @@ class ToolUseLoop:
         reported_wedged_steps: set[int] = set()
         try:
             while True:
-                await asyncio.sleep(check_interval)
+                await self._watchdog_sleep(check_interval)
 
                 # LLM-call liveness. The stall sweep below cannot see this: it
                 # keys on TOOL activity, and a wedged model call has no tool in

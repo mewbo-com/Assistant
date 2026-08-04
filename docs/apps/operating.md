@@ -1,16 +1,14 @@
 # Living with an App
 
-A live app is a running system. This page covers its heartbeat, the panel that shows whether that heartbeat is healthy, and your levers: feed it, pause it, fix it.
+## Keep a running app healthy
 
-Same running example as the [overview](index.md) and [build guide](building.md): markdown trackers plus a `job-applications.csv`, shown as a dashboard.
+A live app keeps running after you stop looking at it. The [overview](index.md) and [build guide](building.md) carry the same running example.
 
 ---
 
 ## The refresh cycle
 
-Each pipeline refreshes the app on the schedule it declared. You never arm anything: the platform arms schedules at submit, and pause or archive takes them down again.
-
-Code pipelines run deterministically: sub-second, zero model cost. A fire reads your files, writes the derived rows into collections, and records a run in the ledger. The open app shows the new data on its next rerun.
+Each pipeline refreshes the app on the schedule it declared, and you never arm anything. The platform arms schedules at submit, pause or archive takes them down, and a repaired version carries on at the old cadence.
 
 ```mermaid
 flowchart LR
@@ -19,15 +17,13 @@ flowchart LR
     R -.->|on breakage| F{{Run fails}} -.-> M[Maintainer repairs] -.-> V([New version])
 ```
 
-The solid path is the free loop. The dotted branch is the exception: a failed run starts a maintainer repair run, which ships a fixed version, and the schedule carries on.
-
-Agentic pipelines are the declared exception. Each fire is a full model run, so they exist only for refreshes that cannot be expressed as deterministic code.
+Agentic pipelines are the declared exception. Each fire is a full model run, so they exist only for refreshes no deterministic code can express.
 
 ---
 
 ## Reading the health panel
 
-The health rail on the app's detail screen, condensed onto its gallery card. Freshness is computed from the run ledger:
+The health rail sits on the app's detail screen, condensed onto its gallery card. Freshness comes from the run ledger, in one of five states.
 
 - **Fresh.** The last scheduled run succeeded and the next is due on time.
 - **Stale.** The last success is older than the cadence implies. Check recent runs.
@@ -35,40 +31,30 @@ The health rail on the app's detail screen, condensed onto its gallery card. Fre
 - **No schedule.** A pipeline that would never run on its own. Warned, never silent.
 - **On demand.** Deliberately manual. Shown as a choice, not a fault.
 
-Below that: each pipeline's cadence ("refreshes hourly"), on-demand markers, not-armed warnings, and the recent runs with outcome and rows written.
-
-For automation, the whole panel is one call: [GET /api/apps/{app_id}/system](endpoint:GET /api/apps/{app_id}/system). Poll it to alert on staleness from your own tooling.
+Below that sit each pipeline's cadence and the recent runs with outcome and rows written. The whole panel is one call, [GET /api/apps/{app_id}/system](endpoint:GET /api/apps/{app_id}/system), so your own tooling can alert on staleness.
 
 ---
 
 ## Interacting with your app
 
-- **Live reads.** The app reads collections on every rerun. New pipeline output appears on the next interaction.
+- **Live reads.** The app reads collections on every rerun, so new pipeline output appears on your next interaction.
 - **Instant filters.** Narrowing to *interview*-stage applications is a local read. No model, no rebuild.
-- **Read-through refresh.** A read-through pipeline recomputes only when its source files changed. Untouched files, no work.
-- **Forms write back.** An app with a **user-writable** pipeline accepts input. Fields are validated against the pipeline's schema, then written into its collections. Bad input gets a clear error, not a silent no-op.
+- **Forms write back.** A **user-writable** pipeline accepts input. Bad input gets a clear error, not a silent no-op.
 
-Everyone opening the app reads the same live collections. There is no regenerate-and-resend step.
-
-For scripting, invoke a code pipeline directly: [GET /api/apps/{app_id}/pipelines/{name}](endpoint:GET /api/apps/{app_id}/pipelines/{name}).
+Everyone opening the app reads the same live collections, with no regenerate-and-resend step. Invoke a code pipeline directly with [GET /api/apps/{app_id}/pipelines/{name}](endpoint:GET /api/apps/{app_id}/pipelines/{name}).
 
 ---
 
 ## When something breaks
 
-Someone renames the *stage* column in `job-applications.csv`. The next run fails. Then:
+Someone renames the *stage* column in `job-applications.csv`, and the next run fails. The failure surfaces in the health panel with its error, and the repair policy starts a maintainer run. That run reproduces the break with a dry run, touching nothing durable, then fixes the pipeline and resubmits. Versions are append-only, so the fix stacks on history and the next scheduled fire refreshes normally.
 
-1. The failed run surfaces in the health panel, with its error.
-2. The repair policy starts a maintainer run. It reproduces the break with a dry run, touching nothing durable.
-3. It fixes the pipeline and resubmits. Versions are append-only, so the fix stacks on history.
-4. The next scheduled fire refreshes normally. Freshness returns to fresh.
+Auto-repair fires only for scheduled runs. A manual invoke that fails is ledgered and visible, but never starts one.
 
-Auto-repair fires only for scheduled runs. A manual invoke that fails is ledgered and visible, but never starts a repair run.
-
-Your levers:
+Your levers.
 
 - **Rollback** to any earlier version.
-- **Pause** stops the schedule with the app; paused reads as paused, not stale. **Resume** restores the cadence.
+- **Pause** stops the schedule with the app, and paused reads as paused rather than stale. **Resume** restores the cadence.
 - **Archive** retires the app.
 
 ---
@@ -83,13 +69,13 @@ Your levers:
 | Agentic pipeline | A model run per fire, by design. |
 | Repair | Model spend only on actual breakage. |
 
-Default to code pipelines and read-through. Reach for the model only where the work needs it.
+Default to code pipelines and read-through, and reach for the model only where the work needs it.
 
 ---
 
 ## On Android
 
-The Android client renders the same served app against the same collections. Reads, filters, and freshness behave identically. Form write-back is best done from the web console.
+The Android client renders the same served app against the same collections, so reads, filters, and freshness behave identically. Do form write-back from the web console.
 
 ---
 

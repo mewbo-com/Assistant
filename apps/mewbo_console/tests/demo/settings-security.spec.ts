@@ -15,8 +15,24 @@ import { SEED } from "./shots";
  * mint a fresh uuid and wall-clock stamp per seed. See
  * `DemoSeeder._seed_api_key` for why that is a written record, not a contract
  * call.
+ *
+ * ## Framing
+ * The docstring above promises the issued keys, so the frame has to contain
+ * them. At the previous 1400x1000 it did not: the issued-keys card starts at
+ * 928 and its two rows sit at 1010 and 1085, so BOTH were below the fold while
+ * every assertion here stayed green — `toBeVisible()` proves a non-empty box,
+ * never that the element is on screen. The artifact showed a card heading with
+ * no keys under it.
+ *
+ * 1400x1189 is the midpoint of the gap between that card (ends 1177) and the
+ * "View as JSON" disclosure below it (starts 1201), so the whole card is in
+ * frame and the disclosure is not. Midpoint rather than the tightest fit,
+ * because it leaves the most room for a small reflow in either direction.
+ *
+ * The height alone would not have prevented this and will not prevent the next
+ * one; `demo.expectWithinViewport` below is what makes the failure loud.
  */
-test.use({ viewport: { width: 1400, height: 1000 } });
+test.use({ viewport: { width: 1400, height: 1189 } });
 
 test("settingsSecurity — secrets roll-up + issued keys", async ({ page, demo }) => {
   await page.goto("/settings?facet=security");
@@ -44,6 +60,21 @@ test("settingsSecurity — secrets roll-up + issued keys", async ({ page, demo }
   // The secrets roll-up must show real is-set state, not an all-"not set"
   // skeleton — `llm.api_key` is configured in demo/configs/app.json.
   await expect(page.getByText("llm.api_key")).toBeVisible();
+
+  // The assertions above all passed at the old viewport height while the key
+  // rows sat entirely below the fold. Gate the two things this shot exists to
+  // show on being ON SCREEN, so a layout change ahead of them fails the run
+  // instead of quietly cropping them back out.
+  await demo.expectWithinViewport(
+    page.getByRole("region", { name: "Configured secrets" }),
+    "the secrets roll-up",
+  );
+  for (const label of SEED.apiKeyLabels) {
+    await demo.expectWithinViewport(
+      page.getByText(label, { exact: false }),
+      `the ${label} key row`,
+    );
+  }
 
   await demo.capturePage("settingsSecurity");
 });

@@ -1,0 +1,161 @@
+{
+  "wallpaper": "assets/wallpaper-sonoma.jpg",
+  "canvases": {
+    "wide": {
+      "canvas_width": 2400,
+      "canvas_height": 1350
+    },
+    "portrait": {
+      "canvas_width": 1800,
+      "canvas_height": 1350
+    },
+    "closeup": {
+      "canvas_width": 1800,
+      "canvas_height": 1350,
+      "shadow_opacity": 0.0,
+      "backdrop": {
+        "kind": "solid",
+        "color": "#161513"
+      }
+    }
+  },
+  "artifacts": [
+    {
+      "treatment": "window",
+      "file": "mewbo-console-01-front.png",
+      "canvas": "wide",
+      "note": "Tasks landing, full viewport."
+    },
+    {
+      "treatment": "window",
+      "file": "mewbo-console-02-tasks.png",
+      "canvas": "wide",
+      "note": "Session detail with the workspace panel, full viewport."
+    },
+    {
+      "treatment": "window",
+      "file": "mewbo-console-03-plan-approval.jpg",
+      "canvas": "wide",
+      "note": "Plan approval card in situ, full viewport."
+    },
+    {
+      "treatment": "window",
+      "file": "mewbo-console-05-plugins.png",
+      "canvas": "wide",
+      "note": "Settings Plugins facet, full viewport. Installed plugins come from a read-only fixture install cache mounted at the api's default plugin path."
+    },
+    {
+      "treatment": "window",
+      "file": "mewbo-console-06-projects.png",
+      "canvas": "wide",
+      "note": "Settings Workspace facet, full viewport. Managed projects and one worktree are seeded through MongoProjectStore."
+    },
+    {
+      "treatment": "window",
+      "file": "mewbo-console-07-widgets.png",
+      "canvas": "wide",
+      "note": "Inline stlite widget in a transcript, full viewport."
+    },
+    {
+      "treatment": "window",
+      "file": "mewbo-search-01-landing.jpg",
+      "canvas": "wide",
+      "note": "Agentic Search landing, full viewport."
+    },
+    {
+      "treatment": "window",
+      "file": "mewbo-search-02-results.jpg",
+      "canvas": "wide",
+      "note": "Agentic Search results, full viewport."
+    },
+    {
+      "treatment": "window",
+      "file": "mewbo-search-04-agent-trace.jpg",
+      "canvas": "wide",
+      "note": "Agentic Search agent trace, full viewport."
+    },
+    {
+      "treatment": "window",
+      "file": "mewbo-settings-01-models.jpg",
+      "canvas": "wide",
+      "note": "Settings, Models facet, full viewport."
+    },
+    {
+      "treatment": "window",
+      "file": "mewbo-settings-02-security.jpg",
+      "canvas": "wide",
+      "note": "Settings, Security facet, full viewport."
+    },
+    {
+      "treatment": "window",
+      "file": "mewbo-wiki-01-landing.jpg",
+      "canvas": "wide",
+      "note": "Wiki project gallery, full viewport."
+    },
+    {
+      "treatment": "window",
+      "file": "mewbo-wiki-02-overview.jpg",
+      "canvas": "wide",
+      "note": "Generated wiki page, full viewport."
+    },
+    {
+      "treatment": "window",
+      "file": "mewbo-wiki-04-index-source.jpg",
+      "canvas": "wide",
+      "note": "Index wizard, source step, full viewport."
+    },
+    {
+      "treatment": "window",
+      "file": "mewbo-wiki-05-index-generation.jpg",
+      "canvas": "wide",
+      "note": "Index wizard, generation step, full viewport."
+    },
+    {
+      "treatment": "window",
+      "file": "mewbo-wiki-06-index-scope.jpg",
+      "canvas": "wide",
+      "note": "Index wizard, scope step, full viewport."
+    },
+    {
+      "treatment": "window",
+      "file": "mewbo-wiki-07-badge.jpg",
+      "canvas": "wide",
+      "note": "Wiki freshness badge in context, full viewport."
+    },
+    {
+      "treatment": "window",
+      "file": "mewbo-wiki-08-qna.jpg",
+      "canvas": "wide",
+      "note": "Wiki question and answer, full viewport."
+    },
+    {
+      "treatment": "window",
+      "file": "mewbo-wiki-09-indexing-progress.png",
+      "canvas": "wide",
+      "note": "Live indexing progress, full viewport."
+    },
+    {
+      "treatment": "window",
+      "file": "mewbo-console-04-file-edit.jpg",
+      "canvas": "closeup",
+      "note": "Element crop of one diff card, matted on the console's own app background."
+    },
+    {
+      "treatment": "passthrough",
+      "file": "mewbo-console-ask-user-log.jpg",
+      "note": "Element crop of a whole conversation column, not one card. At 0.50 it keeps only a third of a 4:3 canvas's width, which costs more legibility than the matte buys."
+    },
+    {
+      "treatment": "window",
+      "file": "mewbo-console-file-read-log.jpg",
+      "canvas": "closeup",
+      "note": "Element crop of one file-read card, matted on the console's own app background."
+    },
+    {
+      "treatment": "window",
+      "file": "mewbo-console-shell-log.jpg",
+      "canvas": "closeup",
+      "note": "Element crop of one terminal card, matted on the console's own app background."
+    }
+  ]
+}

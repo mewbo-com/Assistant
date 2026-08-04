@@ -8,7 +8,9 @@ endpoints treat sensitive fields. It classifies every field as either
   for host paths and the API master token.
 * **secret** (``x-secret``) — write-only: settable via PATCH but never read
   back. Kept in the public schema marked ``writeOnly: true``; its value is
-  stripped from dumps; is-set status is reported separately.
+  stripped from dumps; is-set status is reported separately. Because the value
+  is never read back, an EMPTY one arriving in a PATCH means "unchanged" —
+  ``resolve_secret_writes`` is the seam that says so.
 
 A single traversal of the generated schema (walking ``$defs`` + ``$ref`` and
 inline object properties) collects both sets of dot-paths up front; every
@@ -230,10 +232,83 @@ class ConfigSchemaView:
             return False
         return cls._any_set(node[parts[0]], parts[1:])
 
+    #: The value an ``x-secret`` field holds when it is not set. Every one of
+    #: them is a string (two are optional), so empty clears them all, and it is
+    #: exactly what ``secret_status`` already reports as not-set.
+    _CLEARED_SECRET = ""
+
+    def resolve_secret_writes(
+        self, patch: Mapping[str, object], stored: Mapping[str, object]
+    ) -> dict[str, object]:
+        """Return *patch* with write-only secrets resolved against *stored*.
+
+        A secret's value is stripped from every read, so a client editing a
+        section it cannot see round-trips the field back EMPTY. Taken literally
+        that erases the credential while the save still reports 200 — the whole
+        deployment loses its model gateway over an unrelated edit. So an empty
+        secret means UNCHANGED here and carries the stored value forward.
+        Clearing one is said with an explicit ``null``: absence and empty are
+        both "the client had nothing to send", and only a value the client must
+        deliberately choose can mean "erase it".
+
+        Carrying the value forward rather than dropping the key is what makes
+        the rule hold inside a LIST: ``_deep_merge`` replaces a list wholesale,
+        so an authenticator entry patched without its ``client_secret`` would
+        lose it exactly as the top-level clobber did. Elements pair by INDEX —
+        the only correspondence the wire carries, since a list-element path
+        names no index (see ``_classify_node``).
+
+        *stored* must be the operator's own document, never a dumped model: an
+        ``${ENV_VAR}`` reference survives a round-trip only if what is carried
+        forward is the reference written on disk rather than its resolved value.
+
+        Cost: ``O(one record)`` — one walk of the patch.
+        """
+        result = deepcopy(dict(patch))
+        self._resolve_secrets(result, stored, prefix="")
+        return result
+
+    def _resolve_secrets(self, patch: dict[str, object], stored: object, *, prefix: str) -> None:
+        """Resolve secret paths in *patch* in place, against the same place in *stored*."""
+        for key in list(patch.keys()):
+            path = key if not prefix else f"{prefix}.{key}"
+            held = stored.get(key) if isinstance(stored, Mapping) else None
+            if path in self._secret:
+                self._resolve_secret(patch, key, held)
+            else:
+                self._resolve_secret_value(patch[key], held, prefix=path)
+
+    def _resolve_secret(self, patch: dict[str, object], key: str, held: object) -> None:
+        """Apply the unchanged / clear / set rule to ONE secret leaf."""
+        value = patch[key]
+        if value is None:
+            patch[key] = self._CLEARED_SECRET
+        elif value == "":
+            if held is None:
+                del patch[key]
+            else:
+                patch[key] = held
+
+    def _resolve_secret_value(self, value: object, held: object, *, prefix: str) -> None:
+        """Descend one patch value, pairing list elements with *held* by index.
+
+        Kept in step with ``_strip_value`` / ``_find_value``: an element adds no
+        path segment, so one marking covers every element.
+        """
+        if isinstance(value, dict):
+            self._resolve_secrets(value, held, prefix=prefix)
+        elif isinstance(value, list):
+            items = held if isinstance(held, list) else []
+            for index, item in enumerate(value):
+                self._resolve_secret_value(
+                    item, items[index] if index < len(items) else None, prefix=prefix
+                )
+
     def reject_protected(self, patch: Mapping[str, object]) -> list[str]:
         """Return protected dot-paths present in a PATCH payload (caller 403s).
 
-        ``x-secret`` paths are ALLOWED in patches.
+        ``x-secret`` paths are ALLOWED in patches; what happens to their VALUES
+        is ``resolve_secret_writes``' job, and it runs after this refusal.
         """
         violations: list[str] = []
         self._find(patch, self._protected, prefix="", out=violations)

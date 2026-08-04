@@ -1,5 +1,8 @@
-<!-- AUTO-GENERATED from configs/app.schema.json. Do not edit manually. -->
 # Configuration Reference
+
+## Every configuration key
+
+<!-- AUTO-GENERATED from configs/app.schema.json. Do not edit manually. -->
 
 Mewbo is configured via `configs/app.json`. This reference is auto-generated
 from the JSON Schema at [`configs/app.schema.json`](repo:configs/app.schema.json).

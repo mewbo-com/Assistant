@@ -1,24 +1,26 @@
 # Plan Mode
 
+## Approve the plan first
+
 <div style="display: flex; justify-content: center;">
   <img src="../assets/img/mewbo-console-03-plan-approval.jpg" alt="A plan in the Mewbo console showing a rejected draft and a revised plan awaiting approval" style="width: 100%; max-width: 720px; height: auto;" />
 </div>
 
-By default Mewbo runs in **act mode**: the model calls tools as soon as it decides to, and each call executes immediately. That is usually what you want for quick, low-risk work. For anything destructive, complex, or unfamiliar, switch to **plan mode**. In plan mode the assistant explores your workspace with read-only tools, drafts a step-by-step plan to a session-scoped file you can inspect, and then pauses for your approval before a single write or shell command runs. It gives you a checkpoint between "I want this done" and "the agent is changing my files."
+Mewbo runs in **act mode** by default, so each tool call executes as soon as the model generates it. That fits quick, low risk work. Switch to **plan mode** for anything destructive, complex or unfamiliar. Plan mode explores your workspace with read only tools, drafts a plan to a file scoped to the session, and pauses for your approval before any write or shell command runs. It puts a checkpoint between the request and the first change to your files.
 
-**Quick example.** Switch the CLI to plan mode:
+**Quick example.** Switch the CLI to plan mode.
 
 ```
 /mode plan
 ```
 
-Then send your request. Mewbo drafts the plan and waits for your approval before it starts executing: accept it in the CLI's approval prompt, type `/continue`, or click the Approve button in the console.
+Then send your request. Accept the plan in the CLI's approval prompt, type `/continue`, or click Approve in the console.
 
 ---
 
 ## Switching modes
 
-You can change mode from the CLI, the web console, or the REST API. The mode is per-session state and resets to `act` when you start a new session.
+Mode is state held per session, and it resets to `act` when you start a new session. Change it from the CLI, the web console or the REST API.
 
 ### CLI
 
@@ -31,11 +33,11 @@ Running `/mode` on its own prints the current mode.
 
 ### Console
 
-The **ConfigMenu** (the gear icon in the input bar) has an **Act / Plan** toggle. Flipping it changes the mode for the next query in the current session.
+The **ConfigMenu**, the gear icon in the input bar, carries an **Act / Plan** toggle. It takes effect on the next query in the current session.
 
 ### REST API
 
-Pass `mode` in the query body:
+Pass `mode` in the query body.
 
 ```json
 POST /api/sessions/{session_id}/query
@@ -49,11 +51,11 @@ POST /api/sessions/{session_id}/query
 
 ## How the approval flow looks
 
-From your point of view a plan-mode turn has three phases:
+A plan mode turn has three phases.
 
-1. **Exploration.** The model reads files, lists directories, and runs read-only shell commands to build up an understanding of the task. Write tools are blocked during this phase, so nothing on disk changes.
-2. **Proposal.** The model drafts the plan to a session-scoped scratch file (you can open it from the console or read it from the session directory) and then signals that it is ready for review. The CLI and the console show you the plan and wait.
-3. **Decision.** You either approve or reject the plan. On approval, Mewbo switches to act mode and carries it out. On rejection you can add free-text feedback. The model receives that feedback as context and produces a revised plan.
+1. **Exploration.** The model reads files, lists directories and runs read only shell commands. Write tools are blocked, so nothing on disk changes.
+2. **Proposal.** The plan is drafted to a scratch file scoped to the session, readable from the console or the session directory. The CLI and the console then show it and wait.
+3. **Decision.** On approval Mewbo switches to act mode and carries the plan out. On rejection you can add written feedback, which the model receives as context for a revised plan.
 
 ```mermaid
 flowchart LR
@@ -64,54 +66,37 @@ flowchart LR
     D -->|Reject + feedback| B
 ```
 
-Approval is **episodic**: your approve/reject decision is recorded in the session transcript and persists across restarts. If you quit the process between the plan draft and the execution step, the session resumes cleanly the next time you pick it up. Revisions are tracked too, so when you reject with feedback and the model comes back with a second draft, you can tell it apart from the first.
+Approval is **episodic**. Your decision is recorded in the session transcript and survives a restart, so quitting between the draft and the execution step still resumes cleanly. Revisions are tracked too, and a second draft after rejection stays distinct from the first.
 
 ---
 
 ## Shell commands during exploration
 
-Plan mode enforces a **shell allowlist** so the exploration phase stays read-only. Only commands whose first word matches a configured prefix are allowed, and anything with dangerous operators like `|`, `>`, `$`, or command substitution is rejected outright regardless of the allowlist. This is a belt-and-braces check: even if a permitted command could be chained into something destructive, the operator filter blocks the chain.
+Plan mode enforces a **shell allowlist** so exploration stays read only. Only commands whose first word matches a configured prefix run. Anything carrying a dangerous operator such as `|`, `>`, `$`, or command substitution is rejected outright, regardless of the allowlist. That second check is independent of the first, so a permitted command chained into something destructive is still blocked by the operator filter.
 
-The default allowlist covers the usual read-only tools. This includes `ls`, `cat`, `grep`, `rg`, `find`, `git status`, `git log`, `git diff`, `git show`, and similar commands. Prefix matches are word-boundary safe: `"git log"` matches `"git log --oneline"` but not `"git logger"`. Customise the list via `agent.plan_mode_shell_allowlist`, or set it to `[]` to block shell access in plan mode entirely.
+The default allowlist covers common read only tools such as `ls`, `cat`, `grep`, `rg`, `find`, `git status`, `git log`, `git diff` and `git show`. Prefix matches are word boundary safe, so `git log` matches `git log --oneline` but not `git logger`. Customise the list with `agent.plan_mode_shell_allowlist`, or set it to `[]` to block shell access in plan mode entirely.
 
-MCP tools are always permitted during exploration: Mewbo cannot classify a third-party MCP tool's effect, so plan mode does not attempt to mode-filter them.
+MCP tools are always permitted during exploration. Mewbo cannot classify a third party MCP tool's effect, so plan mode does not filter them by mode.
 
 ---
 
 ## Recovery: /retry and /continue
 
-Both commands recover from a failed or stalled session without starting fresh. They are available in the CLI and as per-message buttons in the web console.
+Both commands recover a failed or stalled session without starting fresh. They are available in the CLI and as per message buttons in the web console.
 
 ### /retry
 
-`/retry` replays the last user turn from a clean slate. Mewbo removes the failed exchange from the transcript and re-submits your original query. The model does not see the failure.
-
-```
-/retry
-```
-
-Use `/retry` when the model made the wrong tool calls or hit a transient error and a clean re-run is likely to succeed.
+`/retry` replays the last user turn from a clean slate. Mewbo removes the failed exchange from the transcript and resubmits your original query, so the model never sees the failure. Reach for it after wrong tool calls or a transient error, where a clean rerun is likely to succeed.
 
 ### /continue
 
-`/continue` keeps the failed state in the transcript and appends a "continue from where you left off" prompt. The model sees what already happened and picks up without repeating completed work.
-
-```
-/continue
-```
-
-Use `/continue` when partial work succeeded and only the tail failed. A retry from scratch would redo work already done.
+`/continue` keeps the failed state in the transcript and appends a prompt to pick up from where the turn stopped. The model sees what already happened and does not repeat completed work. Reach for it when partial work succeeded and only the tail failed.
 
 ---
 
 ## Configuration
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `agent.plan_mode_shell_allowlist` | (read-only commands) | Command prefixes allowed during plan-mode exploration. Matched at a word boundary; prefix entries like `"git log"` match `"git log --oneline"` but not `"git logger"`. Set to `[]` to block shell entirely. |
-| `agent.edit_tool` | `""` | Override the file editing tool: `"search_replace_block"` or `"structured_patch"`. Empty auto-selects based on the active model. |
-
-See [configuration.md](configuration.md) for the full `agent` config section.
+`agent.plan_mode_shell_allowlist` sets the exploration allowlist and `agent.edit_tool` overrides the file editing mechanism. Both are documented in [Configuration → Agent](configuration.md#agent), along with the rest of the `agent` section.
 
 > [!NOTE] How it works internally
 > See [Architecture Overview → Plan mode signals](core-orchestration.md#plan-mode).

@@ -18,6 +18,9 @@ from mewbo_api.ide import (
     IdeInstance,
     MaxLifetimeReached,
 )
+from mewbo_core.config import ProjectConfig
+from mewbo_core.workspaces.project_catalog import ProjectCatalog
+from mewbo_core.workspaces.project_store import VirtualProject
 
 UTC = timezone.utc
 VALID_SID = "a" * 32
@@ -92,23 +95,51 @@ def bound_auth_kit(tmp_path) -> Any:
     guard_registry.bind(backend._auth_kit)
 
 
+class _StubProjectStore:
+    """The one store leg the catalog reads — ``list_projects`` and nothing else."""
+
+    def __init__(self, projects: list[VirtualProject] | None = None) -> None:
+        self.projects = projects or []
+
+    def list_projects(self) -> list[VirtualProject]:
+        return self.projects
+
+
+@pytest.fixture
+def demo_dir(tmp_path) -> Any:
+    """A real directory, because the catalog reports availability from disk."""
+    path = tmp_path / "demo"
+    path.mkdir()
+    return path
+
+
+@pytest.fixture
+def project_store() -> _StubProjectStore:
+    return _StubProjectStore()
+
+
+@pytest.fixture
+def catalog(demo_dir: Any, project_store: _StubProjectStore) -> ProjectCatalog:
+    """A REAL catalog over stubbed stores.
+
+    The catalog is pure enough to construct, so the tier is exercised against
+    the same resolver production uses rather than a mock that would agree with
+    whatever this module happened to assume about it.
+    """
+    return ProjectCatalog(
+        configured={"demo": ProjectConfig(path=str(demo_dir))},
+        project_store=project_store,
+    )
+
+
 @pytest.fixture
 def client(
-    fake_manager: MagicMock, fake_runtime: MagicMock, monkeypatch: pytest.MonkeyPatch
+    fake_manager: MagicMock, fake_runtime: MagicMock, catalog: ProjectCatalog
 ) -> Any:
-    # Patch project lookup used by _resolve_session_project.
-    class FakeProject:
-        path = "/tmp/demo"
-
-    class FakeCfg:
-        projects = {"demo": FakeProject()}
-
-    monkeypatch.setattr("mewbo_core.config.get_config", lambda: FakeCfg())
-
     app = Flask("ide-test")
     api = Api(app)
     api.add_namespace(ide_routes.ide_ns, path="/api")
-    ide_routes.init_ide(fake_manager, fake_runtime)
+    ide_routes.init_ide(fake_manager, fake_runtime, lambda: catalog)
     return app.test_client()
 
 
@@ -166,6 +197,100 @@ def test_post_asks_the_store_for_the_bounded_read(
         VALID_SID, "context", payload_key="project"
     )
     fake_runtime.session_store.load_transcript.assert_not_called()
+
+
+def _managed(project_id: str, name: str, path: str) -> VirtualProject:
+    return VirtualProject(
+        project_id=project_id,
+        name=name,
+        description="",
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+        path=path,
+    )
+
+
+def test_post_mounts_a_managed_project_by_key(
+    client: Any,
+    fake_manager: MagicMock,
+    fake_runtime: MagicMock,
+    project_store: _StubProjectStore,
+    demo_dir: Any,
+) -> None:
+    """A ``managed:<uuid>`` context key mounts the store's directory.
+
+    The defect this closes: the key resolved everywhere else in the app and was
+    refused only here, so every console session anchored to a managed project
+    read as "session has no project in context".
+    """
+    project_store.projects = [_managed("abc-123", "claude-code-plugin", str(demo_dir))]
+    fake_runtime.session_store.latest_event_of_type.return_value = {
+        "type": "context",
+        "payload": {"project": "managed:abc-123"},
+    }
+    fake_manager.ensure.return_value = (_make_instance(), True)
+
+    resp = client.post(f"/api/sessions/{VALID_SID}/ide")
+
+    assert resp.status_code == 201
+    # The DISPLAY name, not the raw key — it is persisted and shown in the console.
+    assert fake_manager.ensure.call_args.args == (
+        VALID_SID,
+        "claude-code-plugin",
+        str(demo_dir),
+    )
+
+
+def test_post_409_carries_the_catalog_refusal_verbatim(
+    client: Any, fake_runtime: MagicMock, project_store: _StubProjectStore, tmp_path
+) -> None:
+    """A recognised project whose directory is gone refuses with the catalog's sentence.
+
+    ``unavailable`` means the tier BOUND the session and still cannot mount it,
+    so the walk stops here — and the catalog's own message already names the
+    directory and the Docker mount rule, which is what a console user acts on.
+    """
+    missing = tmp_path / "gone"
+    project_store.projects = [_managed("abc-123", "vanished", str(missing))]
+    fake_runtime.session_store.latest_event_of_type.return_value = {
+        "type": "context",
+        "payload": {"project": "managed:abc-123"},
+    }
+
+    resp = client.post(f"/api/sessions/{VALID_SID}/ide")
+
+    assert resp.status_code == 409
+    message = resp.get_json()["message"]
+    assert str(missing) in message
+    assert "does not exist on this host" in message
+
+
+def test_post_unknown_project_falls_through_to_the_next_tier(
+    client: Any, fake_manager: MagicMock, fake_runtime: MagicMock
+) -> None:
+    """``not_found`` is "not my kind of session", so the walk continues.
+
+    Asserted through a downstream tier rather than a status code: a 409 alone
+    cannot tell "fell through and nothing else bound" from "refused here".
+    """
+    fake_runtime.session_store.latest_event_of_type.return_value = {
+        "type": "context",
+        "payload": {"project": "nobody-registered-this"},
+    }
+    fake_manager.ensure.return_value = (_make_instance(), True)
+
+    class _BindsAnything:
+        def resolve(self, _session_id: str, _runtime: Any) -> ide_routes.IdeWorkspace:
+            return ide_routes.IdeWorkspace(project_name="next", project_path="/tmp/next")
+
+    assert ide_routes._resolver is not None
+    catalog_tier = ide_routes._resolver.tiers[0]
+    ide_routes._resolver.tiers = (catalog_tier, _BindsAnything())
+
+    resp = client.post(f"/api/sessions/{VALID_SID}/ide")
+
+    assert resp.status_code == 201
+    assert fake_manager.ensure.call_args.args == (VALID_SID, "next", "/tmp/next")
 
 
 def test_post_409_when_the_store_read_fails(client: Any, fake_runtime: MagicMock) -> None:

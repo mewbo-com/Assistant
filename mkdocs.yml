@@ -43,13 +43,19 @@ theme:
   ai:
     deepwiki_repo: bearlike/Assistant
     question_prefix: |
-      I'm a new user; give product-first, well-grounded answers.
+      Answer for a working engineer. Be concrete and cite the source.
+    # Setup questions are answered better by Get Started than by a model, and
+    # a reader who is still installing is not the one who opens Ask AI. These
+    # are the questions someone already running Mewbo asks: what it does under
+    # load, what it costs, what stops it, and how to wire it into work they
+    # already have.
     examples:
-      - "How do I install and configure Mewbo?"
-      - "How does the agent hypervisor work?"
-      - "How do I add MCP tools?"
-      - "How do I install the Android app?"
-      - "How do I connect Home Assistant?"
+      - "Can a sub-agent spawn its own sub-agents?"
+      - "What stops a shell command reading another project?"
+      - "How do I cap what one session can spend?"
+      - "Can a trigger open a pull request?"
+      - "How do I get JSON I can pipe into something else?"
+      - "What happens when a model call fails halfway?"
   # Code-reference badges (theme >= 1.4.0): authors write `repo:`/`endpoint:`
   # link schemes and the theme rewrites them into DeepWiki-style badges. File
   # badges auto-derive from repo_url (GitHub blob at the build SHA); endpoint
@@ -59,6 +65,10 @@ theme:
   # derives from a path's first segment for route families RETAG_RULES does not
   # name (`Apps` is one). A prefix missing here is silent: the badge still
   # renders, it just loses its `#tag/...` anchor and lands on the reference top.
+  # 38 pages carry a table of more than ten rows. Loads Tablesort (MIT) and
+  # makes prose tables click-to-sort; a pygments line-number table is excluded
+  # structurally. Opt a table out with `data-no-sort`.
+  sortable_tables: true
   code_refs:
     endpoint:
       reference_page: rest-api/
@@ -91,8 +101,11 @@ theme:
   show_build_info: true
   # Hero product-tour carousel: the theme emits Swiper (CDN) + its SRI-hashed
   # init and styles `.ms-shots`; the landing page only writes the
-  # `.swiper.ms-shots` markup (no local CSS/JS, no extra_css/extra_javascript).
+  # `.swiper.ms-shots` markup. One local override exists for this box's
+  # aspect ratio — see the `extra_css` entry below.
   carousel: true
+  lightbox: true
+  link_check: true
   # Footer "Connect" column: GitHub is auto-filled from repo_url; the email
   # button is appended right after it (the theme ships an email→lucide:mail alias).
   footer:
@@ -107,6 +120,7 @@ theme:
       - Android
       - API
   nav_icons:
+    "Start here": lucide:compass
     Home: lucide:house
     "Get Started": lucide:rocket
     Troubleshooting: lucide:life-buoy
@@ -135,20 +149,19 @@ theme:
     "Full Reference": lucide:globe
 
     "Client Integrations": lucide:cable
-    "MCP Server": lucide:plug-zap
+    "Mewbo as an MCP Server": lucide:plug-zap
     "Home Assistant": lucide:house-plug
     "Nextcloud Talk": lucide:message-circle
     Email: lucide:mail
 
-    Capabilities: lucide:sparkles
+    "Working with Mewbo": lucide:sparkles
     "Workspace & Execution": lucide:hammer
     "Built-in Tools": lucide:wrench
     "Branches & Worktrees": lucide:git-fork
     "Web IDE": lucide:code-xml
     Widgets: lucide:panel-left
     "Code Intelligence": lucide:zap
-    "External Tools (MCP)": lucide:plug
-    "Knowledge & Discovery": lucide:library
+    "External MCP Tools": lucide:plug
     "Agentic Wiki": lucide:book-marked
     Overview: lucide:book-open
     "Indexing & Generation": lucide:database
@@ -166,10 +179,10 @@ theme:
     "Plugins & Marketplace": lucide:puzzle
     "Control & Safety": lucide:shield
     "Plan Mode": lucide:clipboard-list
+    "Sandboxed Execution": lucide:shield-half
     "Permissions & Hooks": lucide:lock
     Policies: lucide:shield-check
     Monitors: lucide:eye
-    "Session & Context": lucide:clock
     "Token Usage": lucide:coins
     Compaction: lucide:archive
 
@@ -201,7 +214,6 @@ theme:
 hooks:
   - docs/hooks/schema_to_md.py
   - docs/hooks/redirects.py
-  - docs/hooks/media_check.py
 
 markdown_extensions:
   - pymdownx.highlight:
@@ -214,18 +226,58 @@ markdown_extensions:
           class: mermaid
           format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.inlinehilite
+  # Renders ++ctrl+shift+a++ as real <kbd> elements, both Mac and Windows
+  # modifiers. The theme has styled <kbd> for a long time; nothing emitted it,
+  # so shortcuts were written as prose or inline code.
+  - pymdownx.keys
+  # `abbr` turns an `*[TERM]: expansion` definition into <abbr title="...">,
+  # which the browser renders as a tooltip. This site enables extensions
+  # individually rather than through `extra`, so abbr has to be named here —
+  # without it the glossary below is appended to every page and silently does
+  # nothing, which is exactly how it first shipped.
+  - abbr
+  # Appends the glossary to every page, so a definition written once gives
+  # that acronym a tooltip everywhere it appears.
+  - pymdownx.snippets:
+      # base_path resolves from the mkdocs.yml directory, NOT from docs/, so
+      # a bare `includes/...` silently resolves to a repo-root path that does
+      # not exist — and snippets appends nothing rather than erroring.
+      base_path:
+        - docs
+      auto_append:
+        - includes/abbreviations.md
   - admonition
   - pymdownx.details
   - pymdownx.tabbed:
       alternate_style: true
+  # The `///` blocks API, enabled alongside the older `=== "…"` tabbed syntax
+  # above. Both are kept because existing pages use `===`, and a blocks tab
+  # takes a fenced code sample without the four-space indent `===` forces.
+  # A page repeating itself once per platform or per provider collapses into
+  # one tab set, which is the cheapest large word cut available on this site.
+  - pymdownx.blocks.tab:
+      alternate_style: true
+  # A table caption says what a table is for in one line and numbers it. A page
+  # that loses 40% of its prose usually loses that sentence first.
+  - pymdownx.blocks.caption
+  - pymdownx.blocks.details
+  - footnotes
   - tables
   - attr_list
   - md_in_html
+  # Every one of the extensions above is a SILENT dependency. An unenabled
+  # block renders as literal text in the page and `strict: true` still passes,
+  # so a snippet copied from a newer theme version fails by shipping, not by
+  # erroring. Never circulate a syntax before checking it is named here.
+  - toc:
+      permalink: true
 
 exclude_docs: |
   superpowers/
+  includes/
   hooks/
   CLAUDE.md
+  assets/img-src/
 
 # MkDocs only reports anchors, orphaned pages and absolute links at INFO by
 # default, so `--strict` alone lets a link to a heading that no longer exists
@@ -269,20 +321,25 @@ plugins:
             show_root_heading: true
             show_root_toc_entry: false
 
+# The one local stylesheet this site ships. mkdocs-shadcn-mewbo's
+# `.ms-shots img` carousel box is fixed at a 4:3 aspect ratio; every image a
 extra:
   version:
     provider: mike
 
 # Theme ships everything that used to live in extra_css/extra_javascript and
 # overrides/ — including the hero product-tour carousel (theme.carousel above
-# emits Swiper + its init and styles `.ms-shots`). If you ever need to override
-# theme behavior again, you can add `theme.custom_dir: overrides`, but the brand
-# chrome / Ask AI / nav icons / version switcher / SEO / speculation prefetch /
-# build-info badge are all already provided.
+# emits Swiper + its init and styles `.ms-shots`, at 16:9 since v1.10.1, which
+# retired the one-rule bridge this site used to carry). If you ever need to
+# override theme behavior,
+# you can add `theme.custom_dir: overrides`, but the brand chrome / Ask AI /
+# nav icons / version switcher / SEO / speculation prefetch / build-info badge
+# are all already provided.
 
 nav:
-  - Home: index.md
-  - Get Started: getting-started.md
+  - Start here:
+      - Home: index.md
+      - Get Started: getting-started.md
   - Terminal:
       - Get Started: terminal/index.md
       - The Interface: terminal/interface.md
@@ -302,10 +359,6 @@ nav:
       - Voice: android/voice.md
       - Chat and Sessions: android/chat.md
       - Device Tools: android/device-tools.md
-  - Agentic Apps:
-      - Overview: apps/index.md
-      - Building an App: apps/building.md
-      - Living with an App: apps/operating.md
   - API:
       - Get Started: api/index.md
       - Building a Client: api/building-a-client.md
@@ -314,12 +367,10 @@ nav:
       - Triggers: api/triggers.md
       - Device Tool Bridge: api/device-tools.md
       - Full Reference: rest-api.md
-  - Client Integrations:
-      - MCP Server: clients-mcp.md
-      - Home Assistant: clients-home-assistant.md
-      - Email: clients-email.md
-      - Nextcloud Talk: clients-nextcloud-talk.md
-  - Knowledge & Discovery:
+  # "Working with Mewbo" holds the three products and nothing else. The
+  # capability groups below it are how Mewbo works rather than what it ships,
+  # so they sit alongside as their own groups instead of nesting three deep.
+  - Working with Mewbo:
       - Agentic Wiki:
           - Overview: features-wiki.md
           - Indexing & Generation: features-wiki-indexing.md
@@ -328,28 +379,41 @@ nav:
       - Agentic Search:
           - Overview: features-search.md
           - Source Capability Graph: features-search-scg.md
-  - Capabilities:
-      - Workspace & Execution:
-          - Built-in Tools: features-builtin-tools.md
-          - Branches & Worktrees: features-worktrees.md
-          - Code Intelligence: features-lsp.md
-          - External Tools (MCP): features-mcp.md
-      - Composition & Delegation:
-          - Sub-agents: features-agents.md
-          - Skills: features-skills.md
-          - Plugins & Marketplace: features-plugins.md
-      - Control & Safety:
-          - Plan Mode: features-plan-mode.md
-          - Permissions & Hooks: features-permissions-hooks.md
-          - Policies: features-policies.md
-          - Monitors: features-monitors.md
-      - Session & Context:
-          - Token Usage: features-token-usage.md
-          - Compaction: features-compaction.md
+      - Agentic Apps:
+          - Overview: apps/index.md
+          - Building an App: apps/building.md
+          - Living with an App: apps/operating.md
+  - Workspace & Execution:
+      - Built-in Tools: features-builtin-tools.md
+      # The two MCP pages are the two DIRECTIONS of the protocol and are named
+      # for the direction, not for the protocol, because naming both "MCP"
+      # made readers open the wrong one. clients-mcp is Mewbo being the server
+      # other agents call in to; features-mcp is Mewbo calling out to servers
+      # you configure, and it closes the group.
+      - Mewbo as an MCP Server: clients-mcp.md
+      - Code Intelligence: features-lsp.md
+      - Branches & Worktrees: features-worktrees.md
+      - External MCP Tools: features-mcp.md
+  - Control & Safety:
+      - Plan Mode: features-plan-mode.md
+      - Sandboxed Execution: features-sandbox.md
+      - Permissions & Hooks: features-permissions-hooks.md
+      - Policies: features-policies.md
+      - Monitors: features-monitors.md
+  - Composition & Delegation:
+      - Plugins & Marketplace: features-plugins.md
+      - Sub-agents: features-agents.md
+      - Skills: features-skills.md
+      - Compaction: features-compaction.md
+  - Client Integrations:
+      - Email: clients-email.md
+      - Nextcloud Talk: clients-nextcloud-talk.md
+      - Home Assistant: clients-home-assistant.md
   - Deploy:
       - Docker Compose: deployment-docker.md
       - Storage Backends: deployment-storage.md
       - Production Setup: deployment-production.md
+      - Troubleshooting: troubleshooting.md
   - Configure:
       - LLM Setup: llm-setup.md
       - Project Setup: project-configuration.md
@@ -368,4 +432,4 @@ nav:
       - Architecture Overview: core-orchestration.md
       - Session Runtime: session-runtime.md
       - Python Reference: reference.md
-  - Troubleshooting: troubleshooting.md
+      - Token Usage: features-token-usage.md

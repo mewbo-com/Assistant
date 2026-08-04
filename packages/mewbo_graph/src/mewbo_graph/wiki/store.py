@@ -2691,6 +2691,12 @@ class MongoWikiStore(WikiStoreBase):
     ``NotImplementedError`` inherited from ``WikiStoreBase``.
     """
 
+    #: Documents per ``bulk_write`` for the graph upserts. Bounded so a write of
+    #: a whole repository's edges holds one batch of pending operations in
+    #: memory rather than all of them; large enough that the per-round-trip cost
+    #: amortises to nothing.
+    _BULK_BATCH_SIZE = 1000
+
     def __init__(
         self,
         *,
@@ -3383,6 +3389,48 @@ class MongoWikiStore(WikiStoreBase):
             )
         self._graph_idx_done = True
 
+    def _bulk_upsert(
+        self,
+        collection: Any,
+        ops: Iterable[tuple[dict[str, Any], dict[str, Any]]],
+    ) -> None:
+        """Apply ``(filter, document)`` ``$set`` upserts in bounded unordered batches.
+
+        Cost: ``O(documents written)`` in server work, but
+        ``ceil(n / _BULK_BATCH_SIZE)`` round-trips rather than ``n`` — a graph
+        phase writes ~130k documents, and one round-trip apiece dominated the
+        phase's write leg on a local socket, worse still over a network. Each
+        op is the same single-document ``$set`` upsert a per-document loop
+        issues, so the unique indexes still do the dedup and re-writing a
+        document is still idempotent.
+
+        The batch bound is what keeps memory ``O(_BULK_BATCH_SIZE)`` instead of
+        ``O(all documents)``: *ops* is consumed lazily, so a caller streaming
+        79k edges never materialises 79k pending operations.
+
+        **A batch is keyed by its filter, keeping the LAST write.** A
+        per-document loop applied two updates to one key in input order, so the
+        last one won; ``ordered=False`` explicitly permits out-of-order or
+        parallel execution, and MongoDB does not document that two operations
+        sharing a filter in one batch resolve in list order. Folding here keeps
+        last-write-wins a property of THIS code rather than of a server
+        version — the same guarantee the loop gave, at the cost of one dict.
+        Across batches it needs no help: batches are issued sequentially, so a
+        later batch's write lands after an earlier one's.
+        """
+        from pymongo import UpdateOne
+
+        batch: dict[tuple[tuple[str, Any], ...], Any] = {}
+        for filt, doc in ops:
+            batch[tuple(sorted(filt.items()))] = UpdateOne(
+                filt, {"$set": doc}, upsert=True
+            )
+            if len(batch) >= self._BULK_BATCH_SIZE:
+                collection.bulk_write(list(batch.values()), ordered=False)
+                batch = {}
+        if batch:
+            collection.bulk_write(list(batch.values()), ordered=False)
+
     def upsert_nodes(
         self,
         slug: str,
@@ -3391,12 +3439,22 @@ class MongoWikiStore(WikiStoreBase):
         commit_sha: str | None = None,
         job_id: str | None = None,
     ) -> None:
-        """Upsert graph nodes for *slug*; dedup by (slug, node_id), stamp attribution."""
+        """Upsert graph nodes for *slug*; dedup by (slug, node_id), stamp attribution.
+
+        Cost: ``O(nodes)`` — offline, the ``graph`` phase. Batched through
+        ``_bulk_upsert``, so the round-trip count is ``O(nodes / batch)``.
+        """
         self._ensure_graph_indexes()
-        col = self._col("wiki_graph_nodes")
-        for node in nodes:
-            doc = self._stamp_attribution(node, commit_sha, job_id).model_dump(by_alias=False)
-            col.update_one({"slug": slug, "node_id": node.node_id}, {"$set": doc}, upsert=True)
+        self._bulk_upsert(
+            self._col("wiki_graph_nodes"),
+            (
+                (
+                    {"slug": slug, "node_id": node.node_id},
+                    self._stamp_attribution(node, commit_sha, job_id).model_dump(by_alias=False),
+                )
+                for node in nodes
+            ),
+        )
 
     def upsert_edges(
         self,
@@ -3406,16 +3464,27 @@ class MongoWikiStore(WikiStoreBase):
         commit_sha: str | None = None,
         job_id: str | None = None,
     ) -> None:
-        """Upsert graph edges for *slug*; dedup by (slug, source, target, type)."""
+        """Upsert graph edges for *slug*; dedup by (slug, source, target, type).
+
+        Cost: ``O(edges)`` — offline, the ``graph`` phase. Batched through
+        ``_bulk_upsert``, so the round-trip count is ``O(edges / batch)``.
+        """
         self._ensure_graph_indexes()
-        col = self._col("wiki_graph_edges")
-        for edge in edges:
-            doc = self._stamp_attribution(edge, commit_sha, job_id).model_dump(by_alias=False)
-            col.update_one(
-                {"slug": slug, "source": edge.source, "target": edge.target, "type": edge.type},
-                {"$set": doc},
-                upsert=True,
-            )
+        self._bulk_upsert(
+            self._col("wiki_graph_edges"),
+            (
+                (
+                    {
+                        "slug": slug,
+                        "source": edge.source,
+                        "target": edge.target,
+                        "type": edge.type,
+                    },
+                    self._stamp_attribution(edge, commit_sha, job_id).model_dump(by_alias=False),
+                )
+                for edge in edges
+            ),
+        )
 
     def upsert_embeddings(
         self,
@@ -3425,16 +3494,33 @@ class MongoWikiStore(WikiStoreBase):
         commit_sha: str | None = None,
         job_id: str | None = None,
     ) -> None:
-        """Upsert embedding vectors for *slug*; dedup by (slug, node_id)."""
+        """Upsert embedding vectors for *slug*; dedup by (slug, node_id).
+
+        Cost: ``O(vectors)`` — offline, the ``graph`` phase. Batched through
+        ``_bulk_upsert``, so the round-trip count is ``O(vectors / batch)``.
+        """
         self._ensure_graph_indexes()
-        col = self._col("wiki_embeddings")
-        for item in items:
-            stamped = self._stamp_attribution(item, commit_sha, job_id)
-            doc = stamped.model_dump(by_alias=False)
-            # Written alongside the canonical list so ``vector_search`` can skip
-            # the BSON-array decode entirely — see ``_VEC_F32``.
-            doc[_VEC_F32] = _pack_f32(stamped.vector)
-            col.update_one({"slug": slug, "node_id": item.node_id}, {"$set": doc}, upsert=True)
+        self._bulk_upsert(
+            self._col("wiki_embeddings"),
+            (
+                (
+                    {"slug": slug, "node_id": item.node_id},
+                    self._embedding_doc(item, commit_sha, job_id),
+                )
+                for item in items
+            ),
+        )
+
+    def _embedding_doc(
+        self, item: Embedding, commit_sha: str | None, job_id: str | None
+    ) -> dict[str, Any]:
+        """The stored embedding document: the model dump plus the packed vector."""
+        stamped = self._stamp_attribution(item, commit_sha, job_id)
+        doc = stamped.model_dump(by_alias=False)
+        # Written alongside the canonical list so ``vector_search`` can skip
+        # the BSON-array decode entirely — see ``_VEC_F32``.
+        doc[_VEC_F32] = _pack_f32(stamped.vector)
+        return doc
 
     def query_graph(
         self,

@@ -1,44 +1,43 @@
-# MCP Server
+# Mewbo as an MCP Server
 
-Mewbo can run as an **MCP server**, so any MCP-compatible AI agent or IDE can put your Mewbo deployment to work. Claude Code, Codex, Cursor, Windsurf, or even another Mewbo can spin up a coding session on a fresh worktree, follow it up and steer it, read back exactly what happened at the level of detail it needs, ask grounded questions of your Agentic Wiki, run searches across connected sources, and get schema-validated structured answers. One assistant becomes a tool the rest of your agent fleet can call.
+## Let other agents call Mewbo
+
+Mewbo runs as an **MCP server**, so the rest of your agent fleet can call it as a tool. Claude Code, Codex, Cursor, Windsurf and another Mewbo all qualify.
 
 ![Mewbo listed as an MCP server in Claude Code's /mcp panel, showing all 19 available tools](assets/img/mewbo-mcp-01-claude-code.png)
 
-> [!INFO] One key, issued and revoked by you
-> Any MCP client you hand a key to can create and drive sessions, read their history, and query the wiki. Keys are minted from the console and revocable at any time. The MCP surface is curated, but an issued key is full-power. Read [Authentication](#authentication-required) before you hand one out.
+> [!IMPORTANT] One key, issued and revoked by you
+> The MCP surface is curated, but the key behind it is not. Read [Authentication](#authentication-required) before you hand one out.
 
 ## What is MCP?
 
-The [Model Context Protocol](https://modelcontextprotocol.io) (MCP) is an open standard that lets AI applications connect to tools and data through one uniform interface (think of it as a USB-C port for AI apps). Mewbo speaks MCP in **both directions**:
-
-- **As a client:** Mewbo connects out to other MCP servers to gain tools. See [External Tools (MCP)](features-mcp.md).
-- **As a server** (covered on this page): other agents connect *in* and drive Mewbo.
+The [Model Context Protocol](https://modelcontextprotocol.io) (MCP) is an open standard that lets AI applications connect to tools and data through one interface. Mewbo speaks it in both directions, and this page covers the inbound half. [External Tools (MCP)](features-mcp.md) covers the other.
 
 ## The Mewbo MCP server
 
-Mewbo is self-hosted, so the MCP server runs as part of your own deployment (the `mewbo-mcp` service). Point your client at your deployment's MCP endpoint:
+You host Mewbo yourself, so the MCP server runs inside your deployment as the `mewbo-mcp` service.
 
 **Endpoint:** `https://<your-mewbo-host>/mcp` (Streamable HTTP)
 
-The default Docker Compose deployment serves the MCP server on port **5127**; for local development, `uv run mewbo-mcp` serves `http://127.0.0.1:5127/mcp`.
+The Docker Compose deployment serves it on port **5127**. Locally, `uv run mewbo-mcp` serves `http://127.0.0.1:5127/mcp`.
 
 ### Authentication required
 
-Every connection needs an API key that you issue from Mewbo:
+Every connection needs an API key that you issue from Mewbo.
 
 1. Open the console and go to **Settings → API Keys**.
-2. Create a key and label it (for example, the agent that will use it). **The key is shown once.** Copy it before leaving this page.
-3. Add it to your MCP client config as a `Bearer` token (see [Connect your client](#connect-your-client)).
+2. Create a key and label it after the agent that will use it. **The key is shown once.** Copy it before leaving the page.
+3. Add it to your MCP client config as a `Bearer` token. See [Connect your client](#connect-your-client).
 
-The same key authenticates both the REST API and the MCP server. It is one identity across two surfaces. The key stays valid until you revoke it from the same panel. Calls that arrive through the MCP server are tagged with their originating surface, so the sessions they create show up as `surface:mcp` in Langfuse traces.
+One key authenticates both the REST API and the MCP server, and stays valid until you revoke it from the same panel. Sessions created over MCP are tagged `surface:mcp` in Langfuse traces.
 
 | Token | Prefix | Use |
 |---|---|---|
-| **Issued API key** | `mk_` | Per-agent credential created in **Settings → API Keys**. Valid on the REST API and the MCP server; revocable. **Recommended for agents.** |
-| **Master token** | operator-set string (default `msk-strong-password`) | Break-glass admin credential (it also mints and revokes keys). No prefix is enforced; it is whatever the operator configures. Never hand it to an external agent. |
+| **Issued API key** | `mk_` | Per-agent credential created in **Settings → API Keys**. Valid on the REST API and the MCP server, and revocable. **Recommended for agents.** |
+| **Master token** | operator-set string (default `msk-strong-password`) | Break-glass admin credential, and the one that mints and revokes keys. No prefix is enforced. Never hand it to an external agent. |
 
 > [!WARNING] Issue keys only to agents you trust
-> Mewbo's MCP surface is a curated set of tools, but an issued key also authorizes the **full REST API**, which can run shell commands, edit files, and spawn agents on your machine. Treat a key like a credential to the host: give each agent its own labelled key, control who holds it, and revoke it the moment it is no longer needed.
+> An issued key authorizes the full REST API, which can run shell commands, edit files, and spawn agents on your machine. Give each agent its own labelled key and revoke it the moment it is no longer needed.
 
 ## Available tools
 
@@ -46,16 +45,16 @@ The same key authenticates both the REST API and the MCP server. It is one ident
 
 | Tool | Description |
 |---|---|
-| **`create_session`** | Start a Mewbo session from a prompt. By default it provisions a fresh git worktree and branch off the target repo's base, so the work is isolated; pass an explicit `branch`/`worktree` to target an existing one. Optionally enable specific integrations (tools) and set a title or tags. |
+| **`create_session`** | Start a session from a prompt. Provisions a fresh git worktree and branch off the repo's base by default, so the work is isolated. Pass an explicit `branch`/`worktree` to target an existing one, and optionally set integrations, a title, or tags. |
 | **`send_followup`** | Send a follow-up or steering message into a running or finished session. |
 | **`interrupt_session`** | Interrupt the session's current step so the session can be steered or resumed afterwards. |
-| **`terminate_session`** | Permanently terminate a session. Irreversible: run, steer, recover, and fork are blocked from then on, and every trigger armed on the session is cancelled. The transcript stays readable, and repeat calls are idempotent. |
+| **`terminate_session`** | Permanently terminate a session. Irreversible. Run, steer, recover and fork are blocked from then on, and every armed trigger is cancelled. The transcript stays readable and repeat calls are idempotent. |
 
 ### Sessions: read at the detail you need
 
 | Tool | Description |
 |---|---|
-| **`get_session_history`** | Read a session at one of four tiers, so you spend only the context you need: `overview` (title, status, counts, tokens), `turns` (one row per exchange), `steps` (per-step tool → result previews for a turn), or `full` (complete step logs plus the sub-agent tree). |
+| **`get_session_history`** | Read a session at one of four tiers, so you spend only the context you need. `overview` gives title, status, counts and tokens. `turns` gives one row per exchange. `steps` gives per-step tool and result previews for a turn. `full` gives complete step logs plus the sub-agent tree. |
 | **`list_sessions`** | List and filter sessions by project, status, or recency. |
 | **`get_agent_tree`** | Inspect a session's sub-agent hierarchy and lifecycle state. |
 
@@ -65,50 +64,50 @@ The same key authenticates both the REST API and the MCP server. It is one ident
 |---|---|
 | **`list_wiki_projects`** | List the repositories indexed in the [Agentic Wiki](features-wiki.md). |
 | **`read_wiki_structure`** | Get a project's knowledge-graph structure. |
-| **`list_wiki_pages`** | List a project's generated pages as `{id, title}` rows, optionally narrowed by a title substring. This is the index `read_wiki_page` consumes; `read_wiki_structure` returns the code graph instead. |
+| **`list_wiki_pages`** | List a project's generated pages as `{id, title}` rows, optionally narrowed by a title substring. This is the index `read_wiki_page` consumes. |
 | **`read_wiki_page`** | Fetch a single wiki page. |
-| **`graph_neighbors`** | Walk a project's code graph outward from one node, reading stored edges with no model call. Answers "what calls X", "what does X contain", and "what imports X" in one call. Find a `node_id` with `read_wiki_structure(detail="nodes")`. |
+| **`graph_neighbors`** | Walk a project's code graph outward from one node, reading stored edges with no model call. Answers what calls a symbol, what it contains, and what imports it. Find a `node_id` with `read_wiki_structure(detail="nodes")`. |
 | **`ask_wiki`** | Ask a natural-language question about an indexed project and get a cited answer. See [Question Answering](features-wiki-qa.md). |
-| **`get_wiki_answer`** | Resume or replay a wiki Q&A answer by its `answer_id`. Use this when `ask_wiki` returns `status: "running"`. Pass back the `answer_id` to fetch the completed answer once it settles. |
-| **`submit_insight`** | Teach the wiki a durable fact about the codebase. The server condenses it into one or more atomic notes, anchors each to the code it's about, de-duplicates against what's already stored, and safely merges. The [code memory graph](features-wiki-graph.md#grounded-by-a-code-memory-graph) compounds as your agents work. |
+| **`get_wiki_answer`** | Fetch a wiki answer by its `answer_id`. Use it when `ask_wiki` returns `status: "running"`. |
+| **`submit_insight`** | Teach the wiki a durable fact about the codebase. The server condenses it into atomic notes, anchors each to the code it describes, and merges it against what is already stored. The [code memory graph](features-wiki-graph.md#grounded-by-a-code-memory-graph) compounds as your agents work. |
 
 ### Search: workspace queries
 
 | Tool | Description |
 |---|---|
-| **`list_search_workspaces`** | List your saved [Agentic Search](features-search.md) workspaces: id, name, connected sources, and recent query count. Pass an optional `query` to narrow the listing; it matches a case-insensitive substring against name, description, and past-query text. Pass the id or name to `search`. |
-| **`search`** | Run an agentic search query across a workspace. Pass the workspace id or name and your question; get back a synthesised, cited answer with ranked source results. Optionally scope to a specific project or choose `detail="full"` for per-result snippets. If the run takes longer than the bounded wait, returns a `run_id` with `status: "running"`. Resume with `get_search_run`. |
-| **`get_search_run`** | Fetch the result of a prior search run by its `run_id`. Use this to resume a running search or to replay a past result. |
+| **`list_search_workspaces`** | List your saved [Agentic Search](features-search.md) workspaces with id, name, connected sources and recent query count. An optional `query` narrows the listing by case-insensitive substring. |
+| **`search`** | Pass a workspace id or name and a question, and get back a synthesised, cited answer with ranked source results. Optionally scope to one project or choose `detail="full"` for per-result snippets. A run longer than the bounded wait returns a `run_id` with `status: "running"`. |
+| **`get_search_run`** | Fetch a search run by its `run_id`, to resume a running search or replay a past result. |
 
 ### Structured Query: schema-constrained synthesis
 
 | Tool | Description |
 |---|---|
-| **`structured_query`** | Run a schema-constrained synthesis: describe what you want in plain English, pass a JSON Schema, and get back a validated object matching that schema. Optionally ground the session in a search workspace or enable specific tool integrations. When the workspace has a mapped Source Capability Graph, the run inherits graph-first grounding: it routes through the graph, probes each pathway, and the result carries provenance. Returns `{run_id, status, output}`. If the run takes longer than the bounded wait, resume with `get_structured_run`. See [Structured Outputs](api/structured-outputs.md) for the full feature. |
-| **`get_structured_run`** | Fetch a structured query run by `run_id`. Use it to resume a running query or replay a past result. |
+| **`structured_query`** | Describe what you want in plain English, pass a JSON Schema, and get back a validated object matching it. Optionally ground the run in a search workspace or enable tool integrations. Returns `{run_id, status, output}`. Grounding and graph-first routing behave as they do on [Structured Outputs](api/structured-outputs.md). |
+| **`get_structured_run`** | Fetch a structured query run by `run_id`, to resume a running query or replay a past result. |
 
 ### Triggers: read and cancel
 
 | Tool | Description |
 |---|---|
 | **`list_triggers`** | List [reverse-invocation triggers](api/triggers.md) as compact rows, optionally scoped by session, kind, or status. |
-| **`cancel_trigger`** | Cancel a trigger by id. Idempotent: a repeat call just reports its status. |
+| **`cancel_trigger`** | Cancel a trigger by id. Idempotent, so a repeat call just reports its status. |
 
-There is deliberately no tool to arm a trigger. Arming stays an in-session capability an agent exercises on itself, never a mutation another agent reaches in and performs.
+Nothing here arms a trigger. That stays a capability a session exercises on itself, for the reason [Triggers](api/triggers.md) gives.
 
 ### Discovery
 
 | Tool | Description |
 |---|---|
-| **`list_projects`** | List the projects registered in your Mewbo deployment, with their names, git repository identity (`host/owner/repo`), and any aliases. Pass a name or alias from here to `create_session`'s `project` argument. |
-| **`list_integrations`** | List the tools and plugins available, so a client knows what it can switch on when it creates a session. |
+| **`list_projects`** | List the projects registered in your deployment with their names, git identity (`host/owner/repo`) and aliases. Pass a name or alias to `create_session`'s `project` argument. |
+| **`list_integrations`** | List the tools and plugins a client can switch on when it creates a session. |
 
 ## Wire protocol
 
-The Mewbo MCP server speaks **Streamable HTTP** at `/mcp`, and works with any HTTP-compatible MCP client.
+Any MCP client that speaks HTTP works.
 
 > [!NOTE] It's a network service
-> Unlike a local stdio MCP server, the Mewbo MCP server is reached over the network. Put it behind the same TLS / reverse proxy as the rest of your deployment.
+> Unlike a local stdio MCP server, this one is reached over the network. Put it behind the same TLS and reverse proxy as the rest of your deployment.
 
 ## Connect your client
 
@@ -119,8 +118,6 @@ claude mcp add -s user -t http mewbo https://<your-mewbo-host>/mcp -H "Authoriza
 ```
 
 ### Codex, Cursor, Windsurf, and other clients
-
-Add an entry to your client's MCP server config:
 
 ```json
 {
@@ -136,21 +133,18 @@ Add an entry to your client's MCP server config:
 ```
 
 > [!TIP] Fill in your own values
-> Replace `<your-mewbo-host>/mcp` with your deployment's endpoint (for example `https://mewbo.example.com/mcp`, or `http://localhost:5127/mcp` for local development) and `<API_KEY>` with the key from **Settings → API Keys**.
+> `https://mewbo.example.com/mcp` in production, `http://localhost:5127/mcp` locally, and your issued key for `<API_KEY>`.
 
 ## What you can do with it
 
-- **Drive Mewbo from your IDE agent.** "Have Mewbo run the migration on a fresh branch and ping me when the tests pass" `create_session` isolates the work on a new worktree; `get_session_history` reads back the result.
-- **Schedule and automate.** A Claude Code or Codex routine kicks off a nightly Mewbo task and reads the answer the next morning.
+- **Drive Mewbo from your IDE agent.** Ask it to run a migration on a fresh branch and report back when the tests pass. `create_session` isolates the work on a new worktree and `get_session_history` reads back the result.
 - **Ground other agents in your code.** Another agent calls `ask_wiki` for a cited answer from your codebase before it writes a line.
-- **Let your fleet teach the wiki.** An agent that just learned something durable about the code calls `submit_insight`. The next `ask_wiki`, from any client, is built on it.
+- **Let your fleet teach the wiki.** An agent that learned something durable about the code calls `submit_insight`. The next `ask_wiki`, from any client, is built on it.
 - **Orchestrate a fleet.** One agent fans work out to several Mewbo sessions and polls `get_session_history` at the `overview` tier to track them all.
-- **Search across your connected sources.** Ask a natural-language question against any of your configured search workspaces and get a synthesised, cited answer, all without opening the console.
-- **Get structured, schema-validated answers.** Describe what you need, pass a JSON Schema, and `structured_query` returns a validated object. Useful for automated pipelines that need machine-readable output.
 
 ## Two directions of MCP
 
-Mewbo sits at both ends of the protocol. Do not confuse the two:
+Mewbo sits at both ends of the protocol.
 
 | | [External Tools (MCP)](features-mcp.md) | MCP Server (this page) |
 |---|---|---|
@@ -160,8 +154,6 @@ Mewbo sits at both ends of the protocol. Do not confuse the two:
 
 ## Related resources
 
-- [External Tools (MCP)](features-mcp.md): Mewbo consuming MCP servers (the inverse of this page).
-- [REST API](api/index.md): the REST surface the MCP server wraps.
-- [Agentic Wiki](features-wiki.md): what `ask_wiki` and `read_wiki_*` query.
-- [Model Context Protocol](https://modelcontextprotocol.io): the open standard.
-- [Connecting remote MCP servers to Claude](https://support.anthropic.com/en/articles/11175166-about-custom-integrations-using-remote-mcp) · [OpenAI's guide to remote MCP](https://platform.openai.com/docs/guides/tools-remote-mcp).
+- [REST API](api/index.md) is the surface the MCP server wraps.
+- [Agentic Wiki](features-wiki.md) is what `ask_wiki` and `read_wiki_*` query.
+- [Connecting remote MCP servers to Claude](https://support.anthropic.com/en/articles/11175166-about-custom-integrations-using-remote-mcp) and [OpenAI's guide to remote MCP](https://platform.openai.com/docs/guides/tools-remote-mcp) cover client setup for other ecosystems.

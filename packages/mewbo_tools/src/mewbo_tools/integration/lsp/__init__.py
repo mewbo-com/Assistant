@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from typing import TYPE_CHECKING, TypeVar
 
 if TYPE_CHECKING:
@@ -24,6 +25,13 @@ except ImportError:
     LSP_AVAILABLE = False
 
 T = TypeVar("T")
+
+# How long to let a language server publish diagnostics after a file is
+# reopened. A constant rather than a literal so a caller that must not wait
+# — a test — lowers THIS, instead of patching ``time.sleep`` on the stdlib
+# module, which neuters every sleep in the process and turns any concurrent
+# poll loop into a spin.
+PASSIVE_DIAGNOSTICS_SETTLE_S = 1.5
 
 # ------------------------------------------------------------------
 # Persistent event loop for LSP I/O (background daemon thread)
@@ -103,9 +111,7 @@ def get_passive_diagnostics(file_path: str, cwd: str) -> str | None:
         # Notify the server about the changed file
         run_lsp_async(manager.open_file(client, file_path))
         # Brief pause for the server to re-analyze
-        import time
-
-        time.sleep(1.5)
+        time.sleep(PASSIVE_DIAGNOSTICS_SETTLE_S)
         diags = manager.get_cached_diagnostics(file_path)
         from lsprotocol.types import DiagnosticSeverity
 

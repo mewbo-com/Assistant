@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -240,11 +239,21 @@ class TestJsonProjectStoreUpdate:
         assert updated.description == "D2"
 
     def test_update_updates_updated_at(self, json_store):
-        proj = json_store.create_project("N", "D")
-        orig_ts = proj.updated_at
-        time.sleep(0.01)  # ensure timestamp changes
-        updated = json_store.update_project(proj.project_id, name="New")
-        assert updated.updated_at >= orig_ts
+        """The update stamps the clock's CURRENT reading, not the create's.
+
+        Injecting the clock is what lets this assert the two timestamps DIFFER
+        rather than merely not going backwards — the old form
+        (``updated >= created`` after a sleep) is satisfied just as well by an
+        update that never re-stamped at all.
+        """
+        stamps = iter(["2020-01-01T00:00:00+00:00", "2020-01-02T00:00:00+00:00"])
+        # The fixture scopes the config to tmp_path; this store adds the clock.
+        store = JsonProjectStore(clock=lambda: next(stamps))
+        proj = store.create_project("N", "D")
+        assert proj.updated_at == "2020-01-01T00:00:00+00:00"
+        updated = store.update_project(proj.project_id, name="New")
+        assert updated.updated_at == "2020-01-02T00:00:00+00:00"
+        assert updated.created_at == proj.created_at
 
     def test_update_nonexistent_raises_key_error(self, json_store):
         with pytest.raises(KeyError, match="not found"):

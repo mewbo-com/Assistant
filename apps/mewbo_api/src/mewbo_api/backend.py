@@ -492,6 +492,25 @@ try:
 except Exception:
     logging.warning("Session-run startup sweep failed", exc_info=True)
 
+# Report a runtime the harness denials cannot actually cover. Every one of them
+# denies by path PREFIX, and a bind mount gives the same inodes a second name
+# that ``realpath`` does not collapse — so mounting the source over the runtime
+# leaves the harness readable and writable through its project path while the
+# denial on the installed path reports healthy. Measured on a real deployment,
+# for write, against the turn loop's source and the credential file.
+#
+# Read-only and best-effort: it cannot fix the topology and does not try, since
+# widening the denial to inode identity would deny a legitimate project mount.
+# All it buys is that the bypass stops being silent. ``MEWBO_BOOT_ALIAS_PROBE=0``
+# opts out for a deployment that has accepted the aliasing and wants its log back.
+try:
+    if os.environ.get("MEWBO_BOOT_ALIAS_PROBE", "1") != "0":
+        from mewbo_tools.integration.runtime_aliasing import RuntimeAliasProbe  # noqa: PLC0415
+
+        RuntimeAliasProbe.for_deployment().report()
+except Exception:
+    logging.warning("Runtime aliasing probe failed", exc_info=True)
+
 # Client-declared device tools: register the concrete
 # dispatcher into the core seam, mirroring how the api registers
 # RunStoreSearchLauncher for the agentic-search SessionTool. Unconditional
@@ -679,6 +698,12 @@ task_queue_model = api.model(
 )
 
 
+# How much of a request body the debug log will look at. Generous enough that a
+# real payload is readable in full, small enough that no caller can turn this
+# hook into a workload. A debug line is a diagnostic, not an archive.
+_LOG_BODY_LIMIT = 8192
+
+
 @app.before_request
 def log_request_info() -> None:
     """Log request metadata for debugging.
@@ -688,10 +713,23 @@ def log_request_info() -> None:
     reach any sink — the record-level patcher would also catch known shapes, but
     redacting the structured payload here catches arbitrary-shaped secrets under
     a named key too.
+
+    Cost: ``O(_LOG_BODY_LIMIT)``, NOT ``O(request body)`` — and that bound is the
+    point. This is a ``before_request`` hook, so it runs on every request ahead
+    of routing and authentication, and loguru defers FORMATTING but Python
+    evaluates the argument eagerly, so the redaction runs at any log level. A
+    caller with no credentials and no valid route therefore spends whatever this
+    line costs, on a single-worker process where ``re`` holds the GIL.
+
+    The body is TRUNCATED BEFORE redaction, never redacted past a cap and then
+    cut. Getting that order backwards would log a prefix nothing had scrubbed —
+    trading a CPU defect for a credential disclosure, which is the worse of the
+    two by a distance.
     """
     logging.debug("Endpoint: {}", request.endpoint)
     logging.debug("Headers: {}", redact_mapping(dict(request.headers)))
-    logging.debug("Body: {}", redact_text(request.get_data(as_text=True)))
+    body = request.get_data(as_text=True)[:_LOG_BODY_LIMIT]
+    logging.debug("Body: {}", redact_text(body))
 
 
 _CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "*")
@@ -987,7 +1025,11 @@ if _web_ide_cfg is not None and _web_ide_cfg.enabled:
                     "MEWBO_IDE_BROKER_TOKEN to move that privilege out)"
                 )
             _ide_manager = IdeManager(_web_ide_cfg, _ide_store, backend=_ide_backend)
-            init_ide(_ide_manager, runtime)
+            # ``_catalog`` (the accessor, not its result) so the mount tier
+            # resolves against the config and project store the process holds at
+            # request time — the same late-binding reason every other call site
+            # here goes through it.
+            init_ide(_ide_manager, runtime, _catalog)
             api.add_namespace(ide_ns, path="/api")
             logging.info("web_ide namespace registered at /api")
         except Exception as exc:  # pragma: no cover - startup fail-soft
@@ -8766,7 +8808,10 @@ class ConfigResource(Resource):
         description=(
             "Deep-merge the request body into the stored configuration, validate "
             "the result, and persist it. Attempts to modify protected fields are "
-            "rejected with 403. A merge that fails validation returns 422 with the "
+            "rejected with 403. A write-only (`writeOnly`) secret sent as an empty "
+            "string leaves the stored value unchanged, since its value is never "
+            "read back and a client cannot echo what it was not given; send `null` "
+            "to clear one. A merge that fails validation returns 422 with the "
             "validation errors and changes nothing. If the merged configuration is "
             "valid but cannot be written to disk (e.g. a read-only mount), returns "
             "500 with a machine-readable `code` and an actionable `message`; "
@@ -8796,8 +8841,10 @@ class ConfigResource(Resource):
 
         Deep-merges the request body into the stored configuration, validates
         the result, and persists it. Attempts to modify protected fields are
-        rejected with 403. A merge that fails validation returns 422 with the
-        validation errors and changes nothing. If the write itself fails (e.g.
+        rejected with 403. A write-only secret sent as an empty string leaves
+        the stored value unchanged; send `null` to clear one. A merge that
+        fails validation returns 422 with the validation errors and changes
+        nothing. If the write itself fails (e.g.
         the configuration store is on a read-only mount), returns 500 with a
         machine-readable `code` and an actionable `message`; nothing changes.
         """
@@ -8812,7 +8859,12 @@ class ConfigResource(Resource):
 
         config_path = get_app_config_path()
         raw = _load_json(config_path)
-        merged = _deep_merge(dict(raw), patch)
+        # A write-only secret is never read back, so a client re-sends the
+        # section it edited with that field EMPTY. The view decides what an
+        # empty (unchanged) and an explicit null (clear) mean; resolve against
+        # the operator's own document so an `${ENV_VAR}` reference is what gets
+        # carried forward, not its resolved value.
+        merged = _deep_merge(dict(raw), view.resolve_secret_writes(patch, raw))
         try:
             validated = AppConfig.model_validate(merged)
         except ValidationError as exc:

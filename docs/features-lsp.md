@@ -1,6 +1,9 @@
 # LSP Code Intelligence
 
-Mewbo ships a native Language Server Protocol tool that gives the AI real code intelligence. It covers diagnostics, go-to-definition, find-references, and hover information. Servers are auto-discovered on your `PATH` and start lazily on first use. After every file edit, diagnostics run automatically and land in the AI's context. It sees compile errors and type issues in the same turn it made the change.
+## See errors and find symbols
+
+Mewbo ships a native Language Server Protocol tool. Servers are discovered on your `PATH` and start
+lazily on first use.
 
 ## Built-in language servers
 
@@ -11,7 +14,8 @@ Mewbo ships a native Language Server Protocol tool that gives the AI real code i
 | Go | `gopls` | `go install golang.org/x/tools/gopls@latest` |
 | Rust | `rust-analyzer` | `rustup component add rust-analyzer` |
 
-Just have the binary on your `PATH`. Servers that are not installed are silently skipped; no configuration change is needed.
+Nothing beyond the binary on your `PATH` is required. A server that is not installed is silently
+skipped.
 
 ## Operations
 
@@ -22,18 +26,7 @@ Just have the binary on your `PATH`. Servers that are not installed are silently
 | `references` | `file_path`, `line`, `character` | All reference locations including the declaration |
 | `hover` | `file_path`, `line`, `character` | Type signature and documentation for the symbol |
 
-`line` and `character` are **0-based** (first line = 0, first column = 0).
-
-**Example.** Ask for diagnostics in a Python file:
-
-```json
-{
-  "operation": "diagnostics",
-  "file_path": "/home/user/project/main.py"
-}
-```
-
-**Example.** Jump to definition at line 42, column 12:
+`line` and `character` both count from 0. This call jumps to the definition at line 42, column 12.
 
 ```json
 {
@@ -46,11 +39,13 @@ Just have the binary on your `PATH`. Servers that are not installed are silently
 
 ## Passive diagnostics
 
-The LSP tool runs automatically after every file edit and appends type errors and lint warnings to the AI's context. No explicit tool call is needed. To turn this off, set `agent.lsp.enabled` to `false`.
+After every file edit the LSP tool runs and appends type errors and lint warnings to the session
+context, with no explicit tool call. Set `agent.lsp.enabled` to `false` to turn it off.
 
 ## Workspace root
 
-Each server picks a workspace root by walking up from the current working directory and looking for well-known marker files.
+Each server picks a workspace root by walking up from the working directory looking for marker
+files.
 
 | Server | Root markers |
 |--------|-------------|
@@ -65,9 +60,9 @@ If no marker is found nearby, the current working directory is used as the root.
 
 ### Enable / disable
 
-LSP is enabled by default. To disable it entirely:
+LSP is enabled by default. Disable it entirely.
 
-```json
+```json title="configs/app.json"
 {
   "agent": {
     "lsp": {
@@ -79,7 +74,7 @@ LSP is enabled by default. To disable it entirely:
 
 ### Disable a specific server
 
-```json
+```json title="configs/app.json"
 {
   "agent": {
     "lsp": {
@@ -93,9 +88,9 @@ LSP is enabled by default. To disable it entirely:
 
 ### Add a custom language server
 
-Define a custom server under `agent.lsp.servers`. All fields except `command` and `extensions` are optional.
+Define a custom server under `agent.lsp.servers`.
 
-```json
+```json title="configs/app.json"
 {
   "agent": {
     "lsp": {
@@ -120,20 +115,19 @@ Define a custom server under `agent.lsp.servers`. All fields except `command` an
 | `language_id` | No | LSP `languageId` string (defaults to the server's key name). |
 | `disabled` | No | Set `true` to disable a built-in server. |
 
+/// table-caption
+The fields a custom server definition accepts.
+///
+
 ### Full config key reference
 
-All keys are nested under `agent.lsp` in [`configs/app.json`](repo:configs/app.example.json).
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `enabled` | `true` | Enable the LSP tool and passive diagnostics. |
-| `servers` | `{}` | Per-server overrides and custom server definitions. |
+Every key is nested under `agent.lsp` in [`configs/app.json`](repo:configs/app.example.json) and
+documented with its default in [Configuration](configuration.md#agent).
 
 ## Installation
 
-No separate install step is needed. The LSP client library (`pygls`) ships with the base install. The feature activates per language when the matching language server binary is on your `PATH` (see the table above).
-
-If the client library is ever absent, the LSP tool is silently disabled. There is no crash and no error on startup.
+The LSP client library `pygls` ships with the base install, so there is no separate install step.
+If it is ever absent, the LSP tool is silently disabled, with no crash and no startup error.
 
 ---
 

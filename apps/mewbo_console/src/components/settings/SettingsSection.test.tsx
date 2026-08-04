@@ -119,3 +119,68 @@ describe("SettingsSection — a failed save must not announce success", () => {
     expect(document.querySelector('[aria-live="polite"].sr-only')?.textContent).toBe("");
   });
 });
+
+describe("SettingsSection — a sibling edit must not clobber an untouched secret", () => {
+  // Reproduces Gitea #509: an operator edited an unrelated model field and
+  // saved, and the PATCH carried `llm.api_key: ""` over a live credential.
+  // Root cause lives one layer below the widget: RJSF fills a MISSING
+  // property with its JSON-schema `default` the instant a SIBLING field's
+  // onChange fires, regardless of which widget owns that property — a custom
+  // `ui:widget: "secret"` does not opt a field out of that fill. Every
+  // x-secret/writeOnly field's Pydantic default is `""` (config.py), and the
+  // backend never returns a secret's real value, so `api_key` starts this
+  // test absent from `value`/`original`, exactly like the live wire shape.
+  const secretSchema: Record<string, unknown> = {
+    type: "object",
+    title: "AppConfig",
+    properties: { llm: { $ref: "#/$defs/LLMConfig" } },
+    $defs: {
+      LLMConfig: {
+        type: "object",
+        title: "LLM",
+        "x-group": "models",
+        "x-order": 1,
+        properties: {
+          default_model: { type: "string", title: "Model", default: "gpt-5.2" },
+          api_key: { type: "string", title: "Api Key", default: "", "x-secret": true },
+        },
+      },
+    },
+  };
+  const secretModel = new SettingsModel(secretSchema, {
+    llm: { default_model: "gpt-5.2" }, // api_key key absent, as the API returns it
+  });
+
+  test("typing in the Model field never adds api_key to the emitted patch", async () => {
+    const user = userEvent.setup();
+    let latest: Record<string, unknown> = { default_model: "gpt-5.2" };
+    const onChange = vi.fn((next: Record<string, unknown>) => {
+      latest = next;
+    });
+
+    render(
+      <SettingsSection
+        model={secretModel}
+        sectionId="llm"
+        value={latest}
+        original={{ default_model: "gpt-5.2" }}
+        advanced={false}
+        secrets={{}}
+        onChange={onChange}
+        onSave={vi.fn().mockResolvedValue(true)}
+      />
+    );
+
+    await user.type(screen.getByLabelText("Model"), "x");
+
+    // RJSF's own onChange payload DOES carry the schema-defaulted "" — that
+    // part is RJSF, not this fix.
+    expect(onChange).toHaveBeenCalled();
+    const lastFormData = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(lastFormData.api_key).toBe("");
+
+    // The fix is downstream, in what the model turns that formData into.
+    const patch = secretModel.patchFor("llm", lastFormData);
+    expect(patch).toEqual({ llm: { default_model: "gpt-5.2x" } });
+  });
+});

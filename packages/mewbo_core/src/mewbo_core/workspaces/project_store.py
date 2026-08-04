@@ -7,6 +7,7 @@ import abc
 import json
 import threading
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from importlib import resources
@@ -198,7 +199,15 @@ class ProjectStoreBase(abc.ABC):
 class JsonProjectStore(ProjectStoreBase):
     """JSON file-backed project store."""
 
-    def __init__(self) -> None:  # noqa: D107
+    def __init__(self, *, clock: Callable[[], str] = _utc_now) -> None:
+        """Create the store, stamping records from *clock*.
+
+        The timestamps are computed HERE, not supplied by the caller, so only
+        this store can expose them to a caller that needs two writes to be
+        distinguishable — unlike a filesystem mtime, which ``os.utime`` sets
+        directly. Same shape as ``TriggerService``'s injected clock.
+        """
+        self._clock = clock
         config = get_config()
         self._projects_home = Path(config.runtime.projects_home)
         self._data_file = (
@@ -238,7 +247,7 @@ class JsonProjectStore(ProjectStoreBase):
         self, name: str, description: str, path: str | None = None
     ) -> VirtualProject:
         project_id = str(uuid.uuid4())
-        now = _utc_now()
+        now = self._clock()
         if path:
             p = Path(path)
             path_source = "provided"
@@ -270,7 +279,7 @@ class JsonProjectStore(ProjectStoreBase):
         branch: str,
         path: str,
     ) -> VirtualProject:
-        now = _utc_now()
+        now = self._clock()
         proj = VirtualProject(
             project_id=project_id,
             name=branch,
@@ -312,7 +321,7 @@ class JsonProjectStore(ProjectStoreBase):
                         d["name"] = name
                     if description is not None:
                         d["description"] = description
-                    d["updated_at"] = _utc_now()
+                    d["updated_at"] = self._clock()
                     self._save(records)
                     return self._to_project(d)
         raise KeyError(f"Project {project_id} not found")
@@ -336,8 +345,17 @@ class JsonProjectStore(ProjectStoreBase):
 class MongoProjectStore(ProjectStoreBase):
     """MongoDB-backed project store."""
 
-    def __init__(self, mongodb_uri: str, database: str = "mewbo") -> None:  # noqa: D107
+    def __init__(
+        self,
+        mongodb_uri: str,
+        database: str = "mewbo",
+        *,
+        clock: Callable[[], str] = _utc_now,
+    ) -> None:
+        """Connect to *database*, stamping records from *clock*."""
         from pymongo import ASCENDING, MongoClient
+
+        self._clock = clock
 
         self._client: MongoClient = MongoClient(mongodb_uri)
         self._col = self._client[database]["virtual_projects"]
@@ -364,7 +382,7 @@ class MongoProjectStore(ProjectStoreBase):
         self, name: str, description: str, path: str | None = None
     ) -> VirtualProject:
         project_id = str(uuid.uuid4())
-        now = _utc_now()
+        now = self._clock()
         if path:
             p = Path(path)
             path_source = "provided"
@@ -395,7 +413,7 @@ class MongoProjectStore(ProjectStoreBase):
     def update_project(  # noqa: D102
         self, project_id: str, name: str | None = None, description: str | None = None
     ) -> VirtualProject:
-        update: dict[str, Any] = {"updated_at": _utc_now()}
+        update: dict[str, Any] = {"updated_at": self._clock()}
         if name is not None:
             update["name"] = name
         if description is not None:
@@ -430,7 +448,7 @@ class MongoProjectStore(ProjectStoreBase):
         branch: str,
         path: str,
     ) -> VirtualProject:
-        now = _utc_now()
+        now = self._clock()
         doc: dict[str, Any] = {
             "project_id": project_id,
             "name": branch,

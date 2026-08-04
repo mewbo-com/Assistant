@@ -1058,5 +1058,47 @@
       "label": "ci-pipeline (nightly docs build)",
       "created_at_offset": -1036800
     }
+  ],
+  "projects": [
+    {
+      "kind": "project",
+      "id": "4f8b2c17-63ae-4d90-9c15-2a7e08b3d641",
+      "name": "ledger-sync",
+      "description": "Nightly reconciliation between the billing ledger and the payments provider, filing a discrepancy report per run.",
+      "path": "/workspaces/acme/ledger-sync",
+      "created_at_offset": -5184000,
+      "updated_at_offset": -864000
+    },
+    {
+      "kind": "project",
+      "id": "a1c94d5e-70f2-4b83-8e6a-1d40c9b752fe",
+      "name": "shipment-router",
+      "description": "Picks a carrier per parcel from cost, service level and depot capacity, and re-routes when a depot runs over.",
+      "path": "/workspaces/acme/shipment-router",
+      "created_at_offset": -3456000,
+      "updated_at_offset": -172800
+    },
+    {
+      "kind": "worktree",
+      "parent": "a1c94d5e-70f2-4b83-8e6a-1d40c9b752fe",
+      "branch": "mewbo/main-9f2c1a",
+      "created_at_offset": -86400
+    },
+    {
+      "kind": "project",
+      "id": "7d302e86-51bc-4a17-b9f4-6c88e10d2735",
+      "name": "storefront-checkout",
+      "description": "Cart, address validation, payment capture and the receipt email, behind one checkout API.",
+      "path": "/workspaces/acme/storefront-checkout",
+      "created_at_offset": -1728000
+    },
+    {
+      "kind": "project",
+      "id": "c6e5417b-2d98-4f60-a3b1-95f7a2c48e03",
+      "name": "depot-telemetry",
+      "description": "Conveyor and scanner readings from every depot, rolled up into the hourly summaries the ops board reads.",
+      "path": "/workspaces/acme/depot-telemetry",
+      "created_at_offset": -604800
+    }
   ]
 }

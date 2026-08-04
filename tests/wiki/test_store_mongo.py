@@ -645,3 +645,44 @@ def test_mongo_recovery_counter() -> None:
     assert store.get_recovery_attempts("org/repo") == 2
     # Per-slug isolation.
     assert store.get_recovery_attempts("org/other") == 0
+
+
+# ── 16. A duplicate key inside ONE batch resolves to the LAST write ────────────
+
+
+def test_duplicate_key_in_one_batch_keeps_the_last_write_mongo() -> None:
+    """``ordered=False`` does not promise list order for two ops sharing a filter.
+
+    The per-document loop this store replaced applied both writes in input
+    order, so the last one won. An unordered batch explicitly permits
+    out-of-order or parallel execution, so the guarantee has to come from the
+    store folding by filter rather than from the server. Asserted two ways: the
+    surviving document is the last one, AND the driver is handed one operation
+    per DISTINCT key — the second is what actually fails if the fold is removed,
+    since a double-write in list order looks identical from the stored rows.
+    """
+    from mewbo_graph.wiki.types import make_graph_node
+
+    store = _store()
+    col = store._col("wiki_graph_nodes")
+    sizes: list[int] = []
+    real_bulk_write = col.bulk_write
+
+    def _counting_bulk_write(ops, **kwargs):
+        sizes.append(len(ops))
+        return real_bulk_write(ops, **kwargs)
+
+    col.bulk_write = _counting_bulk_write
+
+    def _node(docstring: str):
+        return make_graph_node(
+            slug="x/y", node_id="dup", type="File", name="a.py",
+            file="a.py", range=(0, 1), docstring=docstring,
+        )
+
+    store.upsert_nodes("x/y", [_node("first"), _node("second"), _node("third")])
+
+    result = store.query_graph("x/y", scope=CommitScope.every())
+    assert len(result) == 1
+    assert result[0].docstring == "third"
+    assert sizes == [1], "three ops on one key must reach the driver as one"

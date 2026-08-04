@@ -15,9 +15,16 @@ OUTPUT_PATH = Path("docs/configuration.md")
 # the installed mkdocs-shadcn theme's code_refs plugin);
 # `app.json` is the user-created, gitignored config — NOT a committed artifact —
 # so it stays inline code rather than a badge that would 404 on GitHub.
+# The H1 has to be the file's first block. The theme lifts the leading H1 out of
+# the body to render it as the page's label, and it only recognises it in that
+# position, so a comment above it left the heading in the body and the page
+# rendered its own title twice.
 HEADER = """\
-<!-- AUTO-GENERATED from configs/app.schema.json. Do not edit manually. -->
 # Configuration Reference
+
+## Every configuration key
+
+<!-- AUTO-GENERATED from configs/app.schema.json. Do not edit manually. -->
 
 Mewbo is configured via `configs/app.json`. This reference is auto-generated
 from the JSON Schema at [`configs/app.schema.json`](repo:configs/app.schema.json).

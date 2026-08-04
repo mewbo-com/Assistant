@@ -1,0 +1,44 @@
+# tests/docker-compose.test.yml — the ephemeral MongoDB the tier-2 suite runs
+# against (`make test-mongo`).
+#
+# Tier 1 (the default `pytest` run) is in-process and mongomock-backed, and it
+# stays that way: most of the suite needs no database and putting all of it
+# behind a container would couple the common loop to Docker. Tier 2 exists
+# because a class of defect is not observable in tier 1 AT ALL — mongomock has
+# no query planner, so an N+1 write or a missing index costs nothing there, and
+# it accepts `event_listeners=` while implementing none of PyMongo's monitoring
+# API, so a command COUNT cannot be taken.
+#
+# Deliberately shaped like demo/docker-compose.demo.yml, not like the
+# devcontainer's mongo:
+#
+# - **No volume.** The devcontainer's mongo has a named one and is therefore
+#   persistent; a test tier that inherits state across runs is not
+#   deterministic. Every `up` here starts from a blank database.
+# - **Isolated bridge network** (scoped by `name:`), never host networking.
+# - **No auth** — nothing but the test process reaches this network.
+# - **Loopback-only publish on its own port.** The deployed stack owns 27018
+#   and the demo stack owns its own; a collision would break a developer's
+#   running stack, so this one takes a distinct port and binds it to 127.0.0.1.
+name: mewbo-test-tier
+
+services:
+  mongo:
+    image: mongo:7
+    restart: "no"
+    ports:
+      - "127.0.0.1:${MEWBO_TEST_MONGO_PORT:-27019}:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+        reservations:
+          memory: 128M
+          cpus: "0.25"

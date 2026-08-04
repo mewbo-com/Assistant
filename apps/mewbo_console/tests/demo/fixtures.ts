@@ -36,6 +36,43 @@ export const test = base.extend<{ demo: DemoHelper }>({
         };
       }, apiKey);
     }
+    // Pin entropy, for the same reason the clock below is pinned: a surface
+    // that renders a random value renders a different one every run, and the
+    // zero-diff gate can never pass. `WorktreesPanel`'s create form seeds its
+    // "New branch name" from `defaultMewboBranchName`, which ends in a
+    // `crypto.getRandomValues` token and is echoed again in the "Will run: git
+    // worktree add -b ..." preview — two random strings in one capture.
+    //
+    // This pins WHICH value is drawn, never whether one is. The form still
+    // renders a genuine generated name, exactly as a user sees it; nothing
+    // here fabricates state the app would not produce. Seeded per page load,
+    // so the draw order — and therefore the rendered name — is identical run
+    // over run. xorshift32 rather than a library: it needs to be deterministic
+    // and cheap, not statistically good.
+    await page.addInitScript(() => {
+      let state = 0x9e3779b9;
+      const next = () => {
+        state ^= state << 13;
+        state >>>= 0;
+        state ^= state >>> 17;
+        state ^= state << 5;
+        state >>>= 0;
+        return state;
+      };
+      Object.defineProperty(crypto, "getRandomValues", {
+        configurable: true,
+        value: <T extends ArrayBufferView | null>(array: T): T => {
+          if (!array) return array;
+          const bytes = new Uint8Array(
+            array.buffer,
+            array.byteOffset,
+            array.byteLength,
+          );
+          for (let i = 0; i < bytes.length; i += 1) bytes[i] = next() & 0xff;
+          return array;
+        },
+      });
+    });
     // install (NOT setFixedTime): Date starts at T0 and the fake clock keeps
     // ticking, so data loading works exactly as in production (a FULLY paused
     // clock starves something in the load path — the session list sat on
@@ -152,6 +189,63 @@ export class DemoHelper {
         height: Math.ceil(box.height),
       },
     });
+  }
+
+  /**
+   * Scroll `target`'s own scroll container until `target` sits at its top edge.
+   *
+   * A Settings facet is taller than any landscape viewport once its panes carry
+   * real data, so a full-viewport capture has to choose WHICH band of the facet
+   * it frames. Scrolling to a card boundary is that choice made explicitly: the
+   * alternative is a viewport tall enough to hold the whole facet, which is a
+   * portrait source, and `demo/framer` composites those onto the 16:9 canvas as
+   * a very small window.
+   *
+   * The offset is rounded to a whole pixel on purpose. A fractional `scrollTop`
+   * rasterizes text at fractional positions, which is a sub-pixel byte-diff
+   * that survives the frozen clock and the capture stylesheet — the same class
+   * of hazard as the banned fractional `zoom`.
+   *
+   * `margin` leaves that many pixels of the pane above the target. Zero puts a
+   * card's own border flush against the pane's top edge, which reads as a
+   * clipped card rather than a scrolled page.
+   */
+  async pinToPaneTop(target: Locator, margin = 0): Promise<void> {
+    await target.evaluate((el, gap) => {
+      let pane = el.parentElement;
+      while (pane && pane.scrollHeight <= pane.clientHeight + 4) {
+        pane = pane.parentElement;
+      }
+      if (!pane) throw new Error("pinToPaneTop: no scrollable ancestor");
+      const delta =
+        el.getBoundingClientRect().top - pane.getBoundingClientRect().top;
+      pane.scrollTop = Math.round(pane.scrollTop + delta - gap);
+    }, margin);
+  }
+
+  /**
+   * Assert `target` is wholly inside the viewport, top and bottom.
+   *
+   * `toBeVisible()` only proves a non-empty box — an element scrolled entirely
+   * below the fold passes it. So a full-viewport capture can cut away the very
+   * content a spec asserts, and every assertion stays green: a wrong screenshot
+   * with a passing test. Anything a shot's docstring PROMISES to show should be
+   * gated on this, not on visibility alone.
+   *
+   * Two specs learned this separately — the ask-user crop, where a seed growing
+   * by one option pushed the first card's header off screen, and the Security
+   * shot, whose viewport cut above both issued-key rows while asserting them.
+   */
+  async expectWithinViewport(target: Locator, label: string): Promise<void> {
+    const box = await target.boundingBox();
+    if (!box) throw new Error(`${label}: no bounding box`);
+    const viewport = this.page.viewportSize();
+    if (!viewport) throw new Error(`${label}: no viewport size`);
+    expect(box.y, `${label} is clipped at the top`).toBeGreaterThanOrEqual(0);
+    expect(
+      box.y + box.height,
+      `${label} is clipped at the bottom`,
+    ).toBeLessThanOrEqual(viewport.height);
   }
 
   /** Open the landing, wait for the seeded list, click a session by its title. */

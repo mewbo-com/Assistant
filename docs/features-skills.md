@@ -1,17 +1,25 @@
 # Skills
 
-A skill is a small, self-contained instruction file that teaches the assistant a specific way of working. Examples include running code review, drafting a changelog, or triaging an incident. Each skill lives in its own directory as a `SKILL.md` file (YAML frontmatter plus a markdown body). Mewbo only pulls the full body of a skill into context when that skill actually activates, so you can keep dozens of skills installed without burning context on skills you aren't using.
+## Instructions loaded on need
+
+A skill is one instruction file that gives Mewbo a specific way of working. Each lives in its own
+directory as a `SKILL.md` file, with YAML frontmatter and a markdown body. Mewbo pulls that body into
+context only when the skill activates, so dozens of installed skills cost nothing until one runs.
 
 > [!TIP] Drop-in compatible with Claude Code
-> Skills follow the [Agent Skills standard](https://docs.claude.com/en/api/agent-skills) (also published as the open [`agentskills.io`](https://agentskills.io) spec). Mewbo uses the same directory conventions (`~/.claude/skills/` for user-global, `.claude/skills/` for project-local), the same `SKILL.md` frontmatter, the same `allowed-tools` scoping, and the same `/skill-name` invocation pattern. Any skill written for Claude Code works unchanged in Mewbo.
+> Skills follow the [Agent Skills standard](https://docs.claude.com/en/api/agent-skills), also
+> published as the open [`agentskills.io`](https://agentskills.io) spec. Mewbo reads the same
+> directories, the same `SKILL.md` frontmatter, the same `allowed-tools` scoping and the same
+> `/skill-name` invocation. Any skill written for Claude Code works unchanged in Mewbo.
 
 ---
 
 ## Writing a skill
 
-Create a directory at `.claude/skills/<your-skill-name>/SKILL.md`. The file must start with a YAML frontmatter block followed by the instruction body.
+Create a directory at `.claude/skills/<your-skill-name>/SKILL.md`. The file starts with a YAML
+frontmatter block and the instruction body follows it.
 
-```markdown
+```markdown title=".claude/skills/<your-skill-name>/SKILL.md"
 ---
 name: code-reviewer
 description: Review code changes for correctness, style, and test coverage. Use when asked to review a diff, PR, or commit.
@@ -20,12 +28,10 @@ allowed-tools: read_file aider_list_dir_tool aider_shell_tool
 
 # Code Review
 
-You are performing a thorough code review. Follow this checklist:
-
 1. Read the diff using `read_file`.
 2. Run `aider_shell_tool` with `git diff HEAD~1` to verify context.
 3. Check for missing tests.
-4. Report findings as a structured list: **Issue**, **Severity**, **Suggestion**.
+4. Report each finding as **Issue**, **Severity**, **Suggestion**.
 ```
 
 ### Frontmatter reference
@@ -42,25 +48,35 @@ You are performing a thorough code review. Follow this checklist:
 | `agent` | string | No | Run skill inside a registered agent type |
 | `model` | string | No | Model override when the skill activates |
 
+/// table-caption
+Every `SKILL.md` frontmatter key. Only `name` and `description` are required.
+///
+
 ---
 
 ## Tool scoping
 
-When `allowed-tools` is set, activating the skill narrows the tool set for the duration of the skill to just those tools. Use the same tool IDs you would use anywhere else in Mewbo:
+Set `allowed-tools` to narrow the tool set for as long as the skill is active, using the same tool
+IDs as anywhere else in Mewbo.
 
 ```yaml
 allowed-tools: read_file aider_list_dir_tool
 ```
 
-When `allowed-tools` is omitted, the skill inherits the full tool set of the current session.
+Omit it and the skill inherits the session's full tool set.
 
 ---
 
 ## Capability gating
 
-A skill can opt out of sessions that lack a required runtime by declaring `requires-capabilities` in its frontmatter. The client advertises capabilities via the `X-Mewbo-Capabilities` header; the orchestrator resolves the session capability set once, and [SkillRegistry](repo:packages/mewbo_core/src/mewbo_core/tooling/skills.py) then filters both the auto-invocation catalog and the `/skill-name` lookup. Skills whose `requires-capabilities` is not a subset of the session capabilities are invisible: they are not surfaced to the model and cannot be invoked explicitly. The built-in `widget-builder` plugin uses this: its `st-widget-builder` skill declares `requires-capabilities: [stlite]`, so it never appears on CLI sessions that do not advertise stlite.
+The client advertises what it can render on the `X-Mewbo-Capabilities` header, and
+[SkillRegistry](repo:packages/mewbo_core/src/mewbo_core/tooling/skills.py) filters against it. A
+gated skill reaches neither the model nor an explicit `/skill-name` call.
 
-```yaml
+The built-in `widget-builder` plugin works this way. Its `st-widget-builder` skill declares
+`requires-capabilities: [stlite]`, so it never appears on a CLI session that does not advertise stlite.
+
+```yaml title="SKILL.md"
 ---
 name: st-widget-builder
 description: Build an interactive stlite widget rendered inline in the console.
@@ -68,27 +84,27 @@ requires-capabilities: [stlite]
 ---
 ```
 
-Skills inherit the capability list from their plugin when one is set. `plugin.json` can declare `requires-capabilities` at bundle level and have every skill under the plugin pick it up automatically. See [Plugins & Marketplace → Capability gating](features-plugins.md#capability-gating).
+Declare `requires-capabilities` once in `plugin.json` and every skill under that plugin inherits it.
+See [Plugins & Marketplace → Capability gating](features-plugins.md#capability-gating).
 
 ---
 
 ## Shell preprocessing
 
-Skills can embed shell commands using the `` !`command` `` syntax. At activation time each matched command is executed and its standard output is substituted inline before the instructions are shown to the model. This is useful for injecting live context into the skill body. Examples include the current branch, directory tree, or environment values.
+Skills embed shell commands with the `` !`command` `` syntax. Each matched command runs at activation
+time and its standard output is substituted inline before the model sees the instructions.
 
-**Example.** Inject the current git branch name:
+**Example.** Inject the current git branch name.
 
 ```markdown
 You are reviewing code on branch: !`git rev-parse --abbrev-ref HEAD`
 ```
 
-Commands time out after 30 seconds. On error, the placeholder is replaced with `[ERROR: ...]`.
+A command times out after 30 seconds. On error the placeholder becomes `[ERROR: ...]`.
 
 ---
 
 ## Where skills live
-
-Skills are discovered from these directories. Project-local skills override personal skills with the same name.
 
 | Path | Scope | Priority |
 |---|---|---|
@@ -96,24 +112,33 @@ Skills are discovered from these directories. Project-local skills override pers
 | `.claude/skills/<name>/SKILL.md` | Project-local (CWD) | Overrides personal |
 | `<subdir>/.claude/skills/<name>/SKILL.md` | Subtree (nested inside the project) | Does not override above |
 
-Plugins can ship skills too; they use the same `SKILL.md` format and never override a personal or project-local skill with the same name. A plugin's skills can declare `requires-capabilities` on the skill frontmatter, or inherit a bundle-level list from `plugin.json`.
+/// table-caption
+The three directories skills are discovered from. A skill in the project wins a name collision.
+///
+
+Plugins ship skills in the same `SKILL.md` format. A plugin skill never overrides a personal or a
+project skill of the same name.
 
 ---
 
 ## Invoking skills
 
-You have two ways to trigger a skill:
+Two paths trigger a skill.
 
-- **Automatically**: the assistant reads the skill catalogue at the start of every session and can choose to activate a relevant skill based on your request.
-- **Explicitly**: type `/skill-name` in the CLI or console. Arguments after the name are passed through as `$ARGUMENTS` inside the skill body, and individual tokens are available as `$0`, `$1`, and so on.
+- **Automatically.** Mewbo reads the skill catalogue at the start of every session and can activate a
+  matching skill from your request.
+- **Explicitly.** Type `/skill-name` in the CLI or console. Arguments after the name arrive as
+  `$ARGUMENTS` inside the skill body, and individual tokens as `$0`, `$1` and so on.
 
-Sub-agents also see the skill catalogue in their system prompt, so delegating work to a sub-agent and naming a skill in the task description works as expected.
+Sub-agents carry the same catalogue in their system prompt, so naming a skill in a delegated task
+description works too.
 
 ---
 
 ## Hot-reload
 
-Mewbo notices when a `SKILL.md` file changes and picks up the new version automatically. New skill directories that appear while the server is running are detected on the next scan. No restart is required.
+A changed `SKILL.md` is picked up automatically, and a new skill directory on the next scan. No
+restart is required.
 
 ---
 

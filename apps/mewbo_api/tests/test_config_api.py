@@ -269,6 +269,157 @@ def test_config_patch_allows_secret(monkeypatch):
         _teardown(path)
 
 
+def test_config_patch_empty_secret_leaves_the_stored_value_intact(monkeypatch):
+    """The outage: saving the model section blanked `llm.api_key` and returned 200.
+
+    The console's form hydrates without the secret (it is stripped from every
+    read), materializes an empty string, and PATCHes the section back whole. The
+    seam both surfaces pass their own tests against is this one — the empty
+    value must not reach disk while the non-secret edit beside it does.
+    """
+    path = _setup_temp_config(
+        monkeypatch,
+        {"llm": {"api_key": "sk-live", "default_model": "old-model"}},
+    )
+    try:
+        client = backend.app.test_client()
+        resp = client.patch(
+            "/api/config",
+            headers={"X-API-Key": "test-token"},
+            json={"llm": {"api_key": "", "default_model": "anthropic/claude-sonnet-4-6"}},
+        )
+        assert resp.status_code == 200
+
+        with open(path) as f:
+            on_disk = json.load(f)
+        assert on_disk["llm"]["api_key"] == "sk-live"
+        assert on_disk["llm"]["default_model"] == "anthropic/claude-sonnet-4-6"
+        assert resp.get_json()["secrets"]["llm.api_key"] is True
+    finally:
+        _teardown(path)
+
+
+def test_config_patch_preserves_an_env_reference(monkeypatch):
+    """`${VAR}` is the form the deployment relies on; a save must not rewrite it."""
+    monkeypatch.setenv("MEWBO_TEST_LLM_KEY", "sk-from-env")
+    path = _setup_temp_config(
+        monkeypatch,
+        {"llm": {"api_key": "${MEWBO_TEST_LLM_KEY}"}},
+    )
+    try:
+        client = backend.app.test_client()
+        resp = client.patch(
+            "/api/config",
+            headers={"X-API-Key": "test-token"},
+            json={"llm": {"api_key": "", "default_model": "anthropic/claude-sonnet-4-6"}},
+        )
+        assert resp.status_code == 200
+
+        with open(path) as f:
+            on_disk = json.load(f)
+        # The reference itself, not the value it resolved to.
+        assert on_disk["llm"]["api_key"] == "${MEWBO_TEST_LLM_KEY}"
+    finally:
+        _teardown(path)
+
+
+def test_config_patch_null_secret_clears_it(monkeypatch):
+    """Clearing stays possible, and is said with an explicit null."""
+    path = _setup_temp_config(monkeypatch, {"llm": {"api_key": "sk-live"}})
+    try:
+        client = backend.app.test_client()
+        resp = client.patch(
+            "/api/config",
+            headers={"X-API-Key": "test-token"},
+            json={"llm": {"api_key": None}},
+        )
+        assert resp.status_code == 200
+        assert resp.get_json()["secrets"]["llm.api_key"] is False
+
+        with open(path) as f:
+            on_disk = json.load(f)
+        assert on_disk["llm"]["api_key"] == ""
+    finally:
+        _teardown(path)
+
+
+def test_config_patch_keeps_a_list_element_secret(monkeypatch):
+    """A list is merged by REPLACEMENT, so an entry's credential must ride along.
+
+    Editing any field of an authenticator re-sends the whole list with its
+    credentials empty; without the guard the entry lands on disk without one.
+    """
+    stored = {
+        "api": {
+            "auth": {
+                "enabled": True,
+                "session": {"secret": "cookie-key"},
+                "authenticators": [
+                    {
+                        "name": "corp-oidc",
+                        "kind": "oidc",
+                        "issuer": "https://idp.example.com",
+                        "client_id": "mewbo-console",
+                        "client_secret": "OIDC-SECRET",
+                    }
+                ],
+            }
+        }
+    }
+    path = _setup_temp_config(monkeypatch, stored)
+    try:
+        client = backend.app.test_client()
+        resp = client.patch(
+            "/api/config",
+            headers={"X-API-Key": "test-token"},
+            json={
+                "api": {
+                    "auth": {
+                        "session": {"secret": ""},
+                        "authenticators": [
+                            {
+                                "name": "corp-oidc",
+                                "kind": "oidc",
+                                "issuer": "https://idp.example.com",
+                                "client_id": "console",
+                                "client_secret": "",
+                            }
+                        ],
+                    }
+                }
+            },
+        )
+        assert resp.status_code == 200
+
+        with open(path) as f:
+            on_disk = json.load(f)
+        entry = on_disk["api"]["auth"]["authenticators"][0]
+        assert entry["client_secret"] == "OIDC-SECRET"
+        assert entry["client_id"] == "console"
+        assert on_disk["api"]["auth"]["session"]["secret"] == "cookie-key"
+    finally:
+        _teardown(path)
+
+
+def test_config_patch_still_403s_a_protected_path_beside_a_secret(monkeypatch):
+    """The secret rule runs AFTER the protected refusal and does not soften it."""
+    path = _setup_temp_config(monkeypatch, {"llm": {"api_key": "sk-live"}})
+    try:
+        client = backend.app.test_client()
+        resp = client.patch(
+            "/api/config",
+            headers={"X-API-Key": "test-token"},
+            json={"llm": {"api_key": ""}, "api": {"master_token": "hacked"}},
+        )
+        assert resp.status_code == 403
+
+        with open(path) as f:
+            on_disk = json.load(f)
+        assert on_disk == {"llm": {"api_key": "sk-live"}}
+    finally:
+        _teardown(path)
+
+
 def test_config_patch_validates_input(monkeypatch):
     """PATCH /api/config with invalid type returns 422."""
     path = _setup_temp_config(monkeypatch)

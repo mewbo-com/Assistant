@@ -19,6 +19,11 @@ on:
       - "packages/mewbo_core/src/mewbo_core/config.py"
       - "scripts/ci/generate_openapi_spec.py"
       - "scripts/ci/generate_config_schema.py"
+      # The docs theme is a pinned wheel, so a theme upgrade changes only these
+      # two files. Without them a pin bump publishes nothing and the deployed
+      # site keeps serving the previous theme with no failure anywhere.
+      - "pyproject.toml"
+      - "uv.lock"
       - ".github/workflows/docs.yml"
   pull_request:
     types: [opened, synchronize, reopened, closed]
@@ -31,6 +36,11 @@ on:
       - "packages/mewbo_core/src/mewbo_core/config.py"
       - "scripts/ci/generate_openapi_spec.py"
       - "scripts/ci/generate_config_schema.py"
+      # The docs theme is a pinned wheel, so a theme upgrade changes only these
+      # two files. Without them a pin bump publishes nothing and the deployed
+      # site keeps serving the previous theme with no failure anywhere.
+      - "pyproject.toml"
+      - "uv.lock"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 

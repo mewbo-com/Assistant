@@ -1,23 +1,20 @@
 # Building a Client
 
-Every Mewbo client drives the same engine. This page walks the session lifecycle over the REST API, from creating a session to following a run and steering it. Build against these endpoints and your client behaves like the console, the CLI, and the mobile app, because they all speak this same surface.
+## Drive a session over REST
 
-You have two ways to build on Mewbo. Drive it over HTTP with the REST API, which is what this page covers, or embed the core engine in-process as a Python library. The [in-process option](#embedding-the-engine-in-process) is at the end.
+Every Mewbo client drives the same engine over the same REST surface. Build against these endpoints and your client behaves like the console, the CLI, and the mobile app.
 
-The examples assume your API key is exported and your stack serves the default base URL:
+The other option is to embed the core engine in your own Python process instead of going over HTTP. That path is covered [at the end](#embedding-the-engine-in-process).
 
-```bash
-export MEWBO_API_KEY="<your-api-key>"
-export MEWBO_API_URL="http://localhost:5125"
-```
+The examples below use `$MEWBO_API_KEY` and `$MEWBO_API_URL`. [Get Started](index.md) covers the key and the base URL.
 
 ## The session lifecycle
 
-A session is the core resource. It holds one conversation and its full event history. The lifecycle is: create a session, send it a query, follow the run, then send follow-ups or steer as needed.
+A session is the core resource. It holds one conversation and its full event history. Create a session, send it a query, follow the run, then keep asking or steer as it goes.
 
 ### Create a session
 
-[POST /api/sessions](endpoint:POST /api/sessions) creates an empty session and returns its id:
+[POST /api/sessions](endpoint:POST /api/sessions) creates an empty session and returns its id.
 
 ```bash
 curl -X POST "$MEWBO_API_URL/api/sessions" \
@@ -30,7 +27,7 @@ curl -X POST "$MEWBO_API_URL/api/sessions" \
 { "session_id": "9e2d47c1a0b34f12" }
 ```
 
-The body is optional. The useful fields:
+The body is optional. Four fields earn their place.
 
 | Field | Purpose |
 |---|---|
@@ -39,11 +36,11 @@ The body is optional. The useful fields:
 | `context` | Initial context to persist, such as `model`. |
 | `fork_from` | Create the session as a branch of an existing session's history. Pair with `fork_at_ts` to branch at a point. |
 
-An explicit `cwd` is also accepted, but it requires the `api.allow_external_cwd` flag. It is meant for external workspace managers that anchor a session in their own worktree.
+An explicit `cwd` is also accepted behind the `api.allow_external_cwd` flag. It exists for external workspace managers that anchor a session in their own worktree.
 
 ### Send a query
 
-[POST /api/sessions/{session_id}/query](endpoint:POST /api/sessions/{session_id}/query) starts a run. Only `query` is required:
+[POST /api/sessions/{session_id}/query](endpoint:POST /api/sessions/{session_id}/query) starts a run. Only `query` is required.
 
 ```bash
 curl -X POST "$MEWBO_API_URL/api/sessions/9e2d47c1a0b34f12/query" \
@@ -52,13 +49,7 @@ curl -X POST "$MEWBO_API_URL/api/sessions/9e2d47c1a0b34f12/query" \
   -d '{"query": "Summarize the open pull requests."}'
 ```
 
-The run is asynchronous. The endpoint returns `202 Accepted` and the work continues server-side:
-
-```json
-{ "session_id": "9e2d47c1a0b34f12", "accepted": true }
-```
-
-The response codes tell you what happened:
+The run is asynchronous. The endpoint returns straight away and the work continues on the server.
 
 | Status | Meaning |
 |---|---|
@@ -67,51 +58,27 @@ The response codes tell you what happened:
 | `409` | A run is already active. A session executes one turn at a time. |
 | `400` | The `query` field was missing. |
 
-The body carries optional fields alongside `query`. Set `context.model` to pick a model for the turn. Set `context.fallback_models` to a list to escalate down a ladder when the primary model keeps failing. Set `mode` to `plan` or `act`. Inline `@file`, `@dir`, `@diff`, and `@url` references in the query are expanded into bounded context before the run, so you do not need a separate read step for local context.
+`context.model` picks the model for the turn, and `context.fallback_models` takes a ladder to escalate down when the primary keeps failing. `mode` takes `plan` or `act`. Inline `@file`, `@dir`, `@diff`, and `@url` references expand into bounded context before the run, so local context needs no separate read step.
 
 ### Follow the run
 
-You have two ways to follow a run: poll for events, or attach to the live stream.
+**Poll** [GET /api/sessions/{session_id}/events](endpoint:GET /api/sessions/{session_id}/events) with `after` set to the timestamp of the last event you processed, so only newer ones come back. `truncate=1` caps large free-text payloads. Alongside the events the response carries `status`, `running`, `done_reason` and `recoverable`, so run state is never reconstructed from the timeline.
 
-**Poll** with [GET /api/sessions/{session_id}/events](endpoint:GET /api/sessions/{session_id}/events). Pass `after` with the timestamp of the last event you processed to fetch only newer ones. Pass `truncate=1` to cap large free-text payloads:
-
-```bash
-curl "$MEWBO_API_URL/api/sessions/9e2d47c1a0b34f12/events?after=1720000000.0" \
-  -H "X-API-KEY: $MEWBO_API_KEY"
-```
-
-The response carries the events plus the authoritative run state, so you do not reconstruct status from the timeline:
-
-```json
-{
-  "session_id": "9e2d47c1a0b34f12",
-  "status": "completed",
-  "running": false,
-  "done_reason": "completed",
-  "recoverable": false,
-  "events": [ "..." ]
-}
-```
-
-**Stream** with [GET /api/sessions/{session_id}/stream](endpoint:GET /api/sessions/{session_id}/stream). This is Server-Sent Events, which browser `EventSource` clients cannot send custom headers on, so the streaming routes accept the key as an `api_key` query parameter:
-
-```bash
-curl -N "$MEWBO_API_URL/api/sessions/9e2d47c1a0b34f12/stream?api_key=$MEWBO_API_KEY"
-```
-
-The stream replays the stored backlog once, then pushes each new event the instant it is appended. It is push-based, not a poll loop. Pass `after` with the timestamp of the last event you already hold to reconnect without re-downloading the transcript:
+**Stream** [GET /api/sessions/{session_id}/stream](endpoint:GET /api/sessions/{session_id}/stream) to get each event the instant it is appended, after one replay of the stored backlog. Pass `after` to reconnect without downloading the transcript again.
 
 ```bash
 curl -N "$MEWBO_API_URL/api/sessions/9e2d47c1a0b34f12/stream?api_key=$MEWBO_API_KEY&after=1720000000.0"
 ```
 
-The bound is inclusive, so a reconnect may replay one event you already have; de-duplicate by comparing the event itself rather than skipping whatever shares the cursor's timestamp.
+The bound is inclusive, so a reconnect may replay one event you already hold. Deduplicate by comparing the event itself rather than skipping whatever shares the cursor's timestamp.
 
-Alongside transcript events, the stream pushes a `session_state` frame carrying the same authoritative run state as the polling response (`running`, `status`, `done_reason`, `title`, `recoverable`, `terminated`, `terminated_at`) — once right after the replay finishes, and again immediately before the connection closes, so a client that only reads this one frame per connection still knows where the run stands. A terminal `stream_end` event marks the run finished. Drain the stream through that event, because the final `completion` event arrives just before it.
+The stream also pushes a `session_state` frame carrying the polling response's run state plus `title`, `terminated`, and `terminated_at`. It arrives twice, once after the replay and again just before the connection closes, so a client reading only that frame still knows where the run stands.
+
+A terminal `stream_end` event marks the run finished. Drain the stream through it, because the final `completion` event lands just before.
 
 ### Event kinds
 
-Each event has a `type` and a `payload`. The kinds you handle in a client:
+Each event has a `type` and a `payload`. These are the kinds a client handles.
 
 | Event | When it fires |
 |---|---|
@@ -123,26 +90,15 @@ Each event has a `type` and a `payload`. The kinds you handle in a client:
 | `assistant` | Final assistant output for the turn. |
 | `completion` | The run reached a terminal state. Carries the final `status`. |
 
-Tool events use `tool_id`, `operation`, and `tool_input`. Those field names are a stable part of the contract.
+`tool_id`, `operation` and `tool_input` are a stable contract.
 
 ### Send a follow-up
 
-A session is a continuing conversation. To ask a follow-up, send another query to the same session id. The new turn inherits the session's history and context:
-
-```bash
-curl -X POST "$MEWBO_API_URL/api/sessions/9e2d47c1a0b34f12/query" \
-  -H "X-API-KEY: $MEWBO_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "Now open a draft PR for the first one."}'
-```
-
-Wait for the previous run to reach a terminal state first. A query sent while a run is still active returns `409`. To add input to a run that is still going, steer it instead.
+Send another query to the same session id. The new turn inherits the session's history and context. Wait for the previous run to reach a terminal state first. A query sent while a run is still active returns `409`. Steer the run instead if you need to add input mid flight.
 
 ### Steer or interrupt a run
 
-While a run is active, you can push input into it or pause it.
-
-[POST /api/sessions/{session_id}/message](endpoint:POST /api/sessions/{session_id}/message) enqueues a steering message. The `text` field is required:
+[POST /api/sessions/{session_id}/message](endpoint:POST /api/sessions/{session_id}/message) enqueues a steering message into an active run. The `text` field is required.
 
 ```bash
 curl -X POST "$MEWBO_API_URL/api/sessions/9e2d47c1a0b34f12/message" \
@@ -151,20 +107,15 @@ curl -X POST "$MEWBO_API_URL/api/sessions/9e2d47c1a0b34f12/message" \
   -d '{"text": "Focus on the auth module only."}'
 ```
 
-The same endpoint does double duty. If the run is active, the text steers it and the call returns `202`. If the session is idle or finished, the text re-engages it: a fresh run starts with the text as its query and the call returns `200` with a new `run_id`. Only a terminated session rejects the message.
+The same endpoint does double duty. On an active run the text steers it and the call returns `202`. On an idle or finished session it starts a fresh run with that text as the query and returns `200` with a new `run_id`. Only a terminated session rejects the message.
 
 [POST /api/sessions/{session_id}/interrupt](endpoint:POST /api/sessions/{session_id}/interrupt) signals the current tool step to pause. Interrupting an idle session is a no-op that returns `200`.
 
 ### Terminate a session
 
-Interrupting stops a run; the session lives on and can be steered or resumed afterward. Terminating is different: it ends the session itself, permanently.
+Interrupting stops a run and leaves the session steerable. Terminating ends the session itself.
 
-[POST /api/sessions/{session_id}/terminate](endpoint:POST /api/sessions/{session_id}/terminate) is irreversible. There is no un-terminate call:
-
-```bash
-curl -X POST "$MEWBO_API_URL/api/sessions/9e2d47c1a0b34f12/terminate" \
-  -H "X-API-KEY: $MEWBO_API_KEY"
-```
+[POST /api/sessions/{session_id}/terminate](endpoint:POST /api/sessions/{session_id}/terminate) is irreversible. No call undoes it.
 
 ```json
 {
@@ -175,31 +126,31 @@ curl -X POST "$MEWBO_API_URL/api/sessions/9e2d47c1a0b34f12/terminate" \
 }
 ```
 
-`cancelled_triggers` counts any [triggers](triggers.md) armed on the session, they're cancelled in the same call, so a terminated session can never wake itself back up later. The call is idempotent: terminating an already-terminated session returns the same original values.
+`cancelled_triggers` counts the [triggers](triggers.md) armed on the session. The same call cancels them, so a terminated session can never be woken later. The call is idempotent, and terminating an already terminated session returns the same original values.
 
-After termination, every mutating route on that session, a new query, a steering message, recovery, forking, plan approval, returns `410 Gone`:
+After termination, every mutating route on that session returns `410 Gone`. That covers a new query, a steering message, recovery, forking, and plan approval.
 
 ```json
 { "error": { "code": "session_terminated", "reason": "Session is permanently terminated", "retryable": false } }
 ```
 
-Termination is not deletion. The transcript stays fully readable: `GET /api/sessions/{session_id}/events`, the stream, export, and share all keep working exactly as before. Only the ability to make the session do anything else is gone.
+Termination is not deletion. The transcript stays fully readable, and `GET /api/sessions/{session_id}/events`, the stream, export, and share all keep working as before. What is gone is the ability to make the session do anything else.
 
 ## Client capability negotiation
 
-Clients advertise the UI primitives they can render with the `X-Mewbo-Capabilities` request header. The value is a comma-separated list of capability ids, for example `stlite`. The API writes the advertised list onto the session's context event, and the orchestrator reads it to filter which agent types, skills, and session tools the model can see.
+A client advertises the UI primitives it can render with the `X-Mewbo-Capabilities` request header. The value is a comma separated list of capability ids such as `stlite`. The API writes that list onto the session's context event, and the orchestrator filters which agent types, skills, and session tools the model sees.
 
-A client that omits the header will not see capability-gated surfaces. The bundled widget builder is the reference case: without `X-Mewbo-Capabilities: stlite`, a session does not expose the widget-building agent type, skill, or tool.
+Omit the header and no capability-gated surface appears. Without `X-Mewbo-Capabilities: stlite`, for instance, a session exposes no widget building agent type, skill or tool.
 
-`generative_ui` is the one most clients will want. It lets the model lay an answer out as a structured [panel](../web/panels.md) built from a fixed set of eleven components, emitted as a `generative_ui` transcript event. The event carries both the component tree and a plain-text rendering of it computed server-side, so a client does not have to draw the tree to advertise the capability. Printing the text is enough, and that is how the terminal and the MCP server present a panel.
+`generative_ui` is the one most clients want. It lays an answer out as a [panel](../web/panels.md) of eleven components, emitted as a `generative_ui` transcript event. The event carries the component tree and a plain text rendering computed on the server. Printing that text is enough, and it is what the terminal and the MCP server do.
 
-What you must not do is advertise it and then drop the event. The capability is what binds the tool at all, so claiming it without surfacing the result either way makes the model spend a step on output nobody sees.
+Do not advertise the capability and then drop the event. The capability is what binds the tool at all, so a claim with no surfacing spends a step on output nobody sees.
 
-Send the header on every request that creates or drives a session, not just on create. The orchestrator reads capabilities from the most recent context event, so re-sending the header on each drive keeps the grant current. On the server side, session recovery re-injects the capability context automatically, so a recovered session keeps its grant without any special handling from the client.
+Send the header on every request that creates or drives a session, not only on create. The orchestrator reads capabilities from the most recent context event, so the grant tracks the latest one. Session recovery injects that context again on the server, so a recovered session keeps its grant.
 
 ## Session utilities
 
-A few more endpoints round out a client. Fork a session from any point to branch a conversation. Share a session read-only, or export its full payload:
+Fork a session from any point to branch a conversation.
 
 ```
 POST /api/sessions/{session_id}/share     returns { token }
@@ -212,9 +163,7 @@ List and inspect what a project exposes with [GET /api/projects](endpoint:GET /a
 
 ## Embedding the engine in-process
 
-If you would rather run the engine inside your own Python process instead of over HTTP, you can. The core is a library. This path suits an in-process integration where you do not want a network hop.
-
-Initialize the core services, resolve a session, and run:
+The core is a library, so you can run the engine inside your own Python process and skip the network hop.
 
 ```python
 from mewbo_core.common import get_logger
@@ -245,22 +194,16 @@ else:
     logger.info("Task result: {}", result.task_result)
 ```
 
-The building blocks:
+Two things the sample does not show. `parse_core_command()` handles the core slash commands `/compact`, `/status` and `/terminate`, so a client never implements them. `run_sync()` runs a turn synchronously, and `start_async()` with `load_events(after=...)` gives the polling flow instead.
 
-- `SessionStore` and `SessionRuntime` ([`session_store.py`](repo:packages/mewbo_core/src/mewbo_core/session/session_store.py), [`session_runtime.py`](repo:packages/mewbo_core/src/mewbo_core/loop/session_runtime.py)) hold transcripts and run the shared runtime.
-- `load_registry()` ([`tool_registry.py`](repo:packages/mewbo_core/src/mewbo_core/tooling/tool_registry.py)) registers the built-in tools.
-- `load_permission_policy()` and `approval_callback_from_config()` ([`permissions.py`](repo:packages/mewbo_core/src/mewbo_core/permissions.py)) wire up approvals.
-- `parse_core_command()` handles the core slash commands `/compact`, `/status`, and `/terminate`.
-- `run_sync()` runs a turn synchronously. `start_async()` plus `load_events(after=...)` gives you the polling flow instead.
-
-For the full monorepo layout, the core abstractions, and how to add a local tool or a chat-platform channel adapter, see the [Architecture Overview](../core-orchestration.md) and [Session Runtime](../session-runtime.md).
+The pieces live in [`session_store.py`](repo:packages/mewbo_core/src/mewbo_core/session/session_store.py), [`session_runtime.py`](repo:packages/mewbo_core/src/mewbo_core/loop/session_runtime.py), [`tool_registry.py`](repo:packages/mewbo_core/src/mewbo_core/tooling/tool_registry.py) and [`permissions.py`](repo:packages/mewbo_core/src/mewbo_core/permissions.py). The [Architecture Overview](../core-orchestration.md) and [Session Runtime](../session-runtime.md) cover the layout and how to add a local tool or a channel adapter.
 
 ## The full reference
 
-This page is the guided lifecycle. Every route, with its full parameter list, response shapes, and a ready-to-run request sample, lives in the generated [REST API Reference](../rest-api.md).
+Every route, with its full parameter list, response shapes, and a runnable request sample, lives in the generated [REST API Reference](../rest-api.md).
 
 ## Next steps
 
-- [Structured Outputs](structured-outputs.md): get schema-validated objects instead of prose.
-- [Device Tool Bridge](device-tools.md): let your client expose tools the agent can call on the device.
-- [Automation](automation.md): drive issue pickup and PR workflows through the API.
+- [Structured Outputs](structured-outputs.md) returns schema-validated objects instead of prose.
+- [Device Tool Bridge](device-tools.md) lets your client expose tools the agent can call on the device.
+- [Automation](automation.md) drives issue pickup and PR workflows through the API.

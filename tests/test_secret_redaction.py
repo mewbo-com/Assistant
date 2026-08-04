@@ -7,6 +7,7 @@ matching the vendor token shapes the redactor recognises.
 
 import io
 import logging
+import time
 
 import pytest
 from loguru import logger
@@ -15,6 +16,7 @@ from mewbo_core.contracts.secret_redaction import (
     SecretRedactor,
     install_log_redaction,
     install_stdlib_log_bridge,
+    redact_text,
 )
 
 # --- fixture values ------------------------------------------------------
@@ -242,3 +244,81 @@ def test_benign_stdlib_record_passes_through() -> None:
         third_party.setLevel(prior_level)
 
     assert "connection established to pool" in buffer.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Catastrophic backtracking
+# ---------------------------------------------------------------------------
+
+
+class TestTheKeyValueNetIsLinear:
+    """The KV pass runs on every HTTP request body, ahead of auth and routing.
+
+    It was quadratic: the key-prefix classes were unbounded, so at every start
+    position the class swallowed the whole run of word characters and backtracked
+    one at a time hunting a keyword that was not there. 8 KiB of word characters
+    cost over seven seconds of CPU, and ``re`` holds the GIL on a single-worker
+    process — an unauthenticated caller could stop the interpreter.
+
+    These assert a GENEROUS wall-clock bound rather than a tight one. The defect
+    was four orders of magnitude, so seconds-not-milliseconds separates fixed
+    from broken without failing on a loaded machine. A tight bound here would be
+    a flake generator, which is how a timing test stops being read.
+    """
+
+    def test_a_large_keyword_free_body_does_not_backtrack(self) -> None:
+        body = '{"template": "' + "x" * (70 * 1024) + '"}'
+        start = time.perf_counter()
+        redact_text(body)
+        assert time.perf_counter() - start < 2.0
+
+    def test_a_large_body_that_does_contain_a_keyword_is_still_bounded(self) -> None:
+        """The prescan cannot short-circuit here, so this exercises the regex itself.
+
+        Without this case the pre-scan alone would pass the test above while the
+        pattern stayed quadratic — an attacker only has to include the word
+        "token" to get back to the original defect.
+        """
+        body = '{"my_token_field": "' + "x" * (70 * 1024) + '"}'
+        start = time.perf_counter()
+        redact_text(body)
+        assert time.perf_counter() - start < 5.0
+
+
+class TestRedactionIsUnchangedByTheSpeedFix:
+    """The half a timing test cannot cover: it must still REDACT.
+
+    A pattern that stopped matching would satisfy every bound above. These pin
+    the observable output, so a future "optimisation" that quietly narrows the
+    net fails here rather than in production.
+    """
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ('api_key: "sk-abcdefghij0123456789"', 'api_key: "<redacted len=23>"'),
+            ("token=hunter2", "token=<redacted len=7>"),
+            ("password = swordfish", "password = <redacted len=9>"),
+            ("X-API-KEY: deadbeefcafe", "X-API-KEY: <redacted len=12>"),
+            ("my.private_key=abc", "my.private_key=<redacted len=3>"),
+            (
+                '{"langfuse_secret_key": "xyz123", "host": "example.com"}',
+                '{"langfuse_secret_key": "<redacted len=6>", "host": "example.com"}',
+            ),
+            # A key that merely CONTAINS no keyword stays put — the net must not
+            # widen either.
+            ("sort key=name stays", "sort key=name stays"),
+        ],
+    )
+    def test_known_shapes_redact_exactly_as_before(self, raw: str, expected: str) -> None:
+        assert redact_text(raw) == expected
+
+    def test_a_keyword_beyond_the_prefix_bound_still_redacts(self) -> None:
+        """The bound is on the AFFIX, not on where a keyword may appear.
+
+        A 64-character cap on either side is far past any real key name, but the
+        rule worth pinning is that a long prefix does not disable redaction of a
+        key that genuinely names a secret.
+        """
+        key = "a" * 60 + "_token"
+        assert redact_text(f"{key}=hunter2") == f"{key}=<redacted len=7>"

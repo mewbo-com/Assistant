@@ -11,8 +11,8 @@
         <th>Control devices and entities</th>
     </tr>
     <tr>
-        <td align="center"><img src="../../docs/assets/img/screenshot_ha_assist_1.png" alt="Screenshot" height="512px"></td>
-        <td align="center"><img src="../../docs/assets/img/screenshot_ha_assist_2.png" alt="Screenshot" height="512px"></td>
+        <td align="center"><img src="../../docs/assets/img/screenshot_ha_assist_1.png" alt="Screenshot" style="width: 100%; max-width: 400px; height: auto;"></td>
+        <td align="center"><img src="../../docs/assets/img/screenshot_ha_assist_2.png" alt="Screenshot" style="width: 100%; max-width: 400px; height: auto;"></td>
     </tr>
 </table>
 

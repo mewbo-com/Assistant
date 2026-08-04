@@ -30,6 +30,20 @@ def wait_until(predicate, timeout: float = 5.0) -> bool:
     return predicate()
 
 
+class FakeClock:
+    """A clock whose only source of time is the test that holds it."""
+
+    def __init__(self, now: float = 1_000_000.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        """Move the clock forward, as the store and its sessions will read it."""
+        self.now += seconds
+
+
 @pytest.fixture
 def store():
     """A private store, torn down so no test leaves a process behind."""
@@ -207,12 +221,21 @@ def test_store_evicts_terminal_sessions_to_make_room(tmp_path):
 
 
 def test_store_reaps_an_idle_running_session(tmp_path):
-    """A session nobody has touched past its TTL is killed, not accumulated."""
-    store = ShellSessionStore(idle_ttl_s=0.2)
+    """A session nobody has touched past its TTL is killed, not accumulated.
+
+    The deadline is REACHED by setting an instant, not by waiting one out: the
+    store and the sessions it creates share this clock, so advancing it moves
+    both sides of the ``now - last_used`` comparison the TTL is made of.
+    """
+    clock = FakeClock()
+    store = ShellSessionStore(idle_ttl_s=300.0, clock=clock)
     try:
         session = start(store, "sleep 30", tmp_path)
-        time.sleep(0.4)
         store.reap()
+        assert session.status == "running", "reaped before its TTL was reached"
+        clock.advance(301.0)
+        store.reap()
+        # The process dying is real OS work — the only wait left is on that.
         assert wait_until(lambda: session.status == "exited")
     finally:
         store.shutdown()
@@ -220,11 +243,13 @@ def test_store_reaps_an_idle_running_session(tmp_path):
 
 def test_reading_a_session_defers_its_reaping(tmp_path):
     """Touching a session resets its idle clock, so active work is never reaped."""
-    store = ShellSessionStore(idle_ttl_s=0.5)
+    clock = FakeClock()
+    store = ShellSessionStore(idle_ttl_s=300.0, clock=clock)
     try:
         session = start(store, "sleep 30", tmp_path)
+        # Four TTLs' worth of time passes; each read defers the deadline again.
         for _ in range(4):
-            time.sleep(0.2)
+            clock.advance(299.0)
             session.read()
             store.reap()
         assert session.status == "running"

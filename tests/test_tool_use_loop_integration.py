@@ -173,6 +173,7 @@ def _make_loop(
     cwd: str | None = None,
     session_id: str | None = None,
     extra_session_tools: list | None = None,
+    watchdog_sleeper=None,
 ) -> ToolUseLoop:
     """Build a ToolUseLoop with sensible defaults."""
     if agent_context is None:
@@ -186,6 +187,7 @@ def _make_loop(
         cwd=cwd,
         session_id=session_id,
         extra_session_tools=extra_session_tools,
+        watchdog_sleeper=watchdog_sleeper,
     )
 
 
@@ -1612,11 +1614,16 @@ class TestCancellationMidLoop:
 async def _run_watchdog_once(loop: ToolUseLoop) -> None:
     """Drive ``loop._watchdog()`` through exactly one detection pass.
 
-    ``asyncio.sleep`` is faked so the first call yields control (a real
-    zero-length sleep, letting any pending callbacks run) and the second
+    The loop's OWN poll wait is replaced so the first call yields control (a
+    real zero-length sleep, letting any pending callbacks run) and the second
     raises ``CancelledError`` — the watchdog's own shutdown path — so the
     coroutine returns after precisely one ``stalled_agents`` check instead of
     looping forever or racing a wall-clock timeout.
+
+    Injected rather than patched onto ``asyncio``: that module object is
+    shared by every coroutine in the process, so patching its ``sleep`` would
+    make this fake — which raises ``CancelledError`` on its second call —
+    reachable from code this test never touched.
     """
     real_sleep = asyncio.sleep
     calls = 0
@@ -1628,8 +1635,8 @@ async def _run_watchdog_once(loop: ToolUseLoop) -> None:
             raise asyncio.CancelledError
         await real_sleep(0)
 
-    with patch("mewbo_core.loop.tool_use_loop.asyncio.sleep", new=_fast_sleep):
-        await loop._watchdog()
+    loop._watchdog_sleep = _fast_sleep
+    await loop._watchdog()
 
 
 class TestWatchdogStallAttribution:
@@ -1817,14 +1824,15 @@ class TestWatchdogConfigurableKnobs:
             await real_sleep(0)
 
         async def run():
-            loop = _make_loop()
-            with (
-                patch("mewbo_core.loop.tool_use_loop.asyncio.sleep", new=_capture_sleep),
-                patch(
-                    "mewbo_core.loop.tool_use_loop.get_config_value",
-                    side_effect=lambda *args, **kw: (
-                        7.0 if "stall_check_interval_s" in args else kw.get("default")
-                    ),
+            # The wait is INJECTED, so ``captured`` records this loop's own
+            # poll interval and nothing else. Patching ``asyncio.sleep`` would
+            # record every coroutine's sleep in the process, and index 0 would
+            # then belong to whichever one got there first.
+            loop = _make_loop(watchdog_sleeper=_capture_sleep)
+            with patch(
+                "mewbo_core.loop.tool_use_loop.get_config_value",
+                side_effect=lambda *args, **kw: (
+                    7.0 if "stall_check_interval_s" in args else kw.get("default")
                 ),
             ):
                 await loop._watchdog()

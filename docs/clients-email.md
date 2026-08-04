@@ -1,33 +1,35 @@
 # Email
 
+## Reply from your inbox
+
 <div style="display: flex; justify-content: center;">
-  <img src="../assets/img/mewbo-email-01.jpg" alt="Mewbo email thread in Gmail" style="width: 100%; max-width: 520px; height: auto;" />
+  <img src="../assets/img/mewbo-email-01.png" alt="Mewbo email thread in Gmail" style="width: 100%; max-width: 720px; height: auto;" />
 </div>
 
-Mewbo can be reached via email. Send a message to the configured mailbox and the agent replies with a styled HTML email. Thread replies continue the same session.
+Email Mewbo and it replies. Send a message to the configured mailbox, get a styled HTML reply, and keep the thread going to stay in the same session.
 
 ## How it works
 
-Mewbo checks your inbox for new messages on an interval. Each new email goes through the same pipeline as any other channel. Session resolution, slash command handling, and LLM invocation all behave identically to the web console or Nextcloud Talk. Replies are sent back over SMTP as multipart emails that include both a styled HTML body and a plain-text fallback.
+Mewbo polls the mailbox over IMAP and runs each new email through the same [channel pipeline](core-orchestration.md#channel-adapters) as every other adapter. Replies go back over SMTP as multipart messages, a styled HTML body plus a plain text fallback.
 
 ## Access control
 
-- **`allowed_senders`**: Only emails from listed addresses are processed. All others are silently ignored and marked as read. This is the primary gate.
-- **1-to-1 emails** (single recipient): Always processed. No mention keyword needed.
-- **Multi-party threads** (multiple To/Cc recipients): The agent only responds when `@Mewbo` appears in the message body.
+- **`allowed_senders`** is the only gate. It lets through listed addresses and silently ignores and marks read everything else.
+- An email addressed to you alone is always processed. No mention keyword is needed.
+- A thread with multiple `To` or `Cc` recipients only gets a reply when `@Mewbo` appears in the body.
 
 ## Session model
 
-Email threads map to Mewbo sessions via the `References` and `In-Reply-To` headers:
+Threads map to sessions through the `References` and `In-Reply-To` headers.
 
-- **New email** (no `In-Reply-To`): Creates a new session. Tag: `email:thread:<sender>:<Message-ID>`.
-- **Reply** (has `In-Reply-To` / `References`): Resolves the existing session via the thread root's `Message-ID`.
+- A **new email**, one with no `In-Reply-To` header, creates a new session tagged `email:thread:<sender>:<Message-ID>`.
+- A **reply**, one carrying `In-Reply-To` or `References`, resolves the existing session through the thread root's `Message-ID`.
 
-Replies from the agent include proper `In-Reply-To` and `References` headers so email clients group them in the same thread.
+Outbound replies carry `In-Reply-To` and `References` too, so mail clients group them into the same thread.
 
 ## Slash commands
 
-All channel commands work in email. Send the command as the email body:
+Send the command as the email body.
 
 | Command | Description |
 |---------|-------------|
@@ -36,13 +38,11 @@ All channel commands work in email. Send the command as the email body:
 | `/new` | Start a fresh conversation (clears context) |
 | `/switch-project <name>` | Switch active project context |
 
-Command responses are sent back as email replies.
-
 ## Configuration
 
-Add to `configs/app.json` under `channels`:
+Add to `configs/app.json` under `channels`.
 
-```json
+```json title="configs/app.json"
 "email": {
   "enabled": true,
   "imap_host": "imap.example.com",
@@ -60,32 +60,25 @@ Add to `configs/app.json` under `channels`:
 }
 ```
 
+What the example above does not show.
+
 | Field | Description |
 |-------|-------------|
-| `imap_host` / `imap_port` / `imap_ssl` | IMAP server for polling incoming mail |
-| `smtp_host` / `smtp_port` / `smtp_starttls` / `smtp_ssl` | SMTP server for sending replies |
-| `username` / `password` | Credentials for both IMAP and SMTP (typically an app password) |
-| `from_address` | Display name + address for outbound emails (defaults to `username`) |
-| `mailbox` | IMAP folder to poll (default: `INBOX`) |
-| `poll_interval_seconds` | How often to check for new emails in seconds (default: 30, minimum: 5) |
-| `allowed_senders` | List of email addresses allowed to interact with the agent |
+| `username` / `password` | One credential pair serves both IMAP and SMTP. Typically an app password. |
+| `from_address` | Display name and address for outbound mail. Defaults to `username`. |
+| `mailbox` | IMAP folder to poll. Default `INBOX`. |
+| `poll_interval_seconds` | Seconds between mailbox checks. Default 30, minimum 5. |
+| `smtp_ssl` | Implicit TLS instead of `smtp_starttls`. |
 
 ## Response rendering
 
-Agent responses are markdown. The email adapter converts them to styled HTML:
-
-- Headings, bold, italic, links render as expected
-- Code blocks get monospace font with a light background
-- Tables render with borders and padding
-- A plain-text fallback (raw markdown) is included for text-only email clients
-
-The HTML uses inline CSS for compatibility with Gmail, Outlook, and Apple Mail.
+The adapter converts the agent's markdown to HTML styled with inline CSS, which is what Gmail, Outlook and Apple Mail need. Headings, bold, italic and links render as written. Code blocks get a monospace font on a light background, and tables get borders and padding. The raw markdown rides along as a plain text fallback for clients that cannot render HTML.
 
 ## Limitations
 
-- **Attachments**: Inbound email attachments are not processed (file metadata is ignored).
-- **Rate limiting**: There is no built-in rate limit on the poller. The `allowed_senders` list is the primary access control.
-- **Polling latency**: The poller checks the mailbox on the interval you configure. Latency is bounded by `poll_interval_seconds`. IMAP IDLE push is not supported.
+- **Attachments** are not processed on inbound email. File metadata is ignored too.
+- **Rate limiting** does not exist on the poller.
+- **Polling latency** is bounded by `poll_interval_seconds`. IMAP IDLE push is not supported.
 
 > [!NOTE] How it works internally
 > See [Architecture Overview → Channel adapters](core-orchestration.md#channel-adapters).

@@ -29,6 +29,8 @@ from mewbo_core.tooling.ask_user import (
     AskUserQuestionArgs,
 )
 from mewbo_core.triggers.spec import TriggerSpec, parse_trigger
+from mewbo_core.workspaces.project_store import VirtualProject, worktree_project_id
+from mewbo_core.workspaces.worktree import WorktreeManager, slugify_branch
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # JSON value permitted inside a trigger's kind-specific ``fields`` map. The
@@ -769,14 +771,220 @@ class SeedApiKey(BaseModel):
     )
 
 
+# ---------------------------------------------------------------------------
+# Managed projects
+# ---------------------------------------------------------------------------
+
+
+class _SeedProject(BaseModel):
+    """Shared fields + contract for every managed-project kind.
+
+    Not itself a union member — concrete kinds declare their own ``kind``
+    Literal (see :data:`SeedProjectUnion`). The clock is T0-relative for the
+    same reason every other instant in a bundle is: the store stamps
+    ``datetime.now(timezone.utc)`` on create, so a wall-clock timestamp baked
+    into the fixture would make the seeded rows differ on every re-seed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    created_at_offset: int = Field(
+        description="Project creation relative to T0, in seconds (negative = in the past).",
+    )
+    updated_at_offset: int | None = Field(
+        default=None,
+        description="Last edit relative to T0; None means the row was never edited.",
+    )
+
+    @property
+    def project_id(self) -> str:
+        """The stored ``project_id`` — how every other surface addresses this row."""
+        raise NotImplementedError  # pragma: no cover - abstract base
+
+    @property
+    def parent_id(self) -> str | None:
+        """The project this row hangs off, or ``None`` for a top-level workspace.
+
+        Declared on the base so the seeder can order its writes (parents first)
+        and look a parent up without ever asking which KIND it is holding.
+        """
+        return None
+
+    def to_project(
+        self, t0: datetime, *, parent: VirtualProject | None
+    ) -> VirtualProject:
+        """Produce core's own :class:`VirtualProject` for this kind, rebased on ``t0``.
+
+        Returns the store's OWN dataclass rather than a hand-typed document, so
+        the seeded row can only ever have the shape ``list_projects`` reads back.
+        ``parent`` is part of the shared keyword contract (mirroring
+        ``to_event``'s ``session_id``) so the one kind that needs it — a
+        worktree, whose id and path both derive from its parent — can build a
+        faithful record; a top-level project ignores it.
+        """
+        raise NotImplementedError  # pragma: no cover - abstract base
+
+    def _stamps(self, t0: datetime) -> tuple[str, str]:
+        """The ``(created_at, updated_at)`` ISO pair this row stores."""
+        created = t0 + timedelta(seconds=self.created_at_offset)
+        updated = (
+            created
+            if self.updated_at_offset is None
+            else t0 + timedelta(seconds=self.updated_at_offset)
+        )
+        return created.isoformat(), updated.isoformat()
+
+    @model_validator(mode="after")
+    def _edit_follows_creation(self) -> _SeedProject:
+        """An edit cannot predate the creation it edits."""
+        if (
+            self.updated_at_offset is not None
+            and self.updated_at_offset < self.created_at_offset
+        ):
+            raise ValueError(
+                f"updated_at_offset {self.updated_at_offset} precedes "
+                f"created_at_offset {self.created_at_offset}"
+            )
+        return self
+
+
+class SeedManagedProject(_SeedProject):
+    """A workspace Mewbo created and owns — one card in the Workspace facet.
+
+    ``id`` is EXPLICIT because ``ProjectStoreBase.create_project`` mints a
+    ``uuid4``: a minted id would re-key the ``wt:<parent>:<branch>`` id of every
+    worktree under it on each re-seed, which is the same byte-stability problem
+    ``SeedApiKey`` carries an explicit id for.
+
+    ``path_source``/``folder_created`` are FIXED rather than authorable. They
+    are absent from the ``GET /api/projects`` payload the pane renders, so no
+    shot could ever disagree with them, and the pair this writes portrays the
+    one state a bundle can honestly describe: an operator named a directory
+    (``provided``) and Mewbo created and now owns it. An ``auto`` row's path is
+    ``<projects_home>/<project_id>``, a per-deployment directory a fixture must
+    not hardcode.
+
+    Names, prose and ids here are invented demo content — never copy a real
+    deployment's.
+    """
+
+    kind: Literal["project"] = "project"
+    id: str = Field(description="Stable, invented project id (a real one is a uuid4).")
+    name: str = Field(description="Human name — the card's title.")
+    description: str = Field(default="", description="Blurb under the title.")
+    path: str = Field(description="Absolute workspace directory, as the card prints it.")
+
+    @property
+    def project_id(self) -> str:
+        """A top-level project is addressed by its own declared id."""
+        return self.id
+
+    def to_project(
+        self, t0: datetime, *, parent: VirtualProject | None = None
+    ) -> VirtualProject:
+        """Build the stored record; ``parent`` is unused for a top-level project."""
+        created, updated = self._stamps(t0)
+        return VirtualProject(
+            project_id=self.id,
+            name=self.name,
+            description=self.description,
+            created_at=created,
+            updated_at=updated,
+            path=self.path,
+            path_source="provided",
+            folder_created=True,
+        )
+
+
+class SeedWorktree(_SeedProject):
+    """A git worktree row — a managed project's child checkout on its own branch.
+
+    Everything except the branch and the clock is DERIVED from core's own
+    worktree rules rather than authored: the id from ``worktree_project_id``,
+    the directory from ``WorktreeManager.worktree_path``, and the name plus
+    description from the phrasing ``ProjectStoreBase._persist_worktree`` writes.
+    None of those are facts about the demo — they are what the store produces —
+    so a bundle free to spell them differently could portray a row the product
+    never emits, which is a wrong screenshot no assertion would catch.
+    """
+
+    kind: Literal["worktree"] = "worktree"
+    parent: str = Field(
+        description="A SeedManagedProject.id this worktree branches from.",
+    )
+    branch: str = Field(description="Branch checked out, e.g. 'mewbo/main-9f2c1a'.")
+
+    @property
+    def project_id(self) -> str:
+        """The deterministic ``wt:<parent>:<slug>`` id core mints for a worktree."""
+        return worktree_project_id(self.parent, self.branch)
+
+    @property
+    def parent_id(self) -> str | None:
+        """The managed project this worktree is checked out from."""
+        return self.parent
+
+    def to_project(
+        self, t0: datetime, *, parent: VirtualProject | None = None
+    ) -> VirtualProject:
+        """Build the stored record, deriving id and path from the parent record."""
+        if parent is None:
+            raise ValueError(
+                f"worktree on {self.branch!r} needs its parent project record to "
+                "derive its path"
+            )
+        created, updated = self._stamps(t0)
+        return VirtualProject(
+            project_id=worktree_project_id(parent.project_id, self.branch),
+            name=self.branch,
+            description=f"Worktree on branch '{self.branch}'",
+            created_at=created,
+            updated_at=updated,
+            path=str(WorktreeManager.worktree_path(parent.path, self.branch)),
+            path_source="auto",
+            folder_created=True,
+            parent_project_id=parent.project_id,
+            branch=self.branch,
+            is_worktree=True,
+        )
+
+    @field_validator("branch")
+    @classmethod
+    def _branch_has_a_directory(cls, value: str) -> str:
+        """Fail at bundle load, not mid-seed, on a branch with no slug-safe name.
+
+        ``slugify_branch`` is what names the worktree's directory AND half its
+        ``project_id``, and it raises on a branch that slugs to nothing.
+        """
+        slugify_branch(value)
+        return value
+
+
+SeedProjectUnion = Annotated[
+    SeedManagedProject | SeedWorktree, Field(discriminator="kind")
+]
+
+
 class SeedBundle(BaseModel):
-    """The whole deterministic demo state: sessions + triggers + issued API keys."""
+    """The whole deterministic demo state: sessions, triggers, keys and projects."""
 
     model_config = ConfigDict(extra="forbid")
 
     sessions: list[SeedSession]
     triggers: list[SeedTrigger] = Field(default_factory=list)
     api_keys: list[SeedApiKey] = Field(default_factory=list)
+    projects: list[SeedProjectUnion] = Field(default_factory=list)
+
+    @property
+    def projects_in_write_order(self) -> tuple[SeedProjectUnion, ...]:
+        """Projects ordered so a parent is always written before its children.
+
+        A stable sort on "has a parent", so bundle order is otherwise preserved
+        and a worktree may be authored beside its parent rather than after every
+        other project. Ordering lives here because it is a property of the
+        collection, which keeps the seeder free of any per-kind test.
+        """
+        return tuple(sorted(self.projects, key=lambda p: p.parent_id is not None))
 
     @model_validator(mode="after")
     def _validate_refs(self) -> SeedBundle:
@@ -790,11 +998,26 @@ class SeedBundle(BaseModel):
         key_ids = [k.id for k in self.api_keys]
         if len(set(key_ids)) != len(key_ids):
             raise ValueError("duplicate api key id in bundle")
+        project_ids = [p.project_id for p in self.projects]
+        if len(set(project_ids)) != len(project_ids):
+            raise ValueError("duplicate managed project id in bundle")
         known = set(session_ids)
         for trigger in self.triggers:
             if trigger.session not in known:
                 raise ValueError(
                     f"trigger {trigger.id!r} references unknown session {trigger.session!r}"
+                )
+        # A worktree whose parent is absent is a row nothing can render fully:
+        # the catalog emits a ``parent_key`` pointing at nothing and the
+        # console's ``ProjectLabel`` resolves a worktree as "parent repo name +
+        # branch", so it would print a bare id. Parents are the top-level
+        # projects only — a worktree can never parent another worktree.
+        parents = {p.project_id for p in self.projects if p.parent_id is None}
+        for project in self.projects:
+            if project.parent_id is not None and project.parent_id not in parents:
+                raise ValueError(
+                    f"project {project.project_id!r} references unknown parent "
+                    f"project {project.parent_id!r}"
                 )
         return self
 
@@ -822,5 +1045,8 @@ __all__ = [
     "SeedSession",
     "SeedTrigger",
     "SeedApiKey",
+    "SeedManagedProject",
+    "SeedWorktree",
+    "SeedProjectUnion",
     "SeedBundle",
 ]

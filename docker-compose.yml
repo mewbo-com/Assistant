@@ -272,19 +272,23 @@ services:
       # Deadline files the container watchdog polls — MOVED here from api.
       - /tmp/mewbo-ide:/tmp/mewbo-ide
       # Workspaces the api can resolve but that live in NAMED VOLUMES rather
-      # than on the host: a wiki project's checkout and an app's staged
-      # source. Mounted at the SAME paths the api uses, because the broker
+      # than on the host: a wiki project's checkout, an app's staged source,
+      # and a Mewbo-managed project's working copy (api-data:/app/data/projects/<uuid>).
+      # Mounted at the SAME paths the api uses, because the broker
       # realpath-resolves a requested workspace in its own mount namespace and
       # a root it cannot see is refused.
       #
       # These are also why the workspace mount for such a path must be a
       # VOLUME mount with a subpath rather than a bind. A bind source is
       # resolved by the daemon against the HOST, where /tmp/mewbo/wiki/clones
-      # is a different directory holding unrelated leftovers — so a bind would
-      # mount the wrong files and the IDE would open successfully on them.
-      # The broker's MEWBO_IDE_VOLUME_ROOTS maps each path below to its volume.
+      # is a different directory holding unrelated leftovers and /app/data
+      # does not exist at all — so a bind would mount the wrong files, or an
+      # empty directory the daemon helpfully creates, and the IDE would open
+      # successfully on either. The broker's MEWBO_IDE_VOLUME_ROOTS maps each
+      # path below to its volume.
       - wiki-clones:/tmp/mewbo/wiki/clones
       - apps-staging:/tmp/mewbo/apps
+      - api-data:/app/data
       # Every path named in MEWBO_IDE_ALLOWED_ROOTS must ALSO be bind-mounted
       # here, read-only, at the IDENTICAL host path — add each one in
       # docker-compose.override.yml (see docker-compose.override.example.yml
@@ -309,7 +313,7 @@ services:
       #
       # Volume names are project-qualified by compose, so they carry the
       # project prefix the daemon actually knows them by.
-      - MEWBO_IDE_VOLUME_ROOTS=/tmp/mewbo/wiki/clones=${COMPOSE_PROJECT_NAME:-assistant}_wiki-clones,/tmp/mewbo/apps=${COMPOSE_PROJECT_NAME:-assistant}_apps-staging
+      - MEWBO_IDE_VOLUME_ROOTS=/tmp/mewbo/wiki/clones=${COMPOSE_PROJECT_NAME:-assistant}_wiki-clones,/tmp/mewbo/apps=${COMPOSE_PROJECT_NAME:-assistant}_apps-staging,/app/data=${COMPOSE_PROJECT_NAME:-assistant}_api-data
       # MEWBO_IDE_ALLOWED_ROOTS is intentionally NOT listed here — it comes
       # from `env_file: .env` above. An `environment:` entry takes
       # precedence over env_file, and `${VAR:-}` interpolates only from the

@@ -1,4 +1,4 @@
-.PHONY: ssm-bootstrap redeploy bootstrap lint lint-fix typecheck precommit-install vendor-aider openapi docs docs-build aura-apk aura-release aura-install demo-build demo-up demo-seed demo-shots-web demo-down demo
+.PHONY: ssm-bootstrap redeploy bootstrap lint lint-fix typecheck precommit-install vendor-aider openapi docs docs-build aura-apk aura-release aura-install demo-build demo-up demo-seed demo-shots-web demo-down demo test-mongo
 
 VENV ?= .venv
 DOCS_ADDR ?= 0.0.0.0:8000
@@ -6,6 +6,7 @@ ANDROID_HOME ?= $(HOME)/android-sdk
 AURA_DIR := apps/mewbo_aura
 AURA_SERIAL ?= localhost:5555
 DEMO_COMPOSE := docker compose -f demo/docker-compose.demo.yml --env-file demo/demo.env
+TEST_COMPOSE := docker compose -f tests/docker-compose.test.yml
 
 ssm-bootstrap:
 	@# Bind this checkout to the deployment's secrets project/configuration.
@@ -44,6 +45,18 @@ typecheck:
 
 precommit-install:
 	$(VENV)/bin/pre-commit install
+
+# Tier 2 — the marked tests that need a REAL mongod (query counts, index
+# behaviour, benchmarks). A plain `pytest` neither needs nor starts this: the
+# tier-2 tests skip when the container is absent. A path is passed on purpose,
+# overriding `testpaths` — the tier lives in tests/ and collecting the other
+# five suites to deselect all of them costs more than the tier itself takes to
+# run. The teardown runs whether pytest passed or failed, and `-v` takes the
+# ephemeral database with it, so the next run starts from a blank world.
+test-mongo:
+	$(TEST_COMPOSE) up -d --wait mongo
+	@set +e; $(VENV)/bin/python -m pytest -m realmongo tests/; rc=$$?; \
+	  $(TEST_COMPOSE) down -v --remove-orphans; exit $$rc
 
 vendor-aider:
 	./scripts/vendor_aider.sh
@@ -97,4 +110,13 @@ demo-shots-web:
 demo-down:
 	$(DEMO_COMPOSE) --profile seed --profile shots down -v --remove-orphans
 
-demo: demo-up demo-seed demo-shots-web
+# Captures land in docs/assets/img-src; the docs reference docs/assets/img.
+# This is the transform between them — it composites every full-window capture
+# onto a 16:9 wallpaper canvas and copies the rest through. Pure host-side
+# Pillow, no container: by the time demo-shots-web returns, the bytes are
+# already at their final host path via the shots service's repo bind-mount.
+# Safe to re-run; it reads sources and never its own output.
+demo-frame:
+	uv run --package mewbo-demo-framer mewbo-demo-frame
+
+demo: demo-up demo-seed demo-shots-web demo-frame

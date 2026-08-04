@@ -1,28 +1,30 @@
 # Nextcloud Talk
 
+## Mention the bot in chat
+
 <div style="display: flex; justify-content: center;">
   <img src="../assets/img/mewbo-nctalk-01.png" alt="Mewbo replying to an @Mewbo mention inside a Nextcloud Talk conversation" style="width: 100%; max-width: 720px; height: auto;" />
 </div>
 
-The Nextcloud Talk integration allows users to interact with Mewbo directly from any Nextcloud Talk conversation. Mention the bot and it responds, creating a standard Mewbo session visible in the web console and Langfuse traces.
+Mention the bot in any Nextcloud Talk conversation and it replies. The work runs as a standard Mewbo session, so your team reaches the agent from the chat client they already have open.
 
 ## How it works
 
 1. A Nextcloud Talk bot is registered on the server pointing to the Mewbo API webhook endpoint.
-2. When a user @mentions the bot, Nextcloud POSTs an ActivityStreams 2.0 webhook to `POST /api/webhooks/nextcloud-talk`.
+2. An @mention makes Nextcloud POST an ActivityStreams 2.0 webhook to `POST /api/webhooks/nextcloud-talk`.
 3. The adapter verifies the HMAC-SHA256 signature, parses the message, and creates or continues a session.
-4. Non-mentioned messages are silently ignored. The bot only responds when triggered.
-5. When the session completes, the final answer is sent back via the Nextcloud OCS Bot API with `replyTo` (creating a visual quote link).
+4. Messages without a mention are silently ignored.
+5. On completion the final answer goes back through the Nextcloud OCS Bot API with `replyTo`, which renders as a quote link.
 
 ### Session model
 
-- **Room-scoped**: All @mentions in the same room share one persistent session. Tag format: `nextcloud-talk:room:<room_token>`.
-- **Thread-scoped**: Messages with a `threadId` (explicit NC Talk thread) get their own session. Tag format: `nextcloud-talk:thread:<room_token>:<thread_id>`.
-- Sessions are standard API sessions. They are stored in MongoDB/JSON, visible in the console, and support forking, archiving, and export.
+- A conversation is **scoped to the room** by default. All @mentions in the same room share one persistent session, tagged `nextcloud-talk:room:<room_token>`.
+- A message carrying a `threadId`, an explicit Nextcloud Talk thread, gets its own session instead, tagged `nextcloud-talk:thread:<room_token>:<thread_id>`.
+- These are ordinary [channel sessions](core-orchestration.md#channel-adapters), so forking, archiving and export all work.
 
 ## Slash commands
 
-Commands are available after the @mention keyword. They run without invoking the LLM.
+Commands go after the @mention keyword and run without invoking the LLM.
 
 | Command | Description |
 |---------|-------------|
@@ -31,7 +33,7 @@ Commands are available after the @mention keyword. They run without invoking the
 | `/new` | Start a fresh conversation (clears current session context) |
 | `/switch-project <name>` | Switch the active project context for this session |
 
-Examples:
+Examples.
 ```
 @Mewbo /help
 @Mewbo /usage
@@ -39,19 +41,19 @@ Examples:
 @Mewbo /switch-project personal-assistant
 ```
 
-The `/switch-project` command sets the working directory for subsequent LLM runs. If the project name is invalid or omitted, it lists available projects.
+`/switch-project` sets the working directory for later runs. An invalid or omitted name lists the available projects instead.
 
 ## Prerequisites
 
-- Nextcloud 27.1+ with Talk 17.1+ (for bots-v1 capability)
-- Nextcloud 32+ with Talk 22+ (for thread support via `threadId`)
+- Nextcloud 27.1 or later with Talk 17.1 or later, for `bots-v1` capability support.
+- Nextcloud 32 or later with Talk 22 or later, for thread support through `threadId`.
 - The Mewbo API server running and reachable from the Nextcloud instance
 
 ## Setup
 
 ### 1. Register the bot in Nextcloud
 
-On the Nextcloud server (requires admin shell access):
+Run this on the Nextcloud server, which needs admin shell access.
 
 ```bash
 occ talk:bot:install "Mewbo" \
@@ -65,19 +67,17 @@ Note the shared secret. It must match the `bot_secret` in the Mewbo config.
 
 ### 2. Enable the bot in conversations
 
-Either via the admin CLI:
-
 ```bash
 occ talk:bot:setup <bot-id> <conversation-token>
 ```
 
-Or via the Nextcloud Talk web UI (moderator role required): open the conversation settings and enable the bot under "Bots".
+The Nextcloud Talk web UI does the same from conversation settings, under `Bots`, for anyone holding the moderator role.
 
 ### 3. Configure Mewbo
 
-Add the channel config to `configs/app.json`:
+Add the channel config to `configs/app.json` under `channels`.
 
-```json
+```json title="configs/app.json"
 {
   "channels": {
     "nextcloud-talk": {
@@ -94,12 +94,11 @@ Add the channel config to `configs/app.json`:
 
 | Field | Description |
 |-------|-------------|
-| `enabled` | Set to `true` to activate the adapter |
 | `bot_secret` | Shared HMAC secret from `occ talk:bot:install` |
-| `nextcloud_url` | Base URL of the Nextcloud instance (use internal URL if behind a CDN) |
-| `allowed_backends` | Origin allowlist for the `X-Nextcloud-Talk-Backend` header (recommended) |
-| `trigger_keyword` | Literal keyword that must appear in a message to trigger the bot (default: `@Mewbo`) |
-| `nextcloud_host_header` | Optional `Host` header override for outbound requests (useful when `nextcloud_url` is an internal address) |
+| `nextcloud_url` | Base URL of the instance. Use the internal URL if it sits behind a CDN. |
+| `allowed_backends` | Origin allowlist for the `X-Nextcloud-Talk-Backend` header. Recommended. |
+| `trigger_keyword` | Literal keyword that triggers the bot. Default `@Mewbo`. |
+| `nextcloud_host_header` | Optional `Host` header override for outbound requests, for when `nextcloud_url` is an internal address. |
 
 ### 4. Restart the API server
 
@@ -108,7 +107,7 @@ uv run mewbo-api
 # or: docker compose restart api
 ```
 
-The startup logs should show:
+The startup logs confirm the adapter loaded.
 
 ```
 Nextcloud Talk channel adapter registered
@@ -117,19 +116,19 @@ Channel webhook routes registered (platforms: ['nextcloud-talk'])
 
 ## Usage
 
-In any Nextcloud Talk conversation where the bot is enabled:
+Mention the bot in any conversation where it is enabled.
 
 ```
 @Mewbo help me refactor the auth module
 ```
 
-The bot responds with the orchestration result. Subsequent @mentions in the same room continue the conversation with full context. Use `/new` to reset.
+Later @mentions in the same room continue the conversation with full context. Use `/new` to reset.
 
 ## Limitations
 
-- **File attachments**: the bot receives file metadata but cannot download file content (requires Nextcloud user auth, not bot auth). File sending is not supported by the NC Talk Bot API.
-- **DM auto-respond**: the bot requires an @mention in all rooms; there is no automatic DM detection.
-- **Emoji reactions for status**: not supported.
+- **File attachments** arrive as metadata only. Downloading content needs Nextcloud user auth rather than bot auth, and the Bot API cannot send files at all.
+- **Direct messages** need an @mention like any other room. A DM is not detected automatically.
+- **Emoji reactions for status** are not supported.
 
 > [!NOTE] How it works internally
 > See [Architecture Overview → Channel adapters](core-orchestration.md#channel-adapters).

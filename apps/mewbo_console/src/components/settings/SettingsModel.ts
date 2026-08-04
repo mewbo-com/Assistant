@@ -469,8 +469,45 @@ export class SettingsModel {
       ? (this.config[id] as JsonObject)
       : {};
     const updated = isObject(formData) ? formData : {};
-    const diff = SettingsModel.recursiveDiff(original, updated);
+    const diff = SettingsModel.recursiveDiff(
+      original,
+      updated,
+      this.secretPaths(id)
+    );
     return diff ? { [id]: diff } : null;
+  }
+
+  /**
+   * Dot-paths (relative to the section root) of every `x-secret`/`writeOnly`
+   * leaf, e.g. `Set{"api_key", "auth.session.secret"}`. Backs the empty-string
+   * carve-out in `recursiveDiff` below — computed independently of the runtime
+   * `secrets` is-set map, which `uiSchemaFor` needs but this diff does not.
+   */
+  private secretPaths(id: string): Set<string> {
+    const sliced = this.sliceSchema(id) as JsonObject;
+    const paths = new Set<string>();
+    this.collectSecretPaths(sliced, [], paths);
+    return paths;
+  }
+
+  private collectSecretPaths(
+    objSchema: JsonObject,
+    path: string[],
+    out: Set<string>
+  ): void {
+    const props = isObject(objSchema.properties) ? objSchema.properties : {};
+    for (const key of Object.keys(props)) {
+      const raw = isObject(props[key]) ? (props[key] as JsonObject) : {};
+      const resolved = this.resolveRef(raw);
+      if (asBool(raw["x-secret"]) || asBool(raw.writeOnly) ||
+          asBool(resolved["x-secret"]) || asBool(resolved.writeOnly)) {
+        out.add([...path, key].join("."));
+        continue;
+      }
+      if (asString(resolved.type) === "object" && !SettingsModel.isDictSchema(resolved)) {
+        this.collectSecretPaths(resolved, [...path, key], out);
+      }
+    }
   }
 
   // -- diff core (canonical section-diff) -----------------------------------
@@ -479,18 +516,46 @@ export class SettingsModel {
    * Recursive diff: only keys whose values changed, recursing into plain
    * objects and comparing everything else by JSON value. The single source of
    * truth for what a section-scoped settings patch contains.
+   *
+   * `secretPaths` (dot-paths relative to the section root) carve out one
+   * exception: RJSF fills a MISSING property with its JSON-schema `default`
+   * whenever a sibling field in the same section changes — proven by
+   * `SettingsSection.test.tsx`'s sibling-edit regression — and every
+   * `x-secret`/`writeOnly` field's Pydantic default is `""` (the backend never
+   * returns a secret's real value, so there is nothing else it COULD default
+   * to). `SecretField` itself already treats an emptied input as "no value"
+   * (`onChange(undefined)`, never `""`) — an untouched secret's `""` here is
+   * that same RJSF artefact one layer up, not a user clearing it, so it is
+   * dropped from the diff exactly like the widget would have dropped it
+   * itself. A secret set to a REAL value never collides with this, since a
+   * real API key is never the empty string.
    */
   private static recursiveDiff(
     original: JsonObject,
-    updated: JsonObject
+    updated: JsonObject,
+    secretPaths: Set<string>,
+    path: string[] = []
   ): JsonObject | null {
     const diff: JsonObject = {};
     let hasChange = false;
     for (const key of Object.keys(updated)) {
       const origVal = original[key];
       const newVal = updated[key];
+      // A secret's real value is never returned by the backend, so `origVal`
+      // is always absent here regardless of whether it's configured — this
+      // carve-out only ever fires for the RJSF-injected default, never for a
+      // value a caller actually diffed in.
+      const dot = [...path, key].join(".");
+      if (secretPaths.has(dot) && newVal === "") {
+        continue;
+      }
       if (isObject(origVal) && isObject(newVal)) {
-        const nested = SettingsModel.recursiveDiff(origVal, newVal);
+        const nested = SettingsModel.recursiveDiff(
+          origVal,
+          newVal,
+          secretPaths,
+          [...path, key]
+        );
         if (nested) {
           diff[key] = nested;
           hasChange = true;

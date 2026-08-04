@@ -62,18 +62,15 @@ export function SettingsView() {
     schema,
     config,
     secrets,
-    storage,
     loading,
     error,
     saveError,
     savePatch,
   } = useConfig();
 
-  // Absent `storage` (an old backend, or the GET simply hasn't landed yet)
-  // reads as writable — only an explicit `false` blocks Save. Computed once
-  // here and threaded to every `SettingsSection` so the gate can't drift
-  // per-facet; see the "shared container, not per-facet" rule this exists for.
-  const writable = storage ? storage.writable : true;
+  // `useConfig` still exposes `storage` (it mirrors what the endpoint returns),
+  // but nothing here reads it any more: this shell no longer pre-empts a save
+  // it has not attempted. See the failure-readout comment further down.
 
   const model = useMemo(
     () => (schema && config ? new SettingsModel(schema, config) : null),
@@ -230,25 +227,24 @@ export function SettingsView() {
         {/* Main pane */}
         <div className="flex-1 overflow-y-auto">
           <div className="max-w-3xl mx-auto px-6 py-6 space-y-6">
-            {/* Persistent, non-dismissable — applies to every facet (the
-                config store is one deployment-wide resource), so it lives at
-                this shared container level rather than being copied into each
-                facet/pane. Absent `storage` (old backend, or the GET hasn't
-                landed) reads as writable; only an explicit `false` shows it. */}
-            {!writable && storage && (
-              <ErrorAlert
-                error={storage.reason}
-                fallback="Settings cannot be saved in this deployment."
-                title="Settings are read-only"
-              />
-            )}
             {error && <ErrorAlert error={error} fallback="Failed to load settings" />}
-            {/* Suppressed while the read-only banner is showing: Save is
-                disabled in that state, so a lingering `saveError` from before
-                the store flipped read-only would only stack a second, more
-                confusing explanation on top of the one that actually applies
-                now. */}
-            {writable && saveError && (
+            {/* The ONE failure readout on this page, and it now covers the
+                unwritable-store case too. There used to be a second, always-on
+                alert above this one: `GET /api/config` reports
+                `storage.writable`, and a false read banner "Settings are
+                read-only" over every facet on every visit while disabling
+                Save. It was removed because a deployment-level condition does
+                not earn a persistent red block in front of a user who is
+                reading their settings — and disabling Save meant this alert
+                could never fire, which is why it used to be gated on
+                `writable`.
+                Nothing is lost by reporting it here instead: a PATCH against a
+                read-only store returns 500 with `{message}` carrying the SAME
+                sentence the banner rendered, `messageFrom` (`api/httpBase.ts`)
+                prefers that field, and the request changes nothing. So the
+                condition now surfaces where the user can act on it, at the
+                moment they act, instead of on arrival. */}
+            {saveError && (
               <ErrorAlert
                 error={saveError}
                 fallback="Failed to save settings"
@@ -328,7 +324,6 @@ export function SettingsView() {
                   original={normalizeSection(config[s.id])}
                   advanced={advanced}
                   secrets={secrets}
-                  writable={writable}
                   onChange={(next) =>
                     setFormState((prev) => ({ ...prev, [s.id]: next }))
                   }

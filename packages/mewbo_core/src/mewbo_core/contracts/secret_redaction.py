@@ -118,6 +118,21 @@ _BEARER_RE = re.compile(r"(?i)\b(bearer\s+)([A-Za-z0-9._~+/=-]{8,})")
 # the word itself (the credential beside it is handled by the shape/bearer nets).
 _SCHEME_WORDS = frozenset({"bearer", "basic", "digest", "negotiate"})
 
+# The keyword set the KV net keys on. Spelled once: the pattern interpolates it,
+# and ``_KV_PRESCAN_RE`` gates on it. Two copies would let the gate and the
+# matcher disagree, and the direction that fails is silent — a gate missing a
+# keyword the pattern has stops redacting that key with nothing raised.
+_KV_KEYWORDS = (
+    r"token | secret | password | passwd | bearer | authorization"
+    r" | credential | api[_-]?key | access[_-]?key | private[_-]?key"
+)
+
+# Is a KV keyword present at all? ``_KV_RE`` cannot match without one, so this
+# is an EXACT gate rather than a heuristic — unlike the separator test it
+# replaced, which every JSON body satisfied and which therefore gated nothing.
+# A literal alternation scans linearly.
+_KV_PRESCAN_RE = re.compile(rf"(?ix) {_KV_KEYWORDS}")
+
 # key=value / "key": "value" in a stringified mapping (env/header/config dump)
 # where the KEY names a secret — catches arbitrary-shaped values the shape net
 # cannot recognise. Bare "key" is omitted (free-text false positives such as
@@ -126,13 +141,25 @@ _SCHEME_WORDS = frozenset({"bearer", "basic", "digest", "negotiate"})
 # quote leaves the group non-participating — an ``['"]?`` INSIDE the group would
 # "participate" by matching empty and force the conditional's quoted branch,
 # which greedily eats across spaces.
+#
+# ⚠️ The key-prefix quantifiers are BOUNDED, and that bound is load-bearing.
+# Unbounded (``[\w.\-]*``) they are quadratic: at every start position the class
+# swallows the whole run of word characters and then backtracks one character at
+# a time hunting a keyword that is not there. Measured on the real redactor,
+# doubling the input roughly quadrupled the time — 8 KiB of word characters cost
+# over seven seconds of CPU. That pass runs on every HTTP request body from a
+# ``before_request`` hook, ahead of routing and authentication, and ``re`` holds
+# the GIL on a single-worker process, so it was a denial of service reachable
+# with no credentials and no valid route. A bound makes the backtracking per
+# start position constant. No real secret key name carries a 64-character affix.
 _KV_RE = re.compile(
     r"""(?ix)
     (?P<key>
-        ['"]? [\w.\-]*
-        (?: token | secret | password | passwd | bearer | authorization
-          | credential | api[_-]?key | access[_-]?key | private[_-]?key )
-        [\w.\-]* ['"]?
+        ['"]? [\w.\-]{0,64}
+        (?: """
+    + _KV_KEYWORDS
+    + r""" )
+        [\w.\-]{0,64} ['"]?
     )
     (?P<sep> \s* [:=] \s* )
     (?P<q> ['"] )?
@@ -157,9 +184,10 @@ class SecretRedactor:
             return text
         out = _TOKEN_SHAPE_RE.sub(self._shape_sub, text)
         out = _BEARER_RE.sub(self._bearer_sub, out)
-        # The key=value net is the costliest pass; skip it unless a separator is
-        # even present (the vast majority of log lines have neither).
-        if ":" in out or "=" in out:
+        # The key=value net is the costliest pass; skip it unless one of its
+        # keywords is actually present. Gating on a separator instead was no
+        # gate at all — every JSON body contains a colon.
+        if _KV_PRESCAN_RE.search(out):
             out = _KV_RE.sub(self._kv_sub, out)
         return out
 

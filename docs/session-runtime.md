@@ -1,35 +1,53 @@
 # Session Runtime
 
-The session runtime is a small shared facade that powers both the CLI and the REST API. It centralizes session lifecycle, async run tracking, and cancellation. Event polling is exposed via the API; the CLI reads events directly in-process when needed.
+## Shared lifecycle for CLI and API
+
+The session runtime is the shared facade behind both the CLI and the REST API. It owns session
+lifecycle, async run tracking, and cancellation. Event polling is exposed over the API. The CLI reads
+events in-process.
 
 ## What it does
 - Resolves sessions by id, tag, or fork.
-- Supports fork-from-message via `fork_at_ts`. It creates a new session with only events up to the given timestamp, enabling edit-and-regenerate workflows.
-- Runs orchestration synchronously or in a background thread.
+- Forks from a message through `fork_at_ts`, creating a session holding only the events up to that
+  timestamp. Edit and regenerate runs on this.
+- Runs orchestration synchronously or on a background thread.
 - Tracks active runs per session and supports cancellation.
-- Filters session events for polling (`after` timestamp).
-- Summarizes a session (title, status, done reason, context, archived flag).
-- Filters empty sessions from listings; archived sessions are hidden unless requested.
+- Filters session events for polling with an `after` timestamp.
+- Summarizes a session with title, status, done reason, context, and archived flag.
+- Filters empty sessions out of listings and hides archived sessions unless asked.
 
 ## Core commands
-These commands are supported across interfaces:
-- `/compact`: compact the session transcript and write a summary.
-- `/terminate`: request cancellation for the active run.
-- `/status`: return the current session summary.
+Three commands work across every interface.
 
-The runtime only recognizes these core commands. Interface-specific commands remain in each UI layer.
+- `/compact` compacts the session transcript and writes a summary.
+- `/terminate` requests cancellation for the active run.
+- `/status` returns the current session summary.
+
+The runtime recognizes only these. Interface-specific commands stay in each UI layer.
 
 ## Event polling model (API)
-Events are stored as JSONL records by `SessionStore`. The runtime exposes `load_events(session_id, after)` which filters by the ISO-8601 timestamp (`ts`) on each event.
+`SessionStore` writes events as JSONL records. `load_events(session_id, after)` filters them by the
+ISO-8601 `ts` on each event.
 
-Typical polling flow:
-1. Create a session.
-2. Start an async run.
-3. Poll `/events` with `after` to receive only new records.
+```mermaid
+sequenceDiagram
+    participant Client
+    participant SessionRuntime
+    participant SessionStore
 
-Event payload notes:
-- `action_plan` payloads include `steps: [{title, description}]`.
-- Tool activity uses `tool_id`, `operation`, and `tool_input` in `tool_result` and `permission` events.
+    Client->>SessionRuntime: resolve_session()
+    Client->>SessionRuntime: start_async(user_query)
+    SessionRuntime->>SessionStore: append events as JSONL
+    loop while the run is active
+        Client->>SessionRuntime: load_events(session_id, after)
+        SessionRuntime->>SessionStore: filter on ts newer than after
+        SessionStore-->>Client: new records only
+    end
+```
+
+Two payload shapes are worth knowing. `action_plan` payloads carry `steps: [{title, description}]`.
+Tool activity uses `tool_id`, `operation`, and `tool_input` inside `tool_result` and `permission`
+events.
 
 ## Minimal usage (Python)
 ```python
@@ -61,18 +79,23 @@ forked_id = runtime.resolve_session(
 
 ## Channel adapter sessions
 
-Chat platform adapters (Nextcloud Talk, etc.) create standard sessions via the runtime. Thread-to-session mapping uses existing session tags:
+A chat platform adapter creates standard sessions through the runtime. Thread mapping reuses session
+tags.
 
-- **Tag format**: `"<platform>:<thread_id>"` (e.g. `"nextcloud-talk:100"`)
-- **Lookup**: `session_store.resolve_tag(tag)` returns the session ID or `None`
-- **Create**: `create_session()` + `tag_session(session_id, tag)`
-- Tags persist in MongoDB/JSON and survive API restarts
+- **Tag format** is `<platform>:<thread_id>`, for example `nextcloud-talk:100`.
+- **Lookup** through `session_store.resolve_tag(tag)` returns the session id or `None`.
+- **Create** with `create_session()` followed by `tag_session(session_id, tag)`.
+- Tags persist in MongoDB or JSON and survive an API restart.
 
-Channel sessions are indistinguishable from console/CLI sessions in listings, event streams, and Langfuse traces. A `context` event with `source_platform` metadata is injected at creation so the LLM and completion callback know the session origin.
+Channel sessions are indistinguishable from console and CLI sessions in listings, event streams, and
+Langfuse traces. A `context` event carrying `source_platform` is injected at creation, so the LLM and
+the completion callback both have the session origin.
 
 ## Session Provenance
 
-Every session has an **origin**: the surface or subsystem that created it. Origin is classified automatically from session tags and context at creation time; it is never set manually. The console uses the origin to display a badge on each session card and to power the origin filter on the session list.
+Every session has an **origin**, the surface or subsystem that created it. Origin is classified from
+session tags and context at creation time and is never set manually. The console renders it as a
+badge on each session card and uses it to power the origin filter.
 
 | Origin | Classified when |
 |--------|-----------------|
@@ -85,21 +108,42 @@ Every session has an **origin**: the surface or subsystem that created it. Origi
 | `channel` | Session carries a channel tag with a `:room:` or `:thread:` segment, such as `nextcloud-talk:room:<token>` |
 | `user` | Everything else: direct console, CLI, or API sessions |
 
-The `structured` and `draft` origins come from the realtime endpoints. Those endpoints mint real sessions, so every structured query and draft stream is browsable in the session list and carries a full transcript.
+/// table-caption
+How each session origin is classified from tags and context.
+///
 
-The `apps` origin covers Mewbo Apps sessions: one builder session per app creation, plus one long-lived maintainer session that the app's pipelines wake to apply changes. These are background product sessions rather than tasks you started, so they stay hidden behind the origin filter by default.
+`structured` and `draft` come from the realtime endpoints. Those endpoints mint real sessions, so
+every structured query and draft stream is browsable in the session list with a full transcript.
 
-The **origin filter** on the session list lets you hide background sessions and show only the surfaces you care about. By default the console shows `user` and `channel` sessions and hides `wiki`, `search`, `structured`, `draft`, and `apps` work. You can toggle any origin in or out independently.
+`apps` covers Mewbo Apps sessions. There is one builder session per app creation, plus one
+long-lived maintainer session that the app's pipelines wake to apply changes. These are background
+product sessions rather than tasks you started, so the origin filter hides them by default.
 
-**Badge display.** Each session card shows a small origin badge (`user`, `wiki`, `search`, `channel`, `structured`, `draft`, or `apps`) so you can tell at a glance which surface created the session. Channel sessions show their platform name (for example Nextcloud or Email) instead of the generic label.
+The **origin filter** on the session list shows only the surfaces you care about. It shows `user` and
+`channel` by default and hides `wiki`, `search`, `structured`, `draft`, and `apps`. Each origin
+toggles independently.
 
-**Capability and workspace chips.** Session cards also show what a session was scoped to. Each capability the session advertised at creation (for example `scg` or `wiki`) renders as a small chip beside the project and branch, and a structured workspace id renders the same way. The chips reflect advertised capabilities only. A capability granted at runtime shows up in the session's Langfuse trace, not on the card.
+**Badge display.** Each session card carries a small origin badge, so you can tell at a glance which
+surface created the session. A channel session shows its platform name, Nextcloud or Email, instead
+of the generic label.
+
+**Capability and workspace chips.** Each capability advertised at creation, `scg` or `wiki` for
+example, renders as a chip beside the project and branch, and a structured workspace id renders the
+same way. Chips reflect advertised capabilities only. A capability granted at runtime shows up in the
+session's Langfuse trace and not on the card.
 
 ### Trace provenance in Langfuse
 
-The same provenance reaches observability. At run start, each session's tags, context, and client surface are folded into filter tags on its Langfuse trace. You can filter traces by origin, product, session type, client surface (`cli`, `console`, `api`, `mcp`, and so on), project, repo, branch, workspace, and model. Higher-cardinality facets, such as worktree ids, capabilities, and wiki or search run ids, land in trace metadata. CI agent pickup sessions surface as the `vcs` product. Operator setup for Langfuse is covered in [Production deployment](deployment-production.md#observability-with-langfuse).
+The same provenance reaches observability. At run start each session's tags, context, and client
+surface are folded into filter tags on its Langfuse trace. You can filter traces by origin, product,
+session type, client surface such as `cli`, `console`, `api` or `mcp`, project, repo, branch,
+workspace, and model.
+
+Higher-cardinality facets land in trace metadata instead, including worktree ids, capabilities, and
+wiki or search run ids. CI agent pickup sessions surface as the `vcs` product. Operator setup is
+covered in [Production deployment](deployment-production.md#observability-with-langfuse).
 
 ## Design goals
 - Keep the core orchestration engine centralized.
-- Make interface layers thin and easy to extend.
+- Keep interface layers thin and easy to extend.
 - Avoid duplicate session lifecycle logic.

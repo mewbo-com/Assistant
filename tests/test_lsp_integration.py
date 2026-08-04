@@ -237,7 +237,7 @@ class TestGetPassiveDiagnostics:
 
         with (
             patch("mewbo_tools.integration.lsp.run_lsp_async", return_value=None),
-            patch("time.sleep"),
+            patch("mewbo_tools.integration.lsp.PASSIVE_DIAGNOSTICS_SETTLE_S", 0.0),
         ):
             result = get_passive_diagnostics(str(tmp_path / "foo.py"), str(tmp_path))
         assert result is None
@@ -544,7 +544,7 @@ class TestLSPToolRun:
                 "mewbo_tools.integration.lsp.tool.run_lsp_async",
                 side_effect=_fake_run_lsp_async,
             ),
-            patch("time.sleep"),
+            patch("mewbo_tools.integration.lsp.tool.DIAGNOSTICS_SETTLE_S", 0.0),
         ):
             result = tool.run(step)
 

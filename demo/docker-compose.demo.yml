@@ -54,6 +54,22 @@ services:
       - MEWBO_AGENTIC_SEARCH_SEED=1
     volumes:
       - ./configs:/app/configs:ro
+      # A fixture plugin install cache, shaped exactly like the one
+      # `install_plugin` writes: an `installed_plugins.json` registry whose
+      # entries point at `cache/<marketplace>/<name>/<version>/` directories,
+      # plus a `marketplaces/<name>/` catalog clone. `plugins.install_path` is
+      # left empty in app.json so it resolves to `$MEWBO_HOME/plugins`, which is
+      # why the mount target is this exact path — the `installPath` values
+      # inside the registry are absolute and name it. Read-only: the demo never
+      # installs or uninstalls, and nothing here is fetched (the registry and
+      # the catalog are both plain file reads; `plugins.marketplaces` stays
+      # empty, which is what suppresses the clone-on-read).
+      - ./plugins:/app/data/plugins:ro
+      # Makes the seeded `shipment-router` project a real git repository with a
+      # real worktree, so the Workspace capture stops showing a pane that
+      # promises worktrees above four cards saying they are unavailable. Only
+      # that one project; the rest keep the honest line. See the script header.
+      - ./init-git-fixture.sh:/app/docker/init.d/21-git-fixture.sh:ro
     depends_on:
       mongo:
         condition: service_healthy
@@ -98,7 +114,7 @@ services:
       # env var, no rebuild needed. VITE_API_MODE/BASE_URL/USE_PROXY are left
       # unset: the console talks same-origin through this nginx's own proxy
       # (see demo/nginx-console.demo.conf), matching the deployed stack.
-      - VITE_API_KEY=${DEMO_API_KEY}
+      - MEWBO_VITE_API_KEY=${DEMO_API_KEY}
     volumes:
       # Override ONLY the proxy_pass targets (127.0.0.1:5125 -> api:5125) —
       # the image's baked-in docker/nginx-console.conf assumes host networking.

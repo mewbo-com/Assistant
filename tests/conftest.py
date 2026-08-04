@@ -52,6 +52,35 @@ def app_config_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     reset_config()
 
 
+@pytest.fixture
+def real_mongo_commands():
+    """A ``CommandCounter`` to register on the tier-2 client (see ``real_mongo``)."""
+    from real_mongo import CommandCounter
+
+    return CommandCounter()
+
+
+@pytest.fixture
+def real_mongo_client(real_mongo_commands):
+    """A real ``MongoClient`` against the tier-2 container, or a clean skip.
+
+    Only ``@pytest.mark.realmongo`` tests should ask for this. The container is
+    ephemeral, but one boot serves a whole run — so the tier database is dropped
+    per test, and the counter is reset afterwards, because that setup traffic is
+    not the traffic under measurement.
+    """
+    from real_mongo import RealMongoTier
+
+    tier = RealMongoTier()
+    client = tier.client_or_skip(event_listeners=[real_mongo_commands])
+    try:
+        client.drop_database(tier.DATABASE)
+        real_mongo_commands.reset()
+        yield client
+    finally:
+        client.close()
+
+
 @pytest.fixture(autouse=True)
 def _reset_mcp_pool():
     """Reset the MCP connection pool singleton between tests."""
@@ -84,3 +113,34 @@ def _reset_schedule_trigger_provider():
     _st._TRIGGER_TOOL_PROVIDER = None
     yield
     _st._TRIGGER_TOOL_PROVIDER = saved
+
+
+@pytest.fixture(autouse=True)
+def _reset_session_event_bus():
+    """Give every test a fresh session event bus.
+
+    ``get_session_event_bus`` is a process-wide singleton holding a SUBSCRIBER
+    registry, and a subscriber outlives the test that registered it: an SSE
+    route test, a store-publish test and the api's own hook observer all attach
+    to whichever bus is current. Nine test files reset it by hand, which means
+    every file that does not inherits whatever the last one left — the shape
+    this suite's own guidance describes as a leaked singleton behind
+    order-dependent failure.
+
+    Worth doing whether or not the run is parallel: under load-balanced
+    distribution a rare leak stops being a bug and becomes a moving target,
+    because which files share a worker changes run to run. A test that WANTS a
+    populated bus builds it in its own body; everyone else starts empty
+    (mirrors the config / MCP-pool / trigger-provider resets above).
+    """
+    from mewbo_core.session.session_event_bus import (
+        reset_session_event_bus_for_tests,
+        set_session_event_bus,
+    )
+
+    reset_session_event_bus_for_tests()
+    yield
+    # Drop the bus this test built rather than restoring a predecessor's: the
+    # next test's setup mints its own, and leaving one pinned here would keep
+    # every subscription it accumulated alive for the rest of the process.
+    set_session_event_bus(None)

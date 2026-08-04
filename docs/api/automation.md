@@ -1,49 +1,53 @@
 # Automation
 
-Assign a bot account to an issue, or mention it in a comment, and Mewbo picks the item up. A CI workflow ([`agent-pickup.yml`](repo:.github/workflows/agent-pickup.yml)) collects the issue or pull request details and POSTs them to [POST /api/automation/vcs-pickup](endpoint:POST /api/automation/vcs-pickup) on your Mewbo API. The API starts, or continues, an agent session in the right working directory. The same workflow file runs on both GitHub Actions and Gitea Actions.
+## Hand an issue to an agent
+
+Assign a bot account to an issue, or mention it in a comment, and Mewbo picks the item up in an agent session. One [`agent-pickup.yml`](repo:.github/workflows/agent-pickup.yml) workflow does this on both GitHub Actions and Gitea Actions, posting the item to [POST /api/automation/vcs-pickup](endpoint:POST /api/automation/vcs-pickup) on your Mewbo API.
 
 ## How it works
 
+```mermaid
+flowchart TB
+    T1["Assign bot"] --> W
+    T2["Mention bot"] --> W
+    T3["workflow_dispatch"] --> W
+
+    W["agent-pickup.yml<br/>CI runner, read-only token"]
+    A["POST /api/automation/vcs-pickup<br/>Mewbo API, X-API-Key auth"]
+    S["Agent session<br/>tag: vcs:owner/repo:kind:number"]
+    C["Comment on the issue or PR<br/>posted by the bot account"]
+
+    W -- "item details, PR branch,<br/>JSON payload" --> A
+    A -- "owner/repo to project,<br/>branch or worktree" --> S
+    S -- "session-end hook" --> C
 ```
-assign bot / mention bot / workflow_dispatch
-        │
-        ▼
-.github/workflows/agent-pickup.yml          (CI runner, read-only token)
-        │  resolves item details + PR branch, builds JSON payload
-        ▼
-POST /api/automation/vcs-pickup             (Mewbo API, X-API-Key auth)
-        │  resolves owner/repo -> project, prepares branch/worktree
-        ▼
-Agent session  tag: vcs:<owner/repo>:<kind>:<number>
-        │  on run completion (session-end hook)
-        ▼
-Final answer posted back to the issue/PR as a comment by the bot account
-```
 
-**Triggers.** The workflow fires on `issues: [assigned]`, `pull_request: [assigned]`, `issue_comment: [created]`, and manual `workflow_dispatch` (inputs: `issue_number` required, `prompt` optional). A job-level guard then decides whether to run:
+**Triggers.** The workflow fires on `issues: [assigned]`, `pull_request: [assigned]`, `issue_comment: [created]`, and manual `workflow_dispatch`. Dispatch takes a required `issue_number` and an optional `prompt`. A job guard then decides whether the run proceeds.
 
-- **Assignment.** Runs when the just-assigned user is `AGENT_BOT_LOGIN`, with a fallback to checking the item's full assignees list (needed for Gitea, see below).
-- **Comment.** Runs when the comment body contains `@<AGENT_BOT_LOGIN>` and the comment author is not the bot itself (a self-trigger loop guard).
-- **Dispatch.** Always runs (manual override). The workflow fetches the item's title, body, and URL from the VCS API, since the dispatch payload only carries a number.
+- **Assignment.** Runs when the just-assigned user is `AGENT_BOT_LOGIN`. It falls back to the item's full assignees list, which is what Gitea needs.
+- **Comment.** Runs when the comment body contains `@<AGENT_BOT_LOGIN>` and the author is not the bot. That second condition stops the bot triggering itself in a loop.
+- **Dispatch.** Always runs, as the manual override. The dispatch payload carries only a number, so the workflow fetches the item's title, body, and URL from the VCS API.
 
-A concurrency group keyed on the item number serializes runs per issue or PR, without cancelling in-flight ones.
+A concurrency group keyed on the item number serializes runs per issue or PR. Runs already in flight are never cancelled.
 
-**Session continuity.** The endpoint derives a deterministic session tag, `vcs:<owner/repo>:<kind>:<number>` (kind is `issue` or `pull_request`), so every trigger on the same item lands in one continuous conversation. A repeat mention continues the existing session. If a run is currently active, the new prompt is enqueued as a steering message into the running session instead of starting a second run.
+**Session continuity.** The session tag is `vcs:<owner/repo>:<kind>:<number>`, with kind `issue` or `pull_request`, so every trigger on one item lands in one conversation. A prompt that arrives while a run is active is enqueued as a steering message rather than starting a second run.
 
 **Working directory.**
 
-- **Pull request pickups** run in a managed git worktree checked out on the PR head branch. The endpoint fetches the branch from `origin`, creates a local tracking branch if needed, finds or creates the worktree (recreating it if the session-end reaper removed a clean one between mentions), and best-effort fast-forwards it to `origin/<branch>`. The agent is instructed to continue from the branch state, commit, and push so the PR updates.
-- **Issue pickups** run in an isolated worktree cut from HEAD. This is a deterministic `mewbo/issue-<number>` branch created from the default branch's latest commit. The agent works in isolation, so concurrent issue pickups never collide. It commits to that branch and opens a pull request referencing the issue. The branch is mewbo-owned, so the session-end reaper deletes it with the worktree. A repeat pickup of the same issue reuses the branch, and the deterministic session tag keeps the conversation continuous. If the project has no managed parent, or the worktree cannot be created (for example a non-git project path), the pickup degrades gracefully to the shared main checkout, and the agent is told to cut its own feature branch.
+- **Pull request pickups** run in a managed git worktree on the PR head branch. The endpoint fetches the branch from `origin`, creates the tracking branch and worktree if either is missing, and fast-forwards to `origin/<branch>` where it can. The prompt tells the agent to commit and push from there, so the PR updates.
+- **Issue pickups** run in an isolated worktree on a deterministic `mewbo/issue-<number>` branch cut from the default branch's latest commit, so concurrent pickups never collide. A repeat pickup reuses that branch. Mewbo owns it, so the session-end reaper deletes branch and worktree together.
+
+An issue pickup degrades to the shared main checkout where the project has no managed parent or the worktree cannot be created. The agent is then told to cut its own feature branch.
 
 ## The pickup prompt closes the issue
 
-For an issue pickup, the generated prompt instructs the agent to include a `Closes #<issue-number>` directive in its pull request description. Merging that pull request then closes the issue automatically, through the forge's closing-keyword convention. The issue number is the one the workflow posted, so a pickup of issue 42 renders the literal instruction `Closes #42`.
+For an issue pickup, the generated prompt instructs the agent to put a `Closes #<issue-number>` directive in its pull request description. Merging that pull request closes the issue through the forge's closing keyword convention.
 
-This applies to issue pickups only. A pull request pickup already runs on the PR's own branch, so its prompt tells the agent to update the existing PR rather than open a new one. Supplying a full `prompt` override in the request body replaces the generated prompt entirely, in which case the `Closes #` directive is not added.
+Pull request pickups get no such directive. They already run on the PR's own branch, so the prompt tells the agent to update the existing PR. A full `prompt` override in the request body replaces the generated prompt entirely, and the `Closes #` directive goes with it.
 
 ## Setup, GitHub Actions
 
-The workflow file ships in the repo at [`agent-pickup.yml`](repo:.github/workflows/agent-pickup.yml). You only need to configure secrets and variables (Settings, then Secrets and variables, then Actions).
+The workflow file ships in the repo at [`agent-pickup.yml`](repo:.github/workflows/agent-pickup.yml). Only the secrets and variables need configuring, under Settings, then Secrets and variables, then Actions.
 
 **Repository secrets:**
 
@@ -52,10 +56,10 @@ The workflow file ships in the repo at [`agent-pickup.yml`](repo:.github/workflo
 | `MEWBO_API_URL` | Yes | Base URL of your Mewbo API (for example `https://mewbo.example.com`). |
 | `MEWBO_API_TOKEN` | Yes | A provisioned Mewbo API key, sent as `X-API-Key`. |
 
-**Provisioning the API key.** Mint a dedicated, revocable key instead of using the master token. Keys minted through the key store authenticate every API-key-gated route, including [POST /api/automation/vcs-pickup](endpoint:POST /api/automation/vcs-pickup):
+**Provisioning the API key.** Mint a dedicated key rather than using the master token. A key from the key store authenticates every route the API key gates, including [POST /api/automation/vcs-pickup](endpoint:POST /api/automation/vcs-pickup).
 
-- Console: Settings, then API Keys, then create a key labeled for the repo (for example `agent-pickup CI`), or
-- API: [POST /api/keys](endpoint:POST /api/keys) with the master token:
+- In the console, open Settings, then API Keys, and create a key labeled for the repo.
+- Over the API, call [POST /api/keys](endpoint:POST /api/keys) with the master token.
 
   ```bash
   curl -X POST "$MEWBO_API_URL/api/keys" \
@@ -64,7 +68,7 @@ The workflow file ships in the repo at [`agent-pickup.yml`](repo:.github/workflo
   # -> {"id": ..., "key": "mk_..."}  the plaintext is shown exactly once
   ```
 
-Store the returned `mk_...` value as the `MEWBO_API_TOKEN` repository secret. Revoking the key ([DELETE /api/keys/{key_id}](endpoint:DELETE /api/keys/{key_id})) immediately disables every workflow that uses it, without touching the master token.
+Store the returned `mk_...` value as the `MEWBO_API_TOKEN` repository secret. [DELETE /api/keys/{key_id}](endpoint:DELETE /api/keys/{key_id}) revokes it and immediately disables every workflow that uses it. The master token is untouched.
 
 **Repository variables:**
 
@@ -75,35 +79,35 @@ Store the returned `mk_...` value as the `MEWBO_API_TOKEN` repository secret. Re
 | `AGENT_MODEL` | No | LLM model override for the session. |
 | `AGENT_MODE` | No | `plan` or `act`. |
 
-**Token scope.** The workflow declares least-privilege permissions: `contents: read`, `issues: read`, `pull-requests: read`. The built-in `GITHUB_TOKEN` is used only to GET issue or PR details, for dispatch-triggered and comment-triggered pickups that lack inline payload data. The workflow never writes to the repository. All work happens server-side in the Mewbo session.
+**Token scope.** The workflow declares the least it needs, `contents: read`, `issues: read`, and `pull-requests: read`. The workflow token only GETs issue or PR details, for dispatch and comment pickups whose payload lacks that data. Nothing is written to the repository, because all the work happens inside the Mewbo session.
 
 > [!IMPORTANT]
-> GitHub does not expose repository secrets to workflows triggered from fork pull requests. Assignment-triggered pickup therefore only works for PRs from same-repo branches. A fork PR's run will fail the configuration check (no `MEWBO_API_URL`).
+> GitHub does not expose repository secrets to workflows triggered from fork pull requests. Assignment pickup therefore works only for PRs from branches in the same repository. A fork PR's run fails the configuration check, because `MEWBO_API_URL` arrives empty.
 
 ## Setup, Gitea Actions
 
-Gitea Actions reads the same file. It picks up workflows from [`agent-pickup.yml`](repo:.github/workflows/agent-pickup.yml), so nothing extra needs committing. Configure the same secrets and variables under repo Settings, then Actions, then Secrets, and then Variables.
+Gitea Actions reads the same [`agent-pickup.yml`](repo:.github/workflows/agent-pickup.yml), so nothing extra needs committing. Configure the same secrets and variables under repo Settings, then Actions, then Secrets and Variables.
 
-Differences from GitHub that the workflow handles inline:
+The workflow handles three differences from GitHub inline.
 
-- **Assignment payload.** Gitea's `assigned` event has no top-level `event.assignee`, so the guard falls back to checking the item's assignees list. As a consequence, a re-assignment event on an item where the bot is already assigned (for example assigning a second person) can re-trigger the workflow. This is harmless. The endpoint resolves the same session tag and reuses the existing session.
-- **API URL.** Gitea's `act_runner` may leave `github.api_url` empty. The workflow derives `<server_url>/api/v1` itself. The `/repos/{owner}/{repo}/issues/{n}` and `/pulls/{n}` shapes it uses are identical on both platforms, and both accept the workflow token via `Authorization: token ...`.
-- **Provider field.** The payload's `provider` is set to `gitea` whenever `server_url` is not `https://github.com`. This is informational only.
+- **Assignment payload.** Gitea's `assigned` event carries no `event.assignee` at the top level, so the guard falls back to the assignees list. A second assignment on an item the bot already holds can therefore re-fire the workflow. That is harmless, because the endpoint resolves the same tag and reuses the session.
+- **API URL.** Gitea's `act_runner` may leave `github.api_url` empty, so the workflow derives `<server_url>/api/v1` itself. The `/repos/{owner}/{repo}/issues/{n}` and `/pulls/{n}` shapes are identical on both platforms, and both accept the workflow token via `Authorization: token ...`.
+- **Provider field.** The payload's `provider` is set to `gitea` whenever `server_url` is not `https://github.com`. It is informational only.
 
-Runner requirements: a runner registered with the `ubuntu-latest` label must exist. `jq` is auto-installed via `apt-get` if it is missing from the runner image.
+A runner registered with the `ubuntu-latest` label must exist. Missing `jq` is installed via `apt-get` at run time.
 
 ## Server-side requirements
 
-The Mewbo API must be able to map the `owner/repo` string to a local project:
+The Mewbo API maps the `owner/repo` string to a local project two ways.
 
 - **Automatic.** A configured project whose git remote matches the repository. Resolution uses the same [`RepoIdentity`](repo:apps/mewbo_api/src/mewbo_api/repo_identity.py) alias matching as the worktree routes, so the repo resolves via its Gitea host URL, a GitHub mirror URL, `owner/repo`, or the bare repo name.
-- **Explicit.** Set the `AGENT_PROJECT` repository variable to a Mewbo project key, which overrides the `owner/repo` default.
+- **Explicit.** The `AGENT_PROJECT` repository variable overrides the `owner/repo` default with a Mewbo project key.
 
-The project path must be a git clone with an `origin` remote that can fetch PR branches. PR pickups run `git fetch origin <branch>` in the parent clone before creating the worktree, and a pickup whose branch cannot be fetched fails with `422`.
+The project path must be a git clone with an `origin` remote that can fetch PR branches. PR pickups run `git fetch origin <branch>` in the parent clone before creating the worktree. A pickup whose branch cannot be fetched fails with `422`.
 
 ### Replies back to the issue or PR
 
-When a pickup session's run ends, a session-end hook posts the agent's final answer back to the originating issue or PR as a comment, authored by the bot account. This is the same completion-hook mechanism the chat channels use to deliver their replies. Configure a forge token for the bot under `channels.vcs` in the server config:
+When a pickup run ends, a session-end hook posts the final answer back to the originating issue or PR as a comment from the bot account. It needs a forge token for the bot under `channels.vcs` in the server config.
 
 ```json
 "channels": {
@@ -114,19 +118,19 @@ When a pickup session's run ends, a session-end hook posts the agent's final ans
 }
 ```
 
-- **Tokens are keyed by forge API host** (the hostname of the `api_url` the workflow sends), so one Mewbo instance can reply on several forges.
-- **Token identity equals comment author.** Mint the PAT for the bot account. On Gitea, an admin can `POST /api/v1/users/<bot>/tokens` with basic auth, scopes `read:user`, `write:issue`, `write:repository`. On GitHub, use a fine-grained PAT with Issues write plus Pull requests write. The `/repos/{owner}/{repo}/issues/{n}/comments` endpoint and `Authorization: token` scheme are identical on GitHub and Gitea.
-- **The same tokens also log in the `tea` CLI.** The api image ships `tea` (Gitea) and `gh` (GitHub), and [`15-tea-setup.sh`](repo:docker/init.d/15-tea-setup.sh) adds a `tea` login per `channels.vcs.tokens` host at container start (falling back to `~/.git-credentials` for hosts without one). So when the agent opens a pull request, it can do it as the bot account. The `read:user` scope is what `tea login add` needs, and `write:repository` covers PR creation.
-- **Without a token the reply leg is silently disabled.** Pickups still run. The answer is only visible in the session.
-- `tls_verify: false` opts out of certificate verification for forges behind an internal CA the API host does not trust (the Python client uses the system CA store, same as git).
-- Loop safety: the bot's own comment never re-triggers a pickup. The workflow guard requires the comment author to differ from the bot, and the endpoint suppresses self-comments too.
+- **Tokens are keyed by forge API host**, the hostname of the `api_url` the workflow sends. One Mewbo instance can therefore reply on several forges.
+- **Token identity equals comment author.** Mint the PAT for the bot account. On Gitea, an admin can `POST /api/v1/users/<bot>/tokens` with basic auth and the scopes `read:user`, `write:issue`, and `write:repository`. On GitHub, use a fine-grained PAT with Issues write plus Pull requests write. The `/repos/{owner}/{repo}/issues/{n}/comments` endpoint and the `Authorization: token` scheme are identical on both.
+- **The same tokens also log in the `tea` CLI.** The api image ships `tea` and `gh`. [`15-tea-setup.sh`](repo:docker/init.d/15-tea-setup.sh) adds a `tea` login per `channels.vcs.tokens` host at container start, falling back to `~/.git-credentials` for hosts without one. The agent then opens pull requests as the bot account. `tea login add` is what needs the `read:user` scope.
+- **Without a token the reply leg is silently disabled.** Pickups still run and the answer stays visible only in the session.
+- `tls_verify: false` opts out of certificate verification, for a forge behind an internal CA the API host does not trust. The Python client uses the system CA store, same as git.
+- The bot's own comment never triggers a second pickup.
 - Answers longer than roughly 60,000 characters are truncated to fit forge comment limits.
 
 ## Endpoint reference
 
 ### POST /api/automation/vcs-pickup
 
-Auth: `X-API-Key` header (the standard API key). The body is strict JSON, and unknown fields are rejected:
+Authenticate with the standard API key in the `X-API-Key` header. The body is strict JSON and unknown fields are rejected.
 
 | Field | Type | Required | Purpose |
 |-------|------|----------|---------|
@@ -150,7 +154,7 @@ Auth: `X-API-Key` header (the standard API key). The body is strict JSON, and un
 | `mode` | `plan` or `act` | No | Session mode. |
 | `prompt` | string | No | Full override of the generated pickup prompt. |
 
-**Self-trigger suppression.** When `bot_login` is set and equals `comment_author`, the endpoint returns `200 {"skipped": true, "reason": "comment author is the bot"}` without starting anything. The workflow guards this too, as defense in depth against the bot replying to its own comment in a loop.
+**Self-trigger suppression.** When `bot_login` is set and equals `comment_author`, the endpoint returns `200 {"skipped": true, "reason": "comment author is the bot"}` without starting anything. The workflow guard blocks the same case before the request is made.
 
 **Responses:**
 
@@ -166,14 +170,14 @@ Auth: `X-API-Key` header (the standard API key). The body is strict JSON, and un
 
 ## Testing
 
-A safe, incremental verification path:
+Work up in four steps.
 
 1. **Manual dispatch first.** Run the Agent Pickup workflow via `workflow_dispatch` with a test issue number. This skips the assignment guard entirely and validates secrets, API reachability, and project resolution. The job log prints the JSON response and the session id.
-2. **Scratch issue and assignment.** Create a throwaway issue, assign the bot account, and watch the Actions run start and a session appear in the Mewbo console (tagged `vcs:<owner/repo>:issue:<n>`, on an isolated `mewbo/issue-<n>` worktree cut from HEAD).
-3. **Negative check.** Assign a non-bot user to the same issue. The guard must skip the job, so no run starts.
+2. **Scratch issue and assignment.** Create a throwaway issue and assign the bot account. An Actions run starts and a session appears in the Mewbo console, tagged `vcs:<owner/repo>:issue:<n>`.
+3. **Negative check.** Assign a user other than the bot to the same issue. The guard must skip the job, so no run starts.
 4. **PR mention.** Comment `@<bot-login> <request>` on a pull request. A session should start in a managed worktree on the PR head branch. Mention again to confirm the same session continues.
 
-To test the endpoint directly, bypassing CI:
+Call the endpoint directly to bypass CI.
 
 ```bash
 curl -X POST "$MEWBO_API_URL/api/automation/vcs-pickup" \
@@ -195,5 +199,5 @@ A `200` with a `session_id` confirms the server side end to end. Repeat the call
 
 ## Next steps
 
-- [Building a Client](building-a-client.md): the session and event primitives automation runs ride on.
-- [Full API reference](../rest-api.md): every route, parameter, and response shape.
+- [Building a Client](building-a-client.md) covers the session and event primitives a pickup run rides on.
+- The [full API reference](../rest-api.md) carries every route, parameter, and response shape.

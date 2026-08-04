@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from mewbo_core.secrets.key_store_mongo import MongoKeyStore
 from mewbo_core.session.session_store_mongo import MongoSessionStore
 from mewbo_core.triggers.store_mongo import MongoTriggerStore
+from mewbo_core.workspaces.project_store import MongoProjectStore
 
 from mewbo_demo_seeder.models import SeedBundle
 from mewbo_demo_seeder.seeder import DemoSeeder
@@ -104,6 +105,13 @@ def main(argv: list[str] | None = None) -> int:
             uri=os.environ["MEWBO_MONGODB_URI"],
             database=os.environ["MEWBO_MONGODB_DATABASE"],
         )
+        # Same story as the key store: the managed-project store is built from
+        # config (storage.driver) by ``create_project_store``, so pass the env
+        # explicitly to keep every half of the seed in the SAME demo db.
+        project_store = MongoProjectStore(
+            os.environ["MEWBO_MONGODB_URI"],
+            os.environ["MEWBO_MONGODB_DATABASE"],
+        )
     except KeyError as exc:
         print(f"error: seeding requires env var {exc}", file=sys.stderr)
         return 1
@@ -118,6 +126,7 @@ def main(argv: list[str] | None = None) -> int:
             bundle=bundle,
             t0=t0,
             key_store=key_store,
+            project_store=project_store,
         ).seed()
     except Exception as exc:
         print(f"error: seeding failed: {exc}", file=sys.stderr)
@@ -133,6 +142,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  trigger {tid}")
     for kid in report.api_keys:
         print(f"  api key {kid}")
+    for pid in report.projects:
+        print(f"  project {pid}")
 
     # Optional wiki world (projects/pages/graph/jobs/Q&A), seeded THROUGH the
     # wiki store contracts. MongoWikiStore reads storage.mongodb.* config, NOT

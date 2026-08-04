@@ -1,17 +1,21 @@
 # Web IDE
 
-<video controls preload="metadata" poster="../../assets/img/mewbo-console-01-front.png" style="width: 100%; max-width: 960px; height: auto; display: block; margin: 0 auto;">
+## Edit files in the browser
+
+<video controls preload="metadata" width="1026" height="720" poster="../../assets/img/mewbo-console-01-front.png" style="width: 100%; max-width: 960px; height: auto; display: block; margin: 0 auto;">
   <source src="../../assets/videos/mewbo-console-coder-demo-1.mp4" type="video/mp4" />
   Your browser does not support the video tag.
 </video>
 
-Mewbo can launch a full IDE in your browser, tied to a session's working directory. It runs [code-server](https://github.com/coder/code-server), which is VS Code in the browser. This gives you a real editor alongside the agent. You review diffs, edit files, and run terminals while Mewbo works in the same directory. One container runs per session. It starts on demand and stops itself after a configurable time-to-live.
+Mewbo can launch a full IDE in your browser, running [code-server](https://github.com/coder/code-server) against a session's working directory. You get a real editor in the same tree the agent is working in.
+
+One container runs per session, starting on demand and stopping itself after a configurable duration. Any session with a resolvable project qualifies, whether a project you configured, a workspace or worktree Mewbo manages, or a registered repository with a local checkout.
 
 ## Enabling
 
-Set `agent.web_ide.enabled` to `true` in `configs/app.json`.
+The feature is off until you turn it on in `configs/app.json`.
 
-```json
+```json title="configs/app.json"
 {
   "agent": {
     "web_ide": {
@@ -21,13 +25,13 @@ Set `agent.web_ide.enabled` to `true` in `configs/app.json`.
 }
 ```
 
-The Web IDE needs MongoDB to persist container state across API restarts. See [Storage Backends](../deployment-storage.md) for how to enable the MongoDB driver. In the Docker Compose stack the rest of the plumbing is wired for you. See [Docker Compose](../deployment-docker.md).
+It needs MongoDB to persist container state across API restarts. See [Storage Backends](../deployment-storage.md) for the driver. The [Docker Compose](../deployment-docker.md) stack wires the rest of the plumbing for you.
 
 ## Launch an IDE
 
 ### From the console
 
-When the feature is enabled, an **Open in Web IDE** button appears on session cards. The console checks whether the feature is available and shows the button only then. Click it to start the container and open the IDE in a new tab. While the container boots, the loader shows a floral background animation. The launch is handled by [`IdeLoader`](repo:apps/mewbo_console/src/components/IdeLoader.tsx).
+An **Open in Web IDE** button appears on session cards once the feature is enabled. Click it to start the container and open the IDE in a new tab, with [`IdeLoader`](repo:apps/mewbo_console/src/components/IdeLoader.tsx) holding the screen while it boots.
 
 ### From the API
 
@@ -40,9 +44,9 @@ The console button calls the same endpoints you can drive directly.
 | `DELETE` | `/api/sessions/{session_id}/ide` | Stop and remove the container |
 | `POST` | `/api/sessions/{session_id}/ide/extend` | Extend the session lifetime |
 
-The `POST` response includes a one-time `password` field. The `GET` response omits it. The IDE is reachable at `/ide/{session_id}/` behind the built-in nginx proxy.
+The `POST` response includes a `password` field valid for one use. The `GET` response omits it. The IDE is reachable at `/ide/{session_id}/` behind the nginx proxy Mewbo ships with.
 
-Create an IDE session:
+Create an IDE session.
 
 ```bash
 curl -sk -X POST https://mewbo.example.com/api/sessions/abc123.../ide \
@@ -60,7 +64,7 @@ curl -sk -X POST https://mewbo.example.com/api/sessions/abc123.../ide \
 }
 ```
 
-Extend the deadline:
+Extend the deadline.
 
 ```bash
 curl -sk -X POST https://mewbo.example.com/api/sessions/abc123.../ide/extend \
@@ -73,7 +77,7 @@ The extend endpoint accepts either `hours`, an integer from 1 to 168, or an abso
 
 ## Session lifetime
 
-Every IDE session carries an expiry. When the wall clock passes `expires_at`, the container shuts itself down. You can extend a running session, stop it early, or reconnect to it at any time.
+Every IDE session carries an expiry. When the wall clock passes `expires_at`, the container shuts itself down.
 
 | Action | What happens |
 |--------|--------------|
@@ -84,24 +88,11 @@ Every IDE session carries an expiry. When the wall clock passes `expires_at`, th
 
 ## Configuration
 
-All keys nest under `agent.web_ide` in `configs/app.json`.
+Every key nests under `agent.web_ide` in `configs/app.json`. The [Configuration Reference](../configuration.md#agent) lists all of them with their defaults, including the container lifetime, the CPU, memory and PID ceilings, and the Docker network the proxy has to share with each container.
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `enabled` | `false` | Enable the feature. Requires MongoDB. |
-| `image` | `codercom/code-server:latest` | Docker image to run. |
-| `default_lifetime_hours` | `1` | Initial lifetime in hours (1 to 24). |
-| `max_lifetime_hours` | `8` | Hard ceiling on total lifetime per session (1 to 168). |
-| `cpus` | `1.0` | CPU quota per container (0.1 to 16.0). |
-| `memory` | `1g` | Memory limit, for example `512m` or `2g`. |
-| `pids_limit` | `512` | PID limit per container (64 to 4096). |
-| `network` | `mewbo-ide` | Docker network the containers join. Must be the network `ide-proxy` is attached to, or the proxy cannot reach the container. |
-| `proxy_url` | `http://127.0.0.1:5126` | Base URL the API uses to reach `ide-proxy` for its readiness probe. |
-| `state_dir` | `/tmp/mewbo-ide` | Host directory for bookkeeping files. |
+Restrict resources and pin the image.
 
-Restrict resources and pin the image:
-
-```json
+```json title="configs/app.json"
 {
   "agent": {
     "web_ide": {
@@ -116,10 +107,10 @@ Restrict resources and pin the image:
 }
 ```
 
-The session's project directory is mounted into the container. Edits you make in the IDE show up immediately to the running agent, and the agent's edits show up in the IDE.
+The session's project directory is mounted into the container, so your edits and the agent's land in the same tree and each sees the other immediately.
 
 ## Next steps
 
-- [Sessions](sessions.md): the session list and the composer that starts an IDE-eligible session.
-- [Docker Compose](../deployment-docker.md): the stack that wires the IDE plumbing.
-- [REST API Reference](../rest-api.md): the full IDE endpoint contract.
+- [Sessions](sessions.md). The composer that starts a session the IDE can attach to.
+- [Docker Compose](../deployment-docker.md). The stack that wires the IDE plumbing.
+- [REST API Reference](../rest-api.md). The full IDE endpoint contract.

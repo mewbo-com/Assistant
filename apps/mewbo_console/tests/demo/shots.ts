@@ -10,9 +10,15 @@ import { dirname, resolve } from "node:path";
 //   apps/mewbo_console/tests/demo/
 const HERE = dirname(fileURLToPath(import.meta.url));
 // Four up: tests/demo -> tests -> mewbo_console -> apps -> <repo root>, then into
-// the docs asset dir. Resolved absolutely so the run is invariant to the cwd
-// Playwright was launched from.
-const IMG_DIR = resolve(HERE, "../../../../docs/assets/img");
+// the docs asset SOURCE dir. Resolved absolutely so the run is invariant to the
+// cwd Playwright was launched from.
+//
+// ⚠️ This is `img-src`, NOT `img`. A capture is a SOURCE; the file the docs
+// reference is derived from it by `mewbo_demo_framer` (`make demo-frame`),
+// which composites full-window captures onto a 16:9 wallpaper canvas. Point
+// this back at `img` and a raw capture overwrites its own published artifact,
+// silently reverting the frame on whichever shots that run touched.
+const IMG_DIR = resolve(HERE, "../../../../docs/assets/img-src");
 
 export type ShotName =
   // console
@@ -38,6 +44,12 @@ export type ShotName =
   // settings + plan mode
   | "settingsModels"
   | "settingsSecurity"
+  // Two Settings facets whose files carry CONSOLE numbering, because they
+  // replace hand-captures of the retired standalone `/plugins` and `/projects`
+  // pages. The routes now redirect into `/settings?facet=`; the basenames stay
+  // so no docs reference moves.
+  | "settingsPlugins"
+  | "settingsProjects"
   | "planApproval"
   // ask-user questions (the human-in-the-loop card, docs/features-builtin-tools.md)
   | "askUserQuestion";
@@ -74,6 +86,8 @@ export const SHOTS: Record<ShotName, { file: string; type: "png" | "jpeg" }> = {
   searchAgentTrace: { file: "mewbo-search-04-agent-trace.jpg", type: "jpeg" },
   settingsModels: { file: "mewbo-settings-01-models.jpg", type: "jpeg" },
   settingsSecurity: { file: "mewbo-settings-02-security.jpg", type: "jpeg" },
+  settingsPlugins: { file: "mewbo-console-05-plugins.png", type: "png" },
+  settingsProjects: { file: "mewbo-console-06-projects.png", type: "png" },
   planApproval: { file: "mewbo-console-03-plan-approval.jpg", type: "jpeg" },
   askUserQuestion: { file: "mewbo-console-ask-user-log.jpg", type: "jpeg" },
 };
@@ -135,4 +149,42 @@ export const SEED = {
   // The fictional proxy base rendered by the Models settings shot — mirrors
   // `demo/configs/app.json` -> llm.api_base. Never a real internal host.
   llmApiBase: "https://llm.example.com/v1",
+  // The Plugins facet's two lists. Unlike every other entry here these are NOT
+  // bundle-seeded: `demo/plugins/` is a fixture install cache mounted read-only
+  // into the api (`docker-compose.demo.yml`), shaped exactly like the one
+  // `install_plugin` writes. So this is the seed<->flow contract with that
+  // fixture's `installed_plugins.json` and its marketplace catalog clone.
+  //
+  // The two lists are DISJOINT on purpose: a marketplace row whose plugin is
+  // already installed renders no Install button, so an overlap would silently
+  // change the Install-button count the flow anchors on.
+  plugins: {
+    installed: [
+      "superpowers",
+      "feature-dev",
+      "code-simplifier",
+      "code-review",
+      "claude-md-management",
+      "playwright",
+    ],
+    marketplace: [
+      "agent-sdk-dev",
+      "claude-code-setup",
+      "frontend-design",
+      "hookify",
+      "plugin-dev",
+      "skill-creator",
+    ],
+  },
+  // Managed projects backing the Workspace settings shot (`console-poc.json`
+  // -> `projects`). The last entry is a WORKTREE, and its rendered name is not
+  // authored anywhere: the seeder derives it from core's own worktree rules, so
+  // the row is titled after the branch. Spelled here as the store renders it.
+  managedProjects: [
+    "ledger-sync",
+    "shipment-router",
+    "storefront-checkout",
+    "depot-telemetry",
+    "mewbo/main-9f2c1a",
+  ],
 } as const;

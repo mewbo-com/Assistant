@@ -8,10 +8,12 @@ regenerating leaves them describing a model that no longer exists, and the
 symptom is silent: the console's Settings pane reads the schema, so a knob that
 never reached it simply is not there, with nothing raised and nothing logged.
 
-**Nothing else checks this.** The gating workflows are ``pull_request``-only and
-no runner picks them up, so the pytest suite is not one gate among several — it
-is the only one. A generated artifact with no test behind it has nothing
-checking it, ever.
+**This test is what checks it.** CI does run — the coverage workflow invokes a
+bare ``pytest``, which honours ``testpaths`` and so collects this file — but the
+workflow only re-runs the check; it does not perform one. A generated artifact
+with no test behind it therefore has nothing checking it, no matter how much CI
+is configured. The gating workflows are also ``pull_request``-only, so a plain
+push to a branch runs nothing at all: open the PR to get the signal.
 
 Neither test invokes a writing path. The schema half imports the generator's
 pure builder and compares its return value; the docs half only READS the two

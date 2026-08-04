@@ -72,9 +72,22 @@ depend on what the api image already ships (mewbo_core, pydantic, pymongo).
   `MEWBO_MONGODB_URI`/`MEWBO_MONGODB_DATABASE` env, which is exactly how the
   `seed` service targets the demo mongo. Tests monkeypatch `pymongo.MongoClient`
   (mongomock), the established repo pattern.
-- **Raw app screenshots are the baseline** — no window frame or shadow. Adding
-  decoration back would be a post-step (ffmpeg/imagemagick), deliberately not
-  done: fewer moving parts.
+- **A capture is a SOURCE, not a published artifact.** Playwright writes to
+  `docs/assets/img-src/`; the docs and the README reference `docs/assets/img/`.
+  `demo/framer` (`make demo-frame`, its own `CLAUDE.md`) is the one transform
+  between them: every whole-window capture is composited onto a 16:9 wallpaper
+  canvas as a rounded window with a soft shadow, and everything else is copied
+  through. This REVERSES the earlier "raw screenshots are the baseline, adding
+  decoration back would be a post-step, deliberately not done" decision. The
+  cost that reasoning named is real and was paid on purpose: the owner had
+  already hand-composited several artifacts to establish the look, and hand
+  work does not scale to 20 of them. What makes it affordable is that the
+  transform is source-to-derived rather than in-place, so it is idempotent, the
+  style is re-tunable without re-capturing anything, and both directories carry
+  their own zero-diff gate.
+- **Point `shots.ts`'s `IMG_DIR` back at `img/` and a capture overwrites its
+  own published artifact**, silently un-framing whichever shots that run
+  touched while every spec stays green.
 
 ## Traps (each one cost real debugging time)
 
@@ -83,6 +96,7 @@ depend on what the api image already ships (mewbo_core, pydantic, pymongo).
 | `docker/nginx-console.conf` proxies to `127.0.0.1:5125` (a host-net assumption baked into the console image) | console silently cannot reach the api on a bridge network | mount `demo/nginx-console.demo.conf` over `/etc/nginx/conf.d/default.conf`; it is a byte-faithful copy modulo `proxy_pass` host |
 | nginx auto-301s `/api/sessions` (bare) onto the SSE prefix block's `/api/sessions/`, which Flask 404s | session listing AND creation break through the proxy | keep the exact-match `location = /api/sessions` block (in BOTH conf files) ahead of the SSE prefix block |
 | `MEWBO_VITE_API_KEY` is baked into `runtime-config.js` when the console **container starts** | changing the key after boot does nothing | set env before `demo-up`; restart the console container to re-bake |
+| The console entrypoint reads `MEWBO_VITE_API_*`; the compose file must spell the same prefix | a bare `VITE_API_KEY=` in the compose env bakes an EMPTY key, so every console fetch 401s with "API token is not provided" — the whole demo console, not one surface. `${VAR:-}` defaults to empty rather than failing, so nothing errors at boot and the break only shows up as a blank UI | the two spellings are one contract; when a deployment var is renamed, grep the demo compose file too — the rename that introduced this missed exactly that line |
 | Relative timestamps ("45 minutes ago") re-render every wall-clock minute | every capture differs → zero-diff gate can never pass | bundles store offsets from `DEMO_T0`; seeder rebases; flows freeze `page.clock` at the same `DEMO_T0` |
 | `page.clock.install` freezes JS timers | the landing typewriter pins to its first phrase (fine, deterministic); anything polling-driven never advances | mount-time fetches still fire (promise/MessageChannel-driven); do not build flows that need timer-driven refetches |
 | Playwright version vs browser image | pixel drift between environments | the `shots` service image tag must equal the resolved `@playwright/test` version in `package-lock.json` — bump them together |
@@ -92,6 +106,8 @@ depend on what the api image already ships (mewbo_core, pydantic, pymongo).
 | `locator.screenshot()` re-scrolls and re-rasterizes on its own terms | element closeups land on two attractor scroll states → flaky byte-diffs while full-viewport shots are stable | explicit `scrollIntoView({block:"center"})`, then an INTEGER `clip` crop of the page raster via `page.screenshot({clip})` |
 | Fresh named volumes are created root-owned; `shots` runs as uid 1000 | `npm ci` dies with EACCES on the cache | `shots-cache-init` (root one-shot) chowns the volume; `shots` depends on `service_completed_successfully` |
 | The TurnScroller margin rail measures live scroll geometry | a few antialiased pixels jitter run-to-run in the far-left gutter | hidden by the capture stylesheet — a still carries no scroll position |
+| `demo/configs` is a TRACKED fixture and therefore mounted `:ro`, so the demo api genuinely reports `storage.writable: false` on `GET /api/config` — and NOTHING renders for it | a reader who expects that state to be visible will hunt for a broken capture | the console no longer has a read-only banner at all. It was removed from the product (`SettingsView.tsx`) because a deployment-level condition does not earn a persistent alert on every settings visit; the condition now surfaces only if a save is attempted, as the ordinary "Couldn't save settings" alert. So the demo stack needs NO config-writability workaround — do not add one, and in particular do not mount `demo/configs` read-write, which would let a `PATCH /api/config` silently rewrite a committed fixture |
+| Deleting that banner SHORTENED every Settings facet by ~106px | a shot whose fixed viewport height was tuned while the banner rendered starts showing whatever sat just below the fold — `settings-projects` began rendering the schema `projects` section's "No entries configured" empty state | the height is MEASURED, not chosen: read the two adjacent section rects in a browser at the shot's own width and cut between them (`settings-projects.spec.ts` records its own numbers). Nudging a height by eye re-opens it on the next layout change |
 
 ### Wiki + search traps
 
@@ -203,9 +219,19 @@ which is the intended staleness signal.
 ## Scope boundaries
 
 Local web screenshots only, via `make demo-*`, covering console + wiki + search +
-settings (21 committed `docs/assets/img` artifacts). Android capture (redroid +
-Maestro), video rendering (Playwright `recordVideo` + ffmpeg) and CI wiring are
-out of scope.
+settings. Android capture (redroid + Maestro), video rendering (Playwright
+`recordVideo` + ffmpeg) and CI wiring are out of scope.
+
+`make demo-frame` publishes what `shots.ts` captures, and nothing else — the two
+sets are exactly equal, because `docs/assets/img-src/` holds only what this
+stack generates. The published directory is WIDER than both: it also carries the
+hand-maintained statics the compositor never touches, which appear in no
+manifest at all (`demo/framer/CLAUDE.md` owns that rule). So the framer's
+manifest is NOT an inventory of `docs/assets/img/`; it speaks only for the
+derived half. **No count is written down here on purpose** — both moved twice in a single session, and a stale number in
+prose reads as authority. `shots.ts`'s `SHOTS` map and `artifacts.json` are each
+the only truth for their own half, and the framer's two-directional audit is
+what keeps them honest against the source tree.
 
 **Settings + plan-approval shots.** `settingsModels` reads `demo/configs/app.json`'s
 fictional `llm.example.com` base + is-set secret state. `settingsSecurity` is seeded
@@ -221,15 +247,71 @@ catch-all and mislabels a live session in both the list and its own header.
 Four non-console captures (Nextcloud Talk, Gmail, Home Assistant Assist ×2) have no
 service in this stack and need staged captures with invented identity data.
 
-⚠️ **Two CONSOLE hand-captures sit inside the console numbering where they read as
-pipeline output**: `mewbo-console-05-plugins.png` and `mewbo-console-06-projects.png`.
-No spec writes either — `shots.ts` declares 21 filenames while 23 files match the
-`mewbo-{console,wiki,search,settings}-*` convention, and those two are the difference.
-Both render a DELETED top NavBar and the deleted standalone `/plugins` and `/projects`
-routes, so they document UI a user cannot reach. Bringing them in needs seams that do
-not exist: no managed-project seed kind (`virtual_projects` is empty, so the Workspace
-facet renders blank), and the Plugins facet needs installed-plugin state plus a
-route-stubbed marketplace, a marketplace listing being a network fetch on a deliberately
-offline net. **Seeding managed projects also moves `ProjectLabel` on session rows, so it
-perturbs `01-front`/`02-tasks`** — the "3 shots move, not 1" hazard. Do it as its own
-change with its own byte-diff review, never folded into a re-render.
+✅ **`mewbo-console-05-plugins.png` and `mewbo-console-06-projects.png` were once
+hand-captures of UI a user cannot reach** — a deleted top NavBar and the retired
+standalone `/plugins` and `/projects` routes. Both are now produced by
+`settings-plugins.spec.ts` and `settings-projects.spec.ts` against the Settings
+facets that replaced those routes, under the same filenames, so no docs
+reference moved. The seams the old note said were missing now exist: managed
+projects seed through `MongoProjectStore`, and installed-plugin state comes from
+a read-only fixture install cache mounted at the api's default plugin path.
+
+### Managed projects ARE seedable, and they perturb nothing
+
+The `project` / `worktree` seed kinds (`models.py`) write core's own `VirtualProject`
+records through `MongoProjectStore`, so `virtual_projects` is no longer empty and the
+Workspace facet renders four acme workspaces plus one worktree. Both halves of that are
+the same deviation `_seed_api_key` makes and for the same intrinsic reason: `create_project`
+mints a `uuid4` and stamps the wall clock, and `create_worktree` shells out to `git
+worktree add` against a repo this container does not have, so neither can produce a
+byte-identical row and no contract seam takes a caller-supplied id. What is preserved is
+the SHAPE — each row is the dataclass `list_projects` reads back through `_to_project`.
+
+- **A worktree authors only its branch, parent and clock.** Its id
+  (`worktree_project_id`), directory (`WorktreeManager.worktree_path`) and name/description
+  (the phrasing `_persist_worktree` writes) are DERIVED, because none of them are facts
+  about the demo — they are what the store produces, and a bundle free to spell them
+  differently could portray a row the product never emits.
+- **⚠️ The recorded `ProjectLabel` perturbation does NOT happen — the earlier warning here
+  was a hypothesis, and it is wrong.** Moving a session row's label needs that session to
+  declare a project, and `ContextEvent` carries no `project` field at all: every seeded
+  `SessionSummary` comes back with no `context.project` and no `projects` array, so no row
+  resolves a label, and `HomeView`'s project filter (gated on `projectOptions.length > 0`,
+  derived from `session.projects`) never appears either. `01-front` and `02-tasks` are
+  byte-unchanged. Confirmed against the running demo api, not reasoned about.
+- **Every non-worktree card renders "Not a git repository, so worktrees are
+  unavailable."** `available` and the branch listing are computed by the API container
+  against a path that exists only in the fixture, and `.dockerignore` keeps `/app/.git`
+  out of the image, so NO path in that container is a git working tree. The line is
+  stable and honest rather than flaky — but a shot wanting a populated `WorktreesPanel`
+  first needs a real repo mounted into the api service.
+
+### Plugins state comes from a mounted install cache, not the seeder
+
+The Plugins facet reads NO store, so `demo/seeder` has nothing it could write. Both
+halves are filesystem reads the api performs per request, which is why the fixture is a
+directory (`demo/plugins/`) mounted into the api container rather than a bundle:
+
+- `GET /api/plugins` → `discover_installed_plugins(cfg.resolve_registry_paths())`, which
+  reads `installed_plugins.json` and follows each entry's `installPath` to a directory
+  holding `.claude-plugin/plugin.json`.
+- `GET /api/plugins/marketplace` → `discover_marketplace_plugins(cfg.resolve_marketplace_dirs())`,
+  which reads `<install_dir>/marketplaces/<name>/.claude-plugin/marketplace.json`.
+
+⚠️ **A marketplace listing is NOT a network fetch, and an earlier note here said it was.**
+`resolve_marketplace_dirs` clones only under `if sync and self.marketplaces:` — so with
+`plugins.marketplaces` empty (which is what `demo/configs/app.json` ships) the read is
+pure filesystem and nothing leaves the offline net. Measured on the demo api: 1.4 ms,
+and the container's only established socket is Mongo. Put a marketplace URL in that
+config list and the clone comes back; a route stub is not what suppresses it.
+
+| Fact | Consequence |
+|---|---|
+| `plugins.install_path` is empty, so `resolve_install_dir()` = `$MEWBO_HOME/plugins` = `/app/data/plugins` | the mount target is fixed, and the `installPath` values inside the registry are absolute and name it. Move the mount and every plugin silently disappears (a missing `installPath` is skipped with a debug log, not an error) |
+| `skills` in the wire payload is `len(pc.skill_dirs)`, and `discover_plugin_components` appends the PARENT `skills/` dir once | the chip reads `1 skill` for a plugin shipping fourteen. It is a has-skills flag wearing a count; `agents`/`commands` really are per-file counts |
+| the mount is `:ro` | Install/Uninstall would fail, deliberately — the demo portrays state, it does not exercise the mutation |
+| six plugins fill the 1650×1191 viewport to the fold | adding a seventh pushes the last card under it. The fixture set is sized to the pane, not to the catalog |
+
+Portrayed plugins are real, publicly-listed entries of Anthropic's official catalog,
+carrying their real descriptions with `author` omitted. Their component files are ours:
+short stand-ins that make the counts genuine rather than vendored third-party trees.

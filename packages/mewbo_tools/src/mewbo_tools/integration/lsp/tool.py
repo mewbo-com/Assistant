@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,13 @@ from mewbo_core.workspaces.workspace import (
 
 from mewbo_tools.core import resolve_safe_path
 from mewbo_tools.integration.lsp import get_lsp_manager, run_lsp_async
+
+# How long to let a language server publish diagnostics after opening a file.
+# A constant rather than a literal for the same reason as the passive-feedback
+# one in ``lsp/__init__.py``: a caller that must not wait lowers THIS, never
+# ``time.sleep`` on the stdlib module, which every other module and thread in
+# the process shares.
+DIAGNOSTICS_SETTLE_S = 2.0
 
 # Tool metadata schema exposed to the LLM
 LSP_TOOL_SCHEMA: dict[str, Any] = {
@@ -132,9 +140,7 @@ class LSPTool(AbstractTool):
         run_lsp_async(manager.open_file(client, file_path))
 
         # Give the server a moment to publish diagnostics
-        import time
-
-        time.sleep(2)
+        time.sleep(DIAGNOSTICS_SETTLE_S)
 
         diags = manager.get_cached_diagnostics(file_path)
         return MockSpeaker(content=self._format_diagnostics(file_path, diags, manager))

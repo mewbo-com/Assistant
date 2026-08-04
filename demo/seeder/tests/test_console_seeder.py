@@ -16,17 +16,21 @@ sees the fully-inlined event, per the repo's "meaningful tests" principle.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import mongomock
 import pytest
 from mewbo_core.session.session_store import SessionStore
 from mewbo_core.triggers.store import JsonTriggerStore
+from mewbo_core.workspaces.project_store import MongoProjectStore
 from mewbo_demo_seeder.models import (
     PlanDecisionEvent,
     PlanProposedEvent,
     SeedBundle,
+    SeedManagedProject,
     SeedSession,
+    SeedWorktree,
     UserQuestionAnsweredEvent,
     UserQuestionEvent,
     WidgetReadyEvent,
@@ -341,4 +345,271 @@ def test_api_keys_without_a_key_store_fail_loudly(tmp_path: Path) -> None:
         t0=_T0,
     )
     with pytest.raises(ValueError, match="no key_store was injected"):
+        seeder.seed()
+
+
+# ── Managed projects (the Workspace settings facet) ────────────────────────
+
+_LEDGER_SYNC = "4f8b2c17-63ae-4d90-9c15-2a7e08b3d641"
+_SHIPMENT_ROUTER = "a1c94d5e-70f2-4b83-8e6a-1d40c9b752fe"
+_WORKTREE_BRANCH = "mewbo/main-9f2c1a"
+
+
+def _project_bundle(*projects: dict) -> dict:
+    """A minimal but complete bundle carrying only the given project rows."""
+    return {
+        "sessions": [
+            {
+                "id": "sess-1",
+                "title": "A session",
+                "model": "claude-sonnet-5",
+                "offset_seconds": -60,
+                "events": [
+                    {"kind": "user", "at_seconds": 0, "text": "hi"},
+                    {"kind": "completion", "at_seconds": 1, "task_result": "done"},
+                ],
+            }
+        ],
+        "projects": list(projects),
+    }
+
+
+def test_managed_project_builds_the_stores_own_record() -> None:
+    """``to_project`` returns core's ``VirtualProject`` with rebased ISO stamps."""
+    project = SeedManagedProject(
+        id=_LEDGER_SYNC,
+        name="ledger-sync",
+        description="Nightly reconciliation.",
+        path="/workspaces/acme/ledger-sync",
+        created_at_offset=-86400,
+        updated_at_offset=-3600,
+    )
+    record = project.to_project(_T0, parent=None)
+
+    assert record.project_id == _LEDGER_SYNC
+    assert record.path == "/workspaces/acme/ledger-sync"
+    assert record.created_at == (_T0 - timedelta(seconds=86400)).isoformat()
+    assert record.updated_at == (_T0 - timedelta(seconds=3600)).isoformat()
+    # Fixed, not authorable: the pane's payload carries neither, so no shot
+    # could ever disagree with them.
+    assert record.path_source == "provided"
+    assert record.folder_created is True
+    assert record.is_worktree is False
+    assert record.parent_project_id is None
+
+
+def test_an_unedited_project_reports_updated_equal_to_created() -> None:
+    """Omitting ``updated_at_offset`` means "never edited", not "edited at T0"."""
+    record = SeedManagedProject(
+        id=_LEDGER_SYNC, name="n", path="/p", created_at_offset=-600
+    ).to_project(_T0, parent=None)
+    assert record.updated_at == record.created_at
+
+
+def test_worktree_derives_id_path_and_prose_from_its_parent() -> None:
+    """Every worktree field except the branch comes from core's own rules."""
+    parent = SeedManagedProject(
+        id=_SHIPMENT_ROUTER,
+        name="shipment-router",
+        path="/workspaces/acme/shipment-router",
+        created_at_offset=-86400,
+    ).to_project(_T0, parent=None)
+    worktree = SeedWorktree(
+        parent=_SHIPMENT_ROUTER, branch=_WORKTREE_BRANCH, created_at_offset=-3600
+    )
+    record = worktree.to_project(_T0, parent=parent)
+
+    assert record.project_id == f"wt:{_SHIPMENT_ROUTER}:mewbo-main-9f2c1a"
+    assert record.project_id == worktree.project_id
+    assert record.path == (
+        "/workspaces/acme/shipment-router/.mewbo/worktrees/mewbo-main-9f2c1a"
+    )
+    # The phrasing ``ProjectStoreBase._persist_worktree`` writes, not a bundle
+    # string — a row the product cannot emit is a wrong screenshot.
+    assert record.name == _WORKTREE_BRANCH
+    assert record.description == f"Worktree on branch '{_WORKTREE_BRANCH}'"
+    assert record.is_worktree is True
+    assert record.branch == _WORKTREE_BRANCH
+    assert record.parent_project_id == _SHIPMENT_ROUTER
+
+
+def test_worktree_without_its_parent_record_fails_loudly() -> None:
+    """There is no honest path for a worktree whose parent record is missing."""
+    worktree = SeedWorktree(
+        parent=_SHIPMENT_ROUTER, branch=_WORKTREE_BRANCH, created_at_offset=-60
+    )
+    with pytest.raises(ValueError, match="needs its parent project record"):
+        worktree.to_project(_T0, parent=None)
+
+
+def test_worktree_with_an_unknown_parent_is_rejected_at_load() -> None:
+    """An orphan worktree renders a bare id where the parent's name belongs."""
+    with pytest.raises(ValidationError, match="references unknown parent project"):
+        SeedBundle.model_validate(
+            _project_bundle(
+                {
+                    "kind": "worktree",
+                    "parent": "nope",
+                    "branch": _WORKTREE_BRANCH,
+                    "created_at_offset": -60,
+                }
+            )
+        )
+
+
+def test_a_branch_with_no_slug_safe_characters_is_rejected_at_load() -> None:
+    """``slugify_branch`` names the directory AND half the id — fail here, not mid-seed."""
+    with pytest.raises(ValidationError):
+        SeedWorktree(parent=_SHIPMENT_ROUTER, branch="///", created_at_offset=-60)
+
+
+def test_an_edit_cannot_predate_the_creation_it_edits() -> None:
+    """A backwards ``updated_at`` would render a row edited before it existed."""
+    with pytest.raises(ValidationError, match="precedes"):
+        SeedManagedProject(
+            id=_LEDGER_SYNC,
+            name="n",
+            path="/p",
+            created_at_offset=-600,
+            updated_at_offset=-6000,
+        )
+
+
+def test_write_order_puts_parents_first_whatever_the_bundle_order() -> None:
+    """A worktree authored beside its parent must still be written after it."""
+    bundle = SeedBundle.model_validate(
+        _project_bundle(
+            {
+                "kind": "worktree",
+                "parent": _SHIPMENT_ROUTER,
+                "branch": _WORKTREE_BRANCH,
+                "created_at_offset": -60,
+            },
+            {
+                "kind": "project",
+                "id": _SHIPMENT_ROUTER,
+                "name": "shipment-router",
+                "path": "/workspaces/acme/shipment-router",
+                "created_at_offset": -600,
+            },
+        )
+    )
+    assert [p.parent_id for p in bundle.projects_in_write_order] == [
+        None,
+        _SHIPMENT_ROUTER,
+    ]
+
+
+def test_bundle_carries_four_workspaces_and_one_worktree(bundle: SeedBundle) -> None:
+    """The committed bundle populates the Workspace facet with a worktree row.
+
+    A worktree exercises the console's ``ProjectLabel`` worktree path (parent
+    repo name + branch), which four identical rows never would.
+    """
+    tops = [p for p in bundle.projects if isinstance(p, SeedManagedProject)]
+    worktrees = [p for p in bundle.projects if isinstance(p, SeedWorktree)]
+    assert len(tops) == 4
+    assert len(worktrees) == 1
+    assert worktrees[0].parent == _SHIPMENT_ROUTER
+    # Wholly fictional, and NOT a relabelled copy of a wiki-gallery project.
+    assert [p.name for p in tops] == [
+        "ledger-sync",
+        "shipment-router",
+        "storefront-checkout",
+        "depot-telemetry",
+    ]
+    assert all(p.path.startswith("/workspaces/acme/") for p in tops)
+    assert all(p.description for p in tops)
+
+
+# ── DemoSeeder round-trip for projects (mongomock-backed project store) ────
+
+
+@pytest.fixture
+def project_store(monkeypatch: pytest.MonkeyPatch) -> MongoProjectStore:
+    """A real ``MongoProjectStore`` over mongomock.
+
+    Unlike the wiki/search stores this one builds its own ``MongoClient`` from a
+    uri, so the injection point is ``pymongo.MongoClient`` itself — the same
+    monkeypatch the session/trigger stores need.
+    """
+    monkeypatch.setattr("pymongo.MongoClient", mongomock.MongoClient)
+    return MongoProjectStore("mongodb://demo-seeder-test", "test_projects")
+
+
+def _seed_projects(
+    tmp_path: Path, store: MongoProjectStore, raw: dict
+) -> None:
+    """Drive the REAL ``DemoSeeder.seed()`` for a project-carrying bundle.
+
+    Drops ``api_keys`` so these cases exercise the project leg alone — the
+    seeder refuses a key-carrying bundle with no key store, which
+    ``test_api_keys_without_a_key_store_fail_loudly`` already pins.
+    """
+    raw = {k: v for k, v in raw.items() if k != "api_keys"}
+    DemoSeeder(
+        session_store=SessionStore(root_dir=str(tmp_path / "sessions")),
+        trigger_store=JsonTriggerStore(data_file=str(tmp_path / "triggers.json")),
+        bundle=SeedBundle.model_validate(raw),
+        t0=_T0,
+        project_store=store,
+    ).seed()
+
+
+def test_seed_is_readable_through_the_stores_own_list_projects(
+    tmp_path: Path, project_store: MongoProjectStore
+) -> None:
+    """The caller's read seam sees every seeded row, worktree linkage included."""
+    _seed_projects(
+        tmp_path,
+        project_store,
+        json.loads(_BUNDLE_PATH.read_text(encoding="utf-8")),
+    )
+
+    projects = project_store.list_projects()
+    assert len(projects) == 5
+    by_id = {p.project_id: p for p in projects}
+    ledger = by_id[_LEDGER_SYNC]
+    assert ledger.name == "ledger-sync"
+    assert ledger.path == "/workspaces/acme/ledger-sync"
+    assert ledger.created_at == (_T0 - timedelta(seconds=5184000)).isoformat()
+
+    # The worktree resolves through the store's own worktree seam, which is
+    # what ``GET /api/projects`` and the console's ProjectLabel both read.
+    worktrees = project_store.list_worktrees(_SHIPMENT_ROUTER)
+    assert [w.branch for w in worktrees] == [_WORKTREE_BRANCH]
+    assert worktrees[0].parent_project_id == _SHIPMENT_ROUTER
+    assert project_store.get_project(worktrees[0].project_id) is not None
+
+
+def test_reseeding_projects_is_byte_identical(
+    tmp_path: Path, project_store: MongoProjectStore
+) -> None:
+    """A re-seed replaces by id rather than duplicating — the zero-diff contract."""
+    raw = json.loads(_BUNDLE_PATH.read_text(encoding="utf-8"))
+    _seed_projects(tmp_path, project_store, raw)
+    first = [p.__dict__ for p in project_store.list_projects()]
+    _seed_projects(tmp_path, project_store, raw)
+    assert [p.__dict__ for p in project_store.list_projects()] == first
+
+
+def test_projects_without_a_project_store_fail_loudly(tmp_path: Path) -> None:
+    """A silent skip would render the Workspace facet's EMPTY state in the shot."""
+    seeder = DemoSeeder(
+        session_store=SessionStore(root_dir=str(tmp_path / "sessions")),
+        trigger_store=JsonTriggerStore(data_file=str(tmp_path / "triggers.json")),
+        bundle=SeedBundle.model_validate(
+            _project_bundle(
+                {
+                    "kind": "project",
+                    "id": _LEDGER_SYNC,
+                    "name": "ledger-sync",
+                    "path": "/workspaces/acme/ledger-sync",
+                    "created_at_offset": -600,
+                }
+            )
+        ),
+        t0=_T0,
+    )
+    with pytest.raises(ValueError, match="no project_store was injected"):
         seeder.seed()

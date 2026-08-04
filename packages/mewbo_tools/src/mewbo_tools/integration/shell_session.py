@@ -209,13 +209,22 @@ class ShellSession:
         cwd: str,
         *,
         scope: ShellScope | None = None,
+        clock: Callable[[], float] = time.time,
     ) -> None:
-        """Spawn the command described by *args* in *cwd* and start draining it."""
+        """Spawn the command described by *args* in *cwd* and start draining it.
+
+        *clock* is the source of the idle-tracking timestamps only — the store
+        that owns this session passes its own, so a TTL can be reached by
+        advancing an injected clock instead of waiting out a real one. The
+        read deadline keeps its own ``time.monotonic``: that one bounds a wait
+        on a real process, which no injected clock can hurry.
+        """
         self.shell_id = shell_id
         self.command = args.command
         self.cwd = cwd
         self.tty = args.tty
-        self.started_at = time.time()
+        self._clock = clock
+        self.started_at = clock()
         self.last_used = self.started_at
         self.buffer = OutputBuffer()
         self._lock = threading.Lock()
@@ -482,7 +491,7 @@ class ShellSession:
 
     def touch(self) -> None:
         """Mark the session as recently used, deferring its idle reaping."""
-        self.last_used = time.time()
+        self.last_used = self._clock()
 
     def describe(self) -> dict[str, object]:
         """A listing row: identity and liveness, never the output itself."""
@@ -493,7 +502,7 @@ class ShellSession:
             "tty": self.tty,
             "status": self.status,
             "exit_code": self.exit_code,
-            "running_for_s": round(time.time() - self.started_at, 1),
+            "running_for_s": round(self._clock() - self.started_at, 1),
         }
 
 
@@ -515,9 +524,19 @@ class ShellSessionStore:
         *,
         max_sessions: int = MAX_SESSIONS,
         idle_ttl_s: float = IDLE_TTL_S,
+        clock: Callable[[], float] = time.time,
     ) -> None:
-        """Create an empty store bounded by *max_sessions* and *idle_ttl_s*."""
+        """Create an empty store bounded by *max_sessions* and *idle_ttl_s*.
+
+        *clock* is injected rather than read from the wall, and it is handed
+        DOWN to every session this store creates — the TTL compares a store
+        reading against a session's own ``last_used``, so a caller advancing
+        one of the two would be comparing readings from different clocks. One
+        clock for both is what lets a TTL case reach its deadline by setting an
+        instant rather than waiting out a real one.
+        """
         self._sessions: dict[str, ShellSession] = {}
+        self._clock = clock
         self._lock = threading.RLock()
         self._seq = 0
         self._max_sessions = max_sessions
@@ -537,7 +556,7 @@ class ShellSessionStore:
         is a bound that can never be reached, so it never evicted at all.
         """
         with self._lock:
-            now = time.time()
+            now = self._clock()
             for session in list(self._sessions.values()):
                 if session.status == "running" and now - session.last_used > self._idle_ttl_s:
                     session.kill()
@@ -582,7 +601,7 @@ class ShellSessionStore:
                     f"— list them with {{'operation': 'list'}} — then retry."
                 )
             shell_id = self._next_id()
-        session = ShellSession(shell_id, args, cwd, scope=scope)
+        session = ShellSession(shell_id, args, cwd, scope=scope, clock=self._clock)
         with self._lock:
             self._sessions[shell_id] = session
         return session

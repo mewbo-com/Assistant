@@ -263,11 +263,57 @@ project at all, and opening one reveals exactly that project plus its own `allow
   every one of those files readable by its project path. The cure is not to bind-mount the source
   over `/app`. **Do not "fix" it with inode-identity denial**: that would deny a legitimate project
   mount, and a project mount must behave like any other project.
+- **The aliasing is now REPORTED at boot, because it cannot be denied away.**
+  `integration/runtime_aliasing.py:RuntimeAliasProbe` compares `(st_dev, st_ino)` for every
+  directory within a bounded depth of the harness roots against the same under each configured
+  project root, and logs both names of any directory that is the same file. `backend.py` calls it
+  at import (import IS startup there), best-effort, `MEWBO_BOOT_ALIAS_PROBE=0` to opt out.
+  **Measured on the deployed stack: 361 ms over 8 project roots + 3 harness roots, finding 4 real
+  aliases** — `mewbo_core`, `mewbo_graph`, `mewbo_api` and `configs`. Depth 4 because the deployed
+  shape mounts `<root>/packages/<pkg>/src/<pkg>`; an unbounded walk of a project tree is not a
+  startup cost anyone should pay. It derives its harness roots from `ShellScope.harness_roots` and
+  never a second walk, so it can only report on roots something actually denies. **It fixes
+  nothing and is not meant to** — the cure is topology, and the probe's whole value is that the
+  bypass stops being silent. Its two directory readers plus the walkability predicate are injected
+  fields; leaving `os.path.isdir` inline made the walk untestable without real bind mounts, which
+  is a privilege a test has no business holding.
 - **Never deny a path that CONTAINS the runtime.** Denying `/app` (which holds `/app/.venv` on the
   deployed shape) leaves Python unable to start — measured, not assumed. `ShellScope._survivable`
   refuses any denial covering `sys.prefix`/`sys.base_prefix` and refuses the filesystem root
   outright, logging a warning rather than silently honouring it. Operators name subdirectories
   (`/app/packages`, `/app/configs`), never the runtime's own root.
+- **A grant that cannot be added narrows the scope; it must NEVER remove it.** `_create_ruleset`
+  used to let any `OSError` from any single path close the fd, log one WARNING and return `None` —
+  and `enforced()` reads `None` as "no `preexec_fn`", so one lost grant spawned a **completely
+  unconfined** shell. Reproduced deterministically: a granted path removed between the `isdir`
+  filter and the open turned `Permission denied` into a leaked secret, on a run that otherwise
+  looked successful. It is reachable in production from any transient path error — a directory
+  removed by another process, a mount going away, a permissions flap, an fd limit. The cure is a
+  per-PATH `try/except`: drop that path, keep the ruleset. That direction is safe by construction,
+  because an ungranted path is simply unreachable — the scope can only get tighter.
+- **`_create_ruleset` returns a `RulesetBuild`, not an `int | None`, and the type IS the fix.**
+  One sentinel for "this kernel enforces nothing" and "the control failed" is what allowed the
+  second to be read as the first. Three outcomes now, each distinguishable BY THE CALLER rather
+  than by a log line: no Landlock → `fd=None`, spawn as before (unchanged, deliberate); one grant
+  lost → `fd` plus `ungranted`, confined and narrower; ruleset refused on a kernel that HAS
+  Landlock → `SandboxUnavailableError`. **A log sink is not a return channel** — the process that
+  must act on the difference is the one that never learns of it.
+- **`SandboxUnavailableError` subclasses `OSError` deliberately.** Every spawn seam already wraps
+  `Popen` in `except OSError` to build its own graceful envelope (`ShellSession` → `_start_error`).
+  A `RuntimeError` sails past all of them, so the refusal would surface as a traceback out of a
+  constructor instead of as a legible refusal — the one place the caller would not receive it.
+  `apply_to_self` catches it and returns `False`, keeping the servers-still-launch contract.
+- **The `isdir` pre-filter in `grants()` stays, and it is a CORRECTNESS gate, not a security one.**
+  It looks like the TOCTOU window and it is — but that window stopped being load-bearing once a
+  lost grant costs a path instead of the sandbox. Removing it would push every regular file into
+  the add-rule path, where a directory-only access bit is an EINVAL. A harmless race beats a
+  guaranteed failure.
+- **A control's exception handler is where fail-open hides.** The same shape sat in
+  `harness_roots`: the config-directory derivation was wrapped in `except Exception` logging at
+  **DEBUG**, so a failure silently dropped the directory holding the API keys out of the deny set
+  with no trace at the default level. Now WARNING, and it names the consequence. Left non-fatal on
+  purpose — it is one component of a set, the packages/apps roots still apply, and the config
+  layout is deployment-specific enough that refusing would fail shells that were never in danger.
 - **The compile's one real limitation:** a NEW entry created directly inside an EXPANDED ancestor
   is invisible without a rebuild, since the ruleset is a `listdir` snapshot at spawn time. Rebuilt
   per spawn, so the window is one command wide. The default deny set never hits this; it would

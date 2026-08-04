@@ -180,15 +180,24 @@ export function DiagramZoom({ diagramId, onClose }: DiagramZoomProps) {
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerUp}
           style={{
+            // The SAME surface the inline card uses, so a diagram is read
+            // against one colour whether it is in the page or expanded.
+            // Separate backdrops are what let the expanded state drift out
+            // of contrast unnoticed.
+            backgroundColor: "var(--diagram-surface)",
+            // Orientation, not content: the grid says the stage is
+            // draggable. At full strength it competed with the diagram in
+            // front of it, so it is kept faint enough to register only in
+            // empty space.
             backgroundImage:
-              "radial-gradient(circle, hsl(var(--border-strong)) 1px, transparent 1px)",
-            backgroundSize: "20px 20px",
+              "radial-gradient(circle, color-mix(in srgb, var(--diagram-line) 22%, transparent) 1px, transparent 1px)",
+            backgroundSize: "22px 22px",
             cursor: dragging ? "grabbing" : "grab",
           }}
         >
           <div
             ref={innerRef}
-            className="absolute left-1/2 top-1/2 [&_svg]:max-w-none [&_svg]:h-auto"
+            className="mermaid-surface absolute left-1/2 top-1/2 [&_svg]:max-w-none [&_svg]:h-auto"
             style={{
               transform: `translate(calc(-50% + ${pos.x}px), calc(-50% + ${pos.y}px)) scale(${scale})`,
               transformOrigin: "center",

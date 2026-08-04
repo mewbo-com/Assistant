@@ -28,6 +28,7 @@ import random
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Protocol, runtime_checkable
 
@@ -188,8 +189,16 @@ class Embedder:
         requests_per_minute: int | None = None,
         tokens_per_minute: int | None = None,
         max_retries: int | None = None,
+        sleeper: Callable[[float], None] | None = None,
     ) -> None:
-        """Construct the Embedder from config + kwargs."""
+        """Construct the Embedder from config + kwargs.
+
+        ``sleeper`` is the retry wait, injected as a collaborator so a caller
+        observing the backoff observes only THIS object's waiting. Patching
+        ``time.sleep`` on the stdlib module instead reaches every module and
+        every thread in the process: the observation picks up unrelated
+        waiting, and neutering it turns any concurrent poll loop into a spin.
+        """
         cfg = get_config()
         raw_model = model or get_config_value(
             "wiki", "embedding", "model", default="openai/text-embedding-3-small"
@@ -212,6 +221,7 @@ class Embedder:
             if max_retries is not None
             else int(get_config_value("wiki", "embedding", "max_retries", default=5))
         )
+        self._sleep = sleeper or time.sleep
         self._api_base = cfg.llm.api_base or None
         self._api_key = cfg.llm.api_key or "missing"
         self._pacer = _EmbeddingPacer(
@@ -353,7 +363,7 @@ class Embedder:
                     "Embedding request rate-limited, retrying "
                     f"(attempt {attempt}/{self._max_retries}, waiting {delay:.1f}s)"
                 )
-                time.sleep(delay)
+                self._sleep(delay)
                 continue
             except Exception:
                 self._pacer.release()

@@ -1,19 +1,19 @@
 # Token Usage & Caching
 
-Mewbo tracks token consumption for every session, splits it between the root agent and any sub-agents it spawns, and surfaces the numbers in the web console, the CLI, and the REST API. Prompt caching slashes the per-turn cost of re-sending system prompts and tool schemas. It auto-enables for capable providers (Anthropic, OpenAI, Bedrock) with no configuration.
+## See what a session costs
+
+Every session's token consumption is tracked and reported, split between the root agent and any sub-agents it spawns, in the web console, the CLI and the REST API. [Prompt caching](#prompt-caching) cuts what repeat turns cost.
 
 ---
 
 ## The context window bar (console)
 
-The context window bar sits in the console navbar and in each session's detail header. It shows how full the root agent's context window is right now.
+The bar sits in the console navbar and in each session's detail header, showing how full the root agent's context window is right now.
 
 ```
 ctx ████░░░░░░░░ 42k/200k
          ▲ reserved-for-compact
 ```
-
-The bar has three segments:
 
 | Segment | Color | Meaning |
 |---------|-------|---------|
@@ -21,41 +21,35 @@ The bar has three segments:
 | Reserved | Accent | Buffer reserved for the auto-compact threshold |
 | Available | Background | Remaining usable space |
 
-The fill color escalates as the window fills up:
-
 | Remaining | Fill color |
 |-----------|-----------|
 | > 20% | Foreground (neutral) |
 | 10%–20% | Primary (warning) |
 | < 10% | Destructive (critical) |
 
-Click the bar to open a popover with a full breakdown. The popover shows current context pressure, peak pressure, billed totals, cache reads/writes, reasoning tokens, and the running compaction count.
+Click the bar for a popover carrying the full breakdown. Current and peak context pressure, billed totals, cache reads and writes, reasoning tokens, and the running compaction count.
 
 ---
 
 ## Per-turn token chip
 
-Each turn in the session timeline carries a compact token chip. It shows the subtotals for the most recent root LLM call:
+Each turn in the session timeline carries a token chip with the subtotals for the most recent root LLM call.
 
 | Field | Description |
 |-------|-------------|
-| Input tokens | Raw prompt size billed by the provider |
+| Input tokens | Prompt size billed by the provider |
 | Output tokens | Response tokens billed by the provider |
-| Cache read tokens | Tokens served from the provider's prompt cache (billed at a discount) |
-| Cache write tokens | Tokens written to the provider's prompt cache this turn |
-| Reasoning tokens | Hidden thinking tokens from extended-thinking / o1-class models |
+| Cache read tokens | Served from the provider's prompt cache, at a discount |
+| Cache write tokens | Written to the provider's prompt cache this turn |
+| Reasoning tokens | Hidden thinking tokens from extended-thinking models |
 
-Cache read and write tokens are zero on models that do not support prompt caching. Reasoning tokens are zero on non-thinking models.
+Both cache fields read zero on a model without prompt caching, and reasoning tokens read zero without extended thinking.
 
 ---
 
 ## Root vs sub-agent split
 
-Mewbo tracks usage separately for the root agent and any sub-agents it spawns. This lets you see at a glance whether token pressure is coming from the orchestrating agent or from the workers it delegated to. A session that spawns many sub-agents will typically show low root pressure alongside high combined sub-agent totals.
-
-The console footer and the context-bar popover both show root and sub-agent counts in parallel. The API returns them as separate fields so you can build dashboards that split the two.
-
-The console shows current context pressure; the API response exposes the full breakdown (current, peak, and cumulative billable totals) for dashboards and cost tracking.
+The split tells you whether token pressure comes from the orchestrator or from the workers under it. A session that spawns many sub-agents typically shows low root pressure alongside a high combined sub-agent total. The console footer and the context bar popover show both counts side by side, and the [usage API](#usage-api) breaks them out as separate fields.
 
 ---
 
@@ -66,10 +60,10 @@ GET /api/sessions/{session_id}/usage
 X-Api-Key: <your-token>
 ```
 
-Returns the full usage breakdown as JSON. All token fields are integers; zero for sessions or events that predate cache tracking.
+All token fields are integers, and read zero for sessions or events that predate cache tracking.
 
 > [!NOTE] Counts are only as good as what the provider reports
-> The rollup is derived from the `llm_call_end` events in the session transcript, so a field the provider never reported reads `0`. Cache and reasoning counts in particular are absent on models that do not report them, and the values in the example below are illustrative rather than measured. Where you need a second source, the tracing backend (Langfuse) carries the same per-call figures.
+> The rollup comes from the `llm_call_end` events in the transcript, so a field the provider never reported reads `0`. The example below is illustrative rather than measured. Langfuse carries the same per-call figures if you need a second source.
 
 ```json
 {
@@ -110,31 +104,22 @@ Returns the full usage breakdown as JSON. All token fields are integers; zero fo
 }
 ```
 
-Key fields:
+The names that do not read literally.
 
 | Field | Description |
 |-------|-------------|
 | `root_last_input_tokens` | Most recent root prompt size. Drives the context bar fill. |
 | `root_utilization` | `root_last_input_tokens / root_max_input_tokens` |
-| `tokens_until_compact` | Tokens remaining before auto-compact fires |
 | `compact_threshold` | The configured `token_budget.auto_compact_threshold` fraction |
-| `root_peak_input_tokens` | Largest input seen on any root call this session |
-| `sub_peak_input_tokens` | Sum of per-sub-agent peak inputs |
-| `*_input_tokens_billed` | Cumulative billable input (sum across all calls, includes cached portions) |
-| `*_cache_read_tokens` | Tokens served from cache |
-| `*_cache_creation_tokens` | Tokens written to cache |
-| `*_reasoning_tokens` | Hidden thinking tokens billed as output |
-| `compaction_tokens_saved` | Cumulative tokens freed by all compaction runs |
+| `sub_peak_input_tokens` | Sum of per-sub-agent peak inputs, not one worst case |
+| `*_input_tokens_billed` | Cumulative billable input across all calls, cached portions included |
+| `*_reasoning_tokens` | Hidden thinking tokens, billed as output |
 
 ---
 
 ## CLI usage display
 
-`/tokens` and `/budget` are aliases. They print the same budget table for the current session:
-
-```
-/tokens
-```
+`/tokens` and `/budget` are aliases. Both print the current session's budget table.
 
 ```
 Token Budget
@@ -151,13 +136,13 @@ Token Budget
 └──────────────────────────┴──────────┘
 ```
 
-These values use the provider-reported input token count from the most recent LLM response when available, falling back to a local estimate for sessions that have not yet made a call.
+A session that has not yet made a call falls back to a local estimate.
 
 ---
 
 ## Prompt caching
 
-Mewbo auto-enables provider prompt caching when the model reports it supports caching. No configuration is required. If you are on a supported model, caching is already on.
+Caching is on already if your model supports it. Nothing to configure.
 
 ### Supported providers
 
@@ -167,28 +152,28 @@ Mewbo auto-enables provider prompt caching when the model reports it supports ca
 | OpenAI | Automatic prefix caching | Cache reads billed at 0.5× input |
 | AWS Bedrock | TTL-based caching | Provider-specific |
 
-The per-provider syntax differences are handled transparently. You interact with one consistent usage API regardless of which provider is behind it.
+One usage API covers all three, so the syntax differences between them never reach you.
 
 ### Proxy models
 
-When using a proxy (`llm.api_base` is set), the proxy must advertise model capabilities for caching to activate. See the architecture page for details. If the proxy does not report caching support, Mewbo conservatively leaves caching disabled for that model rather than risk malformed requests.
+A proxy set through `llm.api_base` has to advertise model capabilities for caching to activate. One that does not report caching support leaves it disabled for that model rather than risking malformed requests. [Token tracking](core-orchestration.md#token-tracking) covers what the proxy must expose.
 
 ### Seeing cache savings
 
-Cache savings appear immediately in the per-turn chip as **cache read** tokens. Accumulated session savings are visible in the context window bar popover under **Cache reads** (with a tooltip noting the per-provider billing rate). The [GET /api/sessions/{session_id}/usage](endpoint:GET /api/sessions/{session_id}/usage) endpoint surfaces `total_cache_read_tokens` for programmatic access.
+Per-turn savings land in the token chip as cache read tokens, and the running session total in the context bar popover under Cache reads. Programs read `total_cache_read_tokens` from [GET /api/sessions/{session_id}/usage](endpoint:GET /api/sessions/{session_id}/usage).
 
 ---
 
 ## Configuration
 
+These two decide the denominator every percentage on this page is measured against.
+
 | Key | Default | Description |
 |-----|---------|-------------|
-| `token_budget.auto_compact_threshold` | `0.8` | Context fill fraction (0.0–1.0) at which auto-compact fires. |
 | `token_budget.default_context_window` | `128000` | Fallback window size when LiteLLM doesn't know the model. |
 | `token_budget.model_context_windows` | `{}` | Per-model overrides (map of model name → token count). Use to cap below the real max or for proxy-only models. |
-| `llm.compact_models` | `["default"]` | Priority-ordered model list for compaction. |
 
-See [configuration.md](configuration.md#token-budget) for the full schema.
+[Compaction](features-compaction.md#configuration) carries the threshold and summarisation keys, and [configuration.md](configuration.md#token-budget) has the full schema.
 
 > [!NOTE] How it works internally
 > See [Architecture Overview → Token tracking](core-orchestration.md#token-tracking).

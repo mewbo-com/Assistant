@@ -26,6 +26,7 @@ from mewbo_core.session.event_cursor import EventCursor
 from mewbo_core.session.session_store_mongo import MongoSessionStore
 from mewbo_core.triggers.spec import CronTrigger, WebhookTrigger
 from mewbo_core.triggers.store_mongo import MongoTriggerStore
+from mewbo_core.workspaces.project_store import MongoProjectStore
 from mewbo_demo_seeder.models import (
     FileEditToolEvent,
     FileReadToolEvent,
@@ -84,6 +85,47 @@ def key_store():
     """A MongoKeyStore backed by mongomock (canonical bundle declares api_keys)."""
     with patch("mewbo_core.secrets.key_store_mongo.MongoClient", mongomock.MongoClient):
         return MongoKeyStore(uri="mongodb://localhost:27017", database="test_demo")
+
+
+@pytest.fixture
+def project_store(monkeypatch):
+    """A MongoProjectStore backed by mongomock (canonical bundle declares projects).
+
+    This store builds its own client from a uri rather than taking one, so the
+    injection point is ``pymongo.MongoClient`` itself rather than a name bound
+    in the store's module.
+    """
+    monkeypatch.setattr("pymongo.MongoClient", mongomock.MongoClient)
+    return MongoProjectStore("mongodb://localhost:27017", "test_demo")
+
+
+@pytest.fixture
+def canonical_bundle() -> SeedBundle:
+    """``console-poc.json`` through the Pydantic trust boundary."""
+    return SeedBundle.model_validate(json.loads(_BUNDLE_PATH.read_text()))
+
+
+@pytest.fixture
+def canonical_seeder(
+    session_store, trigger_store, key_store, project_store, canonical_bundle
+) -> DemoSeeder:
+    """A seeder over the canonical bundle with EVERY optional store injected.
+
+    The whole-bundle cases go through this one seam on purpose. ``seed()``
+    refuses a bundle declaring a collection whose store is missing, so a bundle
+    that grows a new kind breaks every test constructing its own seeder — which
+    is how the projects leg came to fail here after the bundle gained projects
+    but these cases kept passing only sessions, triggers and keys. Injecting in
+    one place means the next kind is one edit, not one per test.
+    """
+    return DemoSeeder(
+        session_store=session_store,
+        trigger_store=trigger_store,
+        bundle=canonical_bundle,
+        t0=T0,
+        key_store=key_store,
+        project_store=project_store,
+    )
 
 
 def _minimal_bundle() -> dict:
@@ -381,16 +423,9 @@ def test_triggers_persist_as_concrete_kinds(session_store, trigger_store):
     assert trig.created_at == T0 + timedelta(seconds=-300)
 
 
-def test_webhook_trigger_from_canonical_bundle(session_store, trigger_store, key_store):
+def test_webhook_trigger_from_canonical_bundle(trigger_store, canonical_seeder):
     """The canonical bundle's webhook trigger seeds with its pinned secret."""
-    bundle = SeedBundle.model_validate(json.loads(_BUNDLE_PATH.read_text()))
-    DemoSeeder(
-        session_store=session_store,
-        trigger_store=trigger_store,
-        bundle=bundle,
-        t0=T0,
-        key_store=key_store,
-    ).seed()
+    canonical_seeder.seed()
 
     trig = trigger_store.get("demo-trigger-ci-failure-watcher")
     assert isinstance(trig, WebhookTrigger)
@@ -481,18 +516,21 @@ def test_canonical_session_a_edit_diff_is_expanded():
     assert len(changed) > 8
 
 
-def test_canonical_bundle_full_seed(session_store, trigger_store, key_store):
-    """The whole canonical bundle seeds a fully-seated set of sessions + triggers."""
-    bundle = SeedBundle.model_validate(json.loads(_BUNDLE_PATH.read_text()))
-    report = DemoSeeder(
-        session_store=session_store,
-        trigger_store=trigger_store,
-        bundle=bundle,
-        t0=T0,
-        key_store=key_store,
-    ).seed()
+def test_canonical_bundle_full_seed(session_store, canonical_bundle, canonical_seeder):
+    """The whole canonical bundle seeds every collection it declares.
+
+    The report is asserted against the bundle COLLECTION BY COLLECTION rather
+    than on sessions and triggers alone. A leg the seeder skipped — because a
+    store went missing, or because a future guard degraded from a raise to a
+    silent continue — would otherwise seed nothing and stay green here, and the
+    first sign of it would be a facet rendering its empty state in a capture.
+    """
+    bundle = canonical_bundle
+    report = canonical_seeder.seed()
     assert len(report.sessions) == len(bundle.sessions) >= 12
     assert len(report.triggers) == len(bundle.triggers) >= 2
+    assert len(report.api_keys) == len(bundle.api_keys) >= 1
+    assert len(report.projects) == len(bundle.projects) >= 1
 
     runtime = SessionRuntime(session_store=session_store)
     summaries = runtime.list_sessions()

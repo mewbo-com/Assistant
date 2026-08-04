@@ -186,6 +186,7 @@ Read the deepest file that applies before editing. Every child carries `> ↑ pa
 | Aura Android client (Compose, orb overlay, redroid dev loop) — indexes its own per-package children | `apps/mewbo_aura/CLAUDE.md` |
 | Home Assistant conversation agent | `apps/mewbo_ha_conversation/CLAUDE.md` |
 | Demo-as-code: seeded demo stack + artifact rendering | `demo/CLAUDE.md` |
+| Demo framer: window-on-wallpaper compositor, source-to-derived doc images | `demo/framer/CLAUDE.md` |
 | Test patterns + fixtures | `tests/CLAUDE.md` |
 | Docs site: code-ref badges, Scalar, authoring | `docs/CLAUDE.md` |
 
@@ -209,7 +210,7 @@ Full methodology: `apps/mewbo_api/CLAUDE.md` → "Debugging session errors". Ori
 
 ## Running, testing, linting
 
-- Tests: `pytest` under `tests/`.
+- Tests: bare `pytest` from the repo root. That is the canonical invocation and the one CI runs — it honours every entry in `testpaths` (`tests/`, the three app suites, both demo suites). **Naming a path OVERRIDES `testpaths`**, so `pytest tests/` silently runs one subtree and reports green for suites it never collected; that is how an entire app suite stayed out of the usual run. Pass a path only when you mean to narrow the run.
 - Install: `uv sync` (core) or `uv sync --all-extras --all-groups` (dev).
 - Run: `uv run mewbo` / `uv run mewbo-api` from repo root, or `npm run dev` in `apps/mewbo_console`.
 - Config chain: `CWD/configs/` → `$MEWBO_HOME/` → `~/.mewbo/`. `$MEWBO_CONFIG_DIR` pins the directory ahead of the CWD walk — the walk itself can't be redirected for a spawned child, since it re-runs from that child's own CWD. Override with `--config`. Run `/init` to scaffold.
@@ -217,4 +218,5 @@ Full methodology: `apps/mewbo_api/CLAUDE.md` → "Debugging session errors". Ori
 - **Never blind `ruff --fix`** — always re-run `ruff check .` after any autofix (strips intentional `noqa`).
 - **`.devcontainer/` is a compose stack with its OWN docker daemon and its OWN Mongo** — see `.devcontainer/README.md`. The point is that an agent can do full-stack work without host line of sight. Its Mongo volume (`assistant_devcontainer_mongo-data`) is deliberately distinct from the production `assistant_mongo-data`.
 - **`configs/app.json` is gitignored, so a fresh checkout or worktree falls back to `configs/app.example.json` — which ships an EMPTY `llm.api_base`.** The stack then comes up healthy and still cannot reach the model gateway; the network was never the missing piece. Any tooling that provisions a new worktree must seed the whole gitignored config layer (`CLAUDE.local.md`, `.mcp.json`, `configs/app.json`, `.env`) — and `.env` must be seeded FILTERED, because it carries both the stack's values and the `MEWBO_*_SRC` host source-mount pointers, which name absolute paths in the ORIGINAL checkout. Copied verbatim they mount the wrong tree's source into the new container, which then silently runs code you are not editing.
+- **Working in a worktree: pass `git -C <worktree>` on EVERY git call, never a bare one.** A shell's cwd can drift back to the main checkout between commands — silently, with no error and nothing in the output to notice — so a bare `git pull --rebase origin <branch>` typed for a worktree can execute in the main checkout while standing on `main`. It fast-forwards `main` onto the feature branch, and the next push publishes the whole branch with no pull request and no verification run. Nothing warns you: every command succeeds. The cure is positional, not procedural — name the directory in the command and the drift cannot reach it.
 - **Commit with `--no-verify` whenever anything else shares the checkout** (a second agent, a second terminal, a parallel worktree session). `pre-commit` stashes *every* unstaged file in the repo, not just the paths you staged, so it holds the other worker's in-flight edits for the duration — and the repo-wide `mypy` hook is slow enough that a timeout or a kill leaves them stashed with the tree looking clean. Recovery: the stash is a plain patch under `~/.cache/pre-commit/patch*` (newest = yours) — `git apply` it back. Run `ruff check .` and `mypy <touched files>` by hand: same gate, scoped to what you changed.

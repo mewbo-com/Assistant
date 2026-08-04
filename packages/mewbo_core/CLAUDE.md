@@ -223,6 +223,16 @@ an already-`completed` status to `unmet_goal` — it never overwrites a
 purpose it cannot substantiate spends a real run rather than annotating a row.
 Returning `None` costs nothing; a claim costs whatever acting on it costs.
 
+**Fire-and-forget is not the same as unobservable.** Every background hook — the
+http POST at any lifecycle point, and the `on_event` command subprocess — is
+submitted to `HOOK_DISPATCH` (`hooks.py:HookDispatch`), which holds the daemon
+threads so a caller can `wait(timeout)` on them. Hot-path callers ignore the
+handle and behave exactly as before; the point is that "has it landed" now has an
+answer other than sleeping and hoping the thread won, which is a RACE rather than
+a slow caller — on a loaded box the observation is WRONG, not late. A new
+background dispatch goes through `HOOK_DISPATCH.submit`, never a bare
+`threading.Thread`.
+
 `on_event` is a fourth slot fired from `append_event` on BOTH store backends (the
 universal choke-point, a superset of the orchestrator's event_logger). Hooks
 registered here are **fire-and-forget in a daemon thread even for the command

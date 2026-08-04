@@ -212,9 +212,8 @@ def test_embed_respects_concurrency_bound(_patch_litellm_embedding):
     assert max_active <= 3
 
 
-def test_embed_retries_429_and_completes(_patch_litellm_embedding, monkeypatch):
+def test_embed_retries_429_and_completes(_patch_litellm_embedding):
     """A 429 is retried (honouring backoff) and the call still succeeds."""
-    monkeypatch.setattr("mewbo_graph.wiki.embedder.time.sleep", lambda _: None)
     rate_limit_error = litellm.RateLimitError(
         message="slow down", llm_provider="openai", model="openai/test"
     )
@@ -223,43 +222,74 @@ def test_embed_retries_429_and_completes(_patch_litellm_embedding, monkeypatch):
         rate_limit_error,
         _embedding_response([[1.0, 2.0]]),
     ]
-    emb = _build(batch_size=8, model="openai/test")
+    emb = Embedder(model="openai/test", batch_size=8, sleeper=lambda _: None)
     out = emb.embed_query("hello")
     assert out == [1.0, 2.0]
     assert _patch_litellm_embedding.call_count == 3
 
 
-def test_embed_gives_up_after_max_retries(_patch_litellm_embedding, monkeypatch):
-    monkeypatch.setattr("mewbo_graph.wiki.embedder.time.sleep", lambda _: None)
+def test_embed_gives_up_after_max_retries(_patch_litellm_embedding):
     rate_limit_error = litellm.RateLimitError(
         message="slow down", llm_provider="openai", model="openai/test"
     )
     _patch_litellm_embedding.side_effect = rate_limit_error
-    emb = Embedder(model="openai/test", batch_size=8, max_retries=2)
+    emb = Embedder(
+        model="openai/test", batch_size=8, max_retries=2, sleeper=lambda _: None
+    )
     with pytest.raises(litellm.RateLimitError):
         emb.embed_query("hello")
     # 1 initial attempt + 2 retries
     assert _patch_litellm_embedding.call_count == 3
 
 
-def test_embed_honours_retry_after_header(_patch_litellm_embedding, monkeypatch):
-    """``Retry-After`` wins over exponential backoff when present."""
+def _rate_limit_error(retry_after: str | None) -> litellm.RateLimitError:
+    """A 429 carrying (or omitting) a ``Retry-After`` header."""
+    kwargs: dict[str, object] = {}
+    if retry_after is not None:
+        response = MagicMock()
+        response.headers = {"retry-after": retry_after}
+        kwargs["response"] = response
+    return litellm.RateLimitError(
+        message="slow down", llm_provider="openai", model="openai/test", **kwargs
+    )
+
+
+def test_embed_honours_retry_after_header(_patch_litellm_embedding):
+    """``Retry-After`` wins over exponential backoff when present.
+
+    The waits are collected through the injected ``sleeper`` — the ONLY thing
+    that makes this list the embedder's own waiting. Reaching for
+    ``time.sleep`` on the stdlib module records every sleep in the process,
+    including other threads', and the assertion then fails on somebody else's
+    poll loop.
+    """
     slept: list[float] = []
-    monkeypatch.setattr(
-        "mewbo_graph.wiki.embedder.time.sleep", lambda s: slept.append(s)
-    )
-    response = MagicMock()
-    response.headers = {"retry-after": "7"}
-    rate_limit_error = litellm.RateLimitError(
-        message="slow down", llm_provider="openai", model="openai/test", response=response
-    )
     _patch_litellm_embedding.side_effect = [
-        rate_limit_error,
+        _rate_limit_error("7"),
         _embedding_response([[1.0]]),
     ]
-    emb = _build(batch_size=8)
+    emb = Embedder(model="openai/test", batch_size=8, sleeper=slept.append)
     emb.embed_query("hello")
     assert slept == [7.0]
+
+
+def test_embed_falls_back_to_backoff_without_retry_after(_patch_litellm_embedding):
+    """The paired negative: no header ⇒ the first-attempt backoff band.
+
+    Without this, ``== [7.0]`` above is satisfied by any implementation that
+    happens to produce 7.0 — the header is only proven to WIN if the same seam
+    produces something else when it is absent. Attempt 1's backoff is
+    ``1 + uniform(0, 0.5)``, a band that cannot contain 7.0.
+    """
+    slept: list[float] = []
+    _patch_litellm_embedding.side_effect = [
+        _rate_limit_error(None),
+        _embedding_response([[1.0]]),
+    ]
+    emb = Embedder(model="openai/test", batch_size=8, sleeper=slept.append)
+    emb.embed_query("hello")
+    assert len(slept) == 1
+    assert 1.0 <= slept[0] <= 1.5
 
 
 def test_embed_pacing_does_not_deadlock_under_low_rpm(

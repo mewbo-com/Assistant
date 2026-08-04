@@ -1,16 +1,18 @@
 # Permissions & Hooks
 
-Mewbo runs every tool call through a **permission policy** before it executes, and lets you wire **hooks** into session lifecycle events and individual tool calls. Together they give you a security boundary and a clean place to hang automation. Think notifications, audit logging, webhook fan-out, and external guardrails.
+## Approve or block tool calls
 
-**Quick example.** Auto-approve all tool calls in the current session:
+Mewbo runs every tool call through a **permission policy** before it executes, and fires **hooks** at session lifecycle events and around individual tool calls. Permissions gate what runs. Hooks are where notifications, audit logging, webhook fan out and external guardrails hang.
+
+**Quick example.** Auto-approve all tool calls in the current session.
 
 ```
 /automatic --yes
 ```
 
-Or configure it globally:
+Or configure it globally.
 
-```json
+```json title="configs/app.json"
 "permissions": {
   "approval_mode": "allow"
 }
@@ -22,7 +24,7 @@ Or configure it globally:
 
 ### The three outcomes
 
-Every tool call carries a `tool_id` (which tool it is, e.g. `aider_shell_tool`, `file_edit_tool`, `mcp__my_server__my_tool`) and an `operation` (what kind of action it is, e.g. `get`, `set`). Before the call runs, Mewbo consults your policy and resolves to one of three outcomes:
+Every tool call carries a `tool_id`, such as `aider_shell_tool` or `mcp__my_server__my_tool`, and an `operation` such as `get` or `set`. Mewbo checks your policy against that pair and resolves it to one of three outcomes.
 
 | Decision | Meaning |
 |----------|---------|
@@ -30,13 +32,13 @@ Every tool call carries a `tool_id` (which tool it is, e.g. `aider_shell_tool`, 
 | `deny` | Block unconditionally |
 | `ask` | Prompt the user. On the CLI this is an interactive prompt; in the console it is an approval card |
 
-Rules are evaluated in order; the first match wins. If no rule matches, Mewbo falls back to per-operation defaults (`get` → `allow`, `set` → `ask`) and then to a catch-all `default_decision`.
+Rules are evaluated in order and the first match wins. With no match, Mewbo falls back to the per operation defaults. `get` resolves to `allow` and `set` resolves to `ask`. If neither default applies, the catch all `default_decision` decides.
 
 ### Rule syntax
 
-Rules live in a JSON or TOML policy file pointed to by `permissions.policy_path`. Each rule matches on `tool_id` and `operation` using `fnmatch` glob patterns:
+Rules live in a JSON or TOML policy file named by `permissions.policy_path`. Each rule matches on `tool_id` and `operation` using `fnmatch` glob patterns.
 
-```json
+```json title="configs/policy.json"
 {
   "rules": [
     { "tool_id": "aider_shell_tool", "operation": "*", "decision": "ask" },
@@ -52,11 +54,11 @@ Rules live in a JSON or TOML policy file pointed to by `permissions.policy_path`
 }
 ```
 
-`fnmatch` wildcards are simple: `*` matches any string, `?` matches a single character. Patterns work equally well on MCP tool IDs. For example, `"mcp__*"` matches every MCP-sourced tool, and `"mcp__my_server__*"` scopes to one server.
+`*` matches any string and `?` matches a single character. The patterns work on MCP tool IDs too. `mcp__*` matches every tool sourced from MCP, and `mcp__my_server__*` scopes to one server.
 
 ### Approval modes
 
-`permissions.approval_mode` is a session-wide shortcut that overrides the rule file. It is useful when you want a blanket policy without editing rules:
+`permissions.approval_mode` applies for the whole session and overrides the rule file. Use it for a blanket policy without editing rules.
 
 | Value | Aliases | Effect |
 |-------|---------|--------|
@@ -66,7 +68,7 @@ Rules live in a JSON or TOML policy file pointed to by `permissions.policy_path`
 
 ### /automatic (CLI)
 
-`/automatic` flips the current session into allow-mode without touching your config file:
+`/automatic` flips the current session into allow mode without touching your config file.
 
 ```
 /automatic          # prompts for confirmation
@@ -76,7 +78,7 @@ Rules live in a JSON or TOML policy file pointed to by `permissions.policy_path`
 
 ### Config example
 
-```json
+```json title="configs/app.json"
 "permissions": {
   "policy_path": "./configs/policy.json",
   "approval_mode": "ask"
@@ -89,7 +91,7 @@ See [configuration.md](configuration.md#permissions) for field descriptions.
 
 ## Hooks
 
-Hooks run custom code at specific moments in a session's life. They are declared in the `hooks` section of `configs/app.json`; see [`configs/app.example.json`](repo:configs/app.example.json) for a starting point. A failing hook is logged as a warning and never blocks execution, so hooks are safe to use for side effects even if the external endpoint is flaky.
+Hooks run custom code at specific moments in a session's life. Declare them in the `hooks` section of `configs/app.json`, starting from [`configs/app.example.json`](repo:configs/app.example.json). A failing hook is logged as a warning and never blocks execution, so a flaky endpoint cannot stall a session.
 
 ### When hooks fire
 
@@ -101,15 +103,15 @@ Hooks run custom code at specific moments in a session's life. They are declared
 | `post_tool_use` | Just after a tool call returns |
 | `on_event` | Every time an event is appended to a session transcript |
 
-`on_event` is the firehose: it sees every transcript record, not just tool calls. Because it sits on the append hot path, both hook types fire it without waiting, so a slow hook never delays the session. Its `matcher` is matched against the event **type** (for example `tool_result` or `context_compacted`) rather than a `tool_id`.
+`on_event` is the firehose. It sees every transcript record, not just tool calls. It sits on the append hot path, so both command and HTTP hooks fire without waiting and a slow hook never delays the session. Its `matcher` runs against the event **type**, for example `tool_result` or `context_compacted`, rather than a `tool_id`.
 
 ### Two hook types
 
 #### Command hooks
 
-A command hook runs a shell command. Mewbo waits up to `timeout` seconds (default 30) for the process to finish before moving on. Use this when you want the hook to complete before the session continues, for example when prepping a workspace at session start.
+A command hook runs a shell command. Mewbo waits up to `timeout` seconds, 30 by default, for the process to finish. Use it when the hook must complete before the session continues, such as prepping a workspace at session start.
 
-Mewbo sets these environment variables on the subprocess:
+Mewbo sets these environment variables on the subprocess.
 
 | Variable | Available in | Value |
 |----------|-------------|-------|
@@ -122,9 +124,9 @@ Mewbo sets these environment variables on the subprocess:
 
 An `on_event` command hook also receives the full event record as JSON on stdin.
 
-Example. Send a desktop notification when a session ends:
+Example. Send a desktop notification when a session ends.
 
-```json
+```json title="configs/app.json"
 "hooks": {
   "on_session_end": [
     {
@@ -138,9 +140,9 @@ Example. Send a desktop notification when a session ends:
 
 #### HTTP hooks
 
-An HTTP hook posts a JSON body to a URL. HTTP hooks are non-blocking. Mewbo does not wait for the response, and failures are logged rather than raised. Use this when you want to feed Mewbo events into a webhook, audit log, or chat integration without slowing the agent down.
+An HTTP hook posts a JSON body to a URL and never blocks. Mewbo does not wait for the response, and failures are logged rather than raised. Use it to feed session events into a webhook, an audit log or a chat integration without slowing the agent.
 
-Payload for `on_session_end`:
+Payload for `on_session_end`.
 
 ```json
 {
@@ -150,7 +152,7 @@ Payload for `on_session_end`:
 }
 ```
 
-Payload for `post_tool_use`:
+Payload for `post_tool_use`.
 
 ```json
 {
@@ -161,7 +163,7 @@ Payload for `post_tool_use`:
 }
 ```
 
-Payload for `on_event`, where `record` is the transcript event with its string values truncated:
+Payload for `on_event`. `record` is the transcript event with its string values truncated.
 
 ```json
 {
@@ -171,9 +173,9 @@ Payload for `on_event`, where `record` is the transcript event with its string v
 }
 ```
 
-Example. Notify an external webhook:
+Example. Notify an external webhook.
 
-```json
+```json title="configs/app.json"
 "hooks": {
   "on_session_end": [
     {
@@ -188,9 +190,9 @@ Example. Notify an external webhook:
 
 ### Scoping hooks to specific tools
 
-Add a `matcher` (an `fnmatch` pattern) to any hook entry to restrict which tool calls trigger it. This is the difference between logging every tool call and logging only shell commands:
+Add a `matcher`, an `fnmatch` pattern, to any hook entry to restrict which tool calls fire it. That is the difference between logging every tool call and logging only shell commands.
 
-```json
+```json title="configs/app.json"
 "hooks": {
   "post_tool_use": [
     {
@@ -202,53 +204,13 @@ Add a `matcher` (an `fnmatch` pattern) to any hook entry to restrict which tool 
 }
 ```
 
-`"matcher": "mcp__*"` scopes the hook to every MCP tool. Omit `matcher` (or set to `null`) and the hook fires on every tool call.
-
-### A fuller example
-
-```json
-"hooks": {
-  "pre_tool_use": [],
-  "post_tool_use": [
-    {
-      "type": "http",
-      "url": "https://hooks.example.com/tool-events",
-      "matcher": "aider_shell_tool",
-      "timeout": 5
-    }
-  ],
-  "on_session_start": [
-    {
-      "type": "command",
-      "command": "logger -t mewbo \"Session $MEWBO_SESSION_ID started\"",
-      "timeout": 3
-    }
-  ],
-  "on_session_end": [
-    {
-      "type": "command",
-      "command": "/home/user/scripts/notify.sh",
-      "timeout": 10
-    }
-  ]
-}
-```
+`"matcher": "mcp__*"` scopes the hook to every MCP tool. Omit `matcher`, or set it to `null`, and the hook fires on every tool call.
 
 ---
 
 ## Reference
 
-| Config key | Type | Default | Description |
-|------------|------|---------|-------------|
-| `permissions.policy_path` | string | `""` | Path to a JSON or TOML permission policy file. Empty uses built-in defaults. |
-| `permissions.approval_mode` | string | `"ask"` | Session-wide shortcut: `allow`, `deny`, or `ask`. |
-| `hooks.pre_tool_use` | list | `[]` | Hooks executed before each tool invocation. |
-| `hooks.post_tool_use` | list | `[]` | Hooks executed after each tool invocation. |
-| `hooks.on_session_start` | list | `[]` | Hooks executed when a new session begins. |
-| `hooks.on_session_end` | list | `[]` | Hooks executed when a session ends. |
-| `hooks.on_event` | list | `[]` | Fire-and-forget hooks executed for every event appended to a session transcript. The matcher fnmatches the event type. |
-
-Each entry in a hooks list accepts:
+The `permissions` and `hooks` config keys are documented in [Configuration](configuration.md#permissions) and [Configuration → Hooks](configuration.md#hooks). Each entry in a hooks list accepts these fields.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -258,8 +220,6 @@ Each entry in a hooks list accepts:
 | `headers` | object | `{}` | Extra HTTP headers (`type=http`) |
 | `matcher` | string \| null | `null` | fnmatch pattern on `tool_id` (on the event type for `on_event`); `null` matches all |
 | `timeout` | integer | `30` | Max seconds to wait for the hook |
-
-See [configuration.md](configuration.md) for the full config schema.
 
 > [!NOTE] How it works internally
 > See [Architecture Overview → Permission policy](core-orchestration.md#permission-policy) and [Hook manager](core-orchestration.md#hook-manager).

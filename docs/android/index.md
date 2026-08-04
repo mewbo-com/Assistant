@@ -1,43 +1,39 @@
 # Get Started
 
-<video autoplay muted loop playsinline preload="auto" style="width: 100%; max-width: 960px; height: auto; display: block; margin: 0 auto 1.5rem;">
+## Set up Mewbo on your phone
+
+<video muted loop playsinline preload="auto" style="width: 100%; max-width: 960px; height: auto; display: block; margin: 0 auto 1.5rem;">
   <source src="../assets/videos/Mewbo-Aura-0-Banner.mp4" type="video/mp4" />
   Your browser does not support the video tag.
 </video>
 
-Aura puts your self-hosted Mewbo assistant in your pocket: chat, voice, and real actions on your phone, all wired to a server you run.
+Aura puts your Mewbo assistant in your pocket. It runs on a server you host, so a session you start on the move opens later from any other client.
 
-The terminal and web console are built for the desk. Aura is for the moments away from it. Dictate a question with your hands full and hear the reply read back. Let the assistant set an alarm, check the battery, or send a text on the very device it runs on. Start a session on the move and pick it up later from any client, because the session lives on your server, not the app.
+The terminal and web console are built for the desk. Aura is for the moments away from it.
 
-With Aura you can:
-
-- **Chat with your assistant.** Ask a question and watch the answer stream in as formatted text. Tool calls, plans, and sub-agent work show up as you go, so you can see what the assistant is doing.
-- **Talk instead of type.** Dictate a message with your voice. Have replies read back to you as they stream. Raise the assistant hands-free from anywhere on the device.
-- **Let the assistant act on your phone.** With your permission, the assistant can check the time and battery, set alarms and timers, and read or send text messages.
-- **Keep your work.** Every conversation is a session. Reopen a recent one, rename it, or archive it when you are done.
+- **Let the assistant act on your phone.** With your permission it checks the time and battery, sets alarms and timers, and reads or sends text messages.
+- **Talk instead of type.** Dictate a message, hear the reply read back as it streams, and raise the assistant by voice from anywhere on the device.
+- **Watch the work, not just the answer.** Tool calls, plans, and sub-agent activity appear in the transcript as they happen.
+- **Keep your work.** Every conversation is a session. Reopen a recent one, rename it, or archive it.
 
 ## Prerequisites {#prerequisites}
 
-Aura is a client, not a standalone app. You need two things before it is useful:
+Aura is a client, not a standalone app. You need three things before it is useful.
 
 | Requirement | Notes |
 |-------------|-------|
 | A running Mewbo server | Aura connects to a Mewbo API server that you host. See [Get Started](../getting-started.md) to stand one up. |
-| An API key | Aura authenticates to your server with an API key. Issue one from the console (Settings, then API Keys) as described in [MCP Server](../clients-mcp.md#authentication-required). |
-| An Android phone | A recent Android device. Voice features need a microphone, and read-aloud needs a text-to-speech engine (both are standard on shipping phones). |
+| An API key | Issue one from the console under Settings, then API Keys. See [MCP Server](../clients-mcp.md#authentication-required). |
+| An Android phone | Voice needs a microphone, and reading replies aloud needs a text to speech engine. Both ship on standard Android devices. |
 
 > [!NOTE] Your server, your data
 > Aura only ever talks to the server you point it at. There is no Aura cloud service in between. The conversations, the model, and the tools are all yours.
 
 ## Your first query {#first-query}
 
-Three steps take you from a fresh install to a working assistant.
-
 1. **Install the app.** Download a prebuilt APK or build it from source. See [Install](install.md).
-2. **Connect it to your server.** On first launch, open Settings and enter your server's base URL and your API key. Aura checks the connection before it saves. See [Install](install.md#connect) for the details.
-3. **Ask something.** Type a message in the composer at the bottom and send it. The reply streams in as formatted text. That is a session, and it is now saved to your recent chats.
-
-From there you can pick a different model, scope a session to a project, attach a file, or switch to voice.
+2. **Connect it to your server.** Open Settings on first launch and enter your server's base URL and API key. Aura checks the connection before it saves. See [Install](install.md#connect).
+3. **Ask something.** Type in the composer and send. The reply streams in, and the conversation is saved to your recent chats.
 
 ## Next steps { .ms-h2-icon data-icon="rocket" }
 
@@ -56,7 +52,7 @@ From there you can pick a different model, scope a session to a project, attach 
     <iconify-icon icon="lucide:mic" width="20" height="20" aria-hidden="true"></iconify-icon>
   </span>
   <span class="ms-card__title">Voice</span>
-  <span class="ms-card__body">Dictation, read-aloud replies, and the hands-free voice overlay.</span>
+  <span class="ms-card__body">Dictation, replies read aloud, and a voice overlay you can raise from anywhere.</span>
 </a>
 
 <a class="ms-card" href="chat/">

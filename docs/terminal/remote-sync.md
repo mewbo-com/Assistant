@@ -1,21 +1,23 @@
 # Remote Sync
 
-The terminal client is local-first. The engine runs on your machine. Your session transcript is stored on your machine as a local JSONL file, and that file is the source of truth. Nothing leaves your machine unless you opt in.
+## Mirror sessions to a server
 
-Remote sync is the opt-in. When you turn it on, the client keeps running the engine locally, and it also mirrors your session to a remote Mewbo deployment. This gives you cross-device visibility into your terminal sessions. The seam lives in [`cli_remote.py`](repo:apps/mewbo_cli/src/mewbo_cli/cli_remote.py).
+The terminal client runs local by default. Your session transcript is a JSONL file on your disk and it is the source of truth. Nothing leaves your machine unless you opt in.
+
+Remote sync keeps the engine local and mirrors the session to a remote Mewbo deployment, so you can read your terminal sessions from another device. The seam lives in [`cli_remote.py`](repo:apps/mewbo_cli/src/mewbo_cli/cli_remote.py).
 
 ## The config block
 
-Remote sync is controlled by one CLI-only config block, `cli.remote`. It has two keys. The model is defined in [`config.py`](repo:packages/mewbo_core/src/mewbo_core/config.py).
+One config block controls it, `cli.remote`. The model is defined in [`config.py`](repo:packages/mewbo_core/src/mewbo_core/config.py).
 
 | Key | Purpose |
 |-----|---------|
 | `cli.remote.base_url` | The root URL of the remote Mewbo deployment. It serves the REST API under `/api` and the Mewbo MCP server under `/mcp`. Empty by default. |
-| `cli.remote.token` | The API token presented to that deployment. It is write-only, so the console never returns its value. |
+| `cli.remote.token` | The API token presented to that deployment. It is write only and never returned once set. |
 
-The block is CLI-only. Every other Mewbo surface ignores it. Add it to your `configs/app.json` under a `cli` section.
+Only the CLI reads this block. Every other Mewbo surface ignores it.
 
-```json
+```json title="configs/app.json"
 {
   "cli": {
     "remote": {
@@ -26,7 +28,7 @@ The block is CLI-only. Every other Mewbo surface ignores it. Add it to your `con
 }
 ```
 
-The token field expands environment references at use time. A value like `${MEWBO_REMOTE_TOKEN}` reads from your environment, so you keep the secret out of the file.
+The token field expands environment references at use time, so the secret stays out of the file.
 
 ## What leaves your machine when enabled
 
@@ -35,21 +37,21 @@ The token field expands environment references at use time. A value like `${MEWB
 
 Two things reach the network once a base URL is set.
 
-- The client mirrors each session event to the remote REST API. It POSTs the events fire-and-forget to [POST /api/sessions/{session_id}/events](endpoint:POST /api/sessions/{session_id}/events). It batches a burst of streaming deltas into one request, and it mirrors only the session you are actively working on. A failed POST is logged and dropped. Your local JSONL file stays authoritative either way.
-- The client registers the Mewbo MCP server from the same deployment. This surfaces the Mewbo product tools, such as the wiki and search tools, in your terminal session. Those tools then execute remotely on the deployment.
+- The client mirrors each session event to [POST /api/sessions/{session_id}/events](endpoint:POST /api/sessions/{session_id}/events) without waiting for a response. It batches a burst of streaming deltas into one request and mirrors only the session you are working on. A failed post is logged and dropped.
+- The client registers the Mewbo MCP server from that deployment, which surfaces the Mewbo product tools such as wiki and search in your session. Those tools then execute on the deployment, not on your machine.
 
-The engine never runs remotely. Only the transcript mirror and the product tools reach the network. The run loop and the authoritative transcript stay on your host.
+The engine and the authoritative transcript never leave your host.
 
 ## The visible indicator
 
-The header tells you which mode you are in. A local session shows `local-only`. A synced session shows `remote:` followed by the base URL. The synced session also carries a `transcript_sink` chip on its trace, so you can filter synced terminal work apart from local work. A local session carries no such chip, because the absence means local.
+The header names the mode. A local session shows `local-only` and a synced session shows `remote:` followed by the base URL. A synced session also carries a `transcript_sink` chip on its trace, so you can filter synced work apart from local work.
 
 ## How to turn it off
 
-Leave `cli.remote.base_url` empty, or remove the `cli.remote` block. Empty means fully local, and that is the default. With no base URL set, the client never mirrors and never registers the remote tools.
+Leave `cli.remote.base_url` empty, or remove the `cli.remote` block. The client then never mirrors and never registers the remote tools.
 
 ## Next steps
 
-- [Configuration](configuration.md): flags, the config chain, and session recovery.
-- [The Interface](interface.md): the live transcript and approval prompts.
-- [REST API](../api/index.md): the remote deployment your terminal sessions mirror to.
+- [Configuration](configuration.md) covers flags, the config chain, and session recovery.
+- [The Interface](interface.md) covers the live transcript and approval prompts.
+- [REST API](../api/index.md) is the remote deployment your terminal sessions mirror to.

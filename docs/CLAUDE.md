@@ -39,6 +39,12 @@ with the theme. **Never hand-write badge HTML.**
   surfaces — `/v1/wiki/*`, `/v1/git/credentials*`, `/v1/git/repositories*` — contribute zero
   paths to `docs/openapi.json`. A badge for one of those points at an operation the reference
   does not contain. Write them as plain inline code.
+- **A namespace `backend.py` mounts behind a config flag DOES reach the spec, and only because
+  the generator mounts it itself.** Capturing the live schema alone made the reference a
+  function of the generating machine's config — the Web IDE namespace, which needs both
+  `agent.web_ide.enabled` and a Mongo-backed session store, was absent from every published
+  build. `GATED_NAMESPACES` in the generator is the list; a new config-gated namespace must be
+  added there or it is invisible to readers, with an empty diff to show for it.
 - Minimal edits: swap the reference token to a badge link, do not rewrite prose.
 
 ## Build

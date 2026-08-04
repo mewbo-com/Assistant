@@ -306,6 +306,60 @@ describe("SettingsModel.isDirty / patchFor", () => {
     });
     expect(patch).toEqual({ agent: { edit_tool: "structured_patch" } });
   });
+
+  it("a sibling edit does not smuggle an untouched secret's RJSF-defaulted \"\" into the patch", () => {
+    // Mirrors the real wire shape: the backend strips a secret's value
+    // entirely (config.llm carries no `api_key` key at all), not "" like the
+    // fixture above. RJSF fills that gap with the schema default ("" for
+    // every x-secret/writeOnly field, since that's Pydantic's own default —
+    // see SettingsSection's real-Form regression test) the moment ANY sibling
+    // field in the section changes. Without the secretPaths carve-out this
+    // patch would carry `api_key: ""` and overwrite a live credential.
+    const strippedConfig: Record<string, unknown> = {
+      llm: { model: "gpt-5", proxy_model_prefix: "openai" }, // no api_key key
+      embeddings: { embed_model: "text-embedding-3-small" },
+      agent: { edit_tool: "", lsp: { enabled: true } },
+      channels: { nextcloud_url: "https://nc.example" },
+    };
+    const m = new SettingsModel(schema, strippedConfig);
+    const patch = m.patchFor("llm", {
+      model: "claude-opus-4-8", // the genuine edit
+      api_key: "", // RJSF's default-fill, never typed by the user
+      proxy_model_prefix: "openai",
+    });
+    expect(patch).toEqual({ llm: { model: "claude-opus-4-8" } });
+  });
+
+  it("a real secret value still reaches the patch", () => {
+    const strippedConfig: Record<string, unknown> = {
+      llm: { model: "gpt-5", proxy_model_prefix: "openai" },
+    };
+    const m = new SettingsModel(schema, strippedConfig);
+    const patch = m.patchFor("llm", {
+      model: "gpt-5",
+      api_key: "sk-ant-real-value",
+      proxy_model_prefix: "openai",
+    });
+    expect(patch).toEqual({ llm: { api_key: "sk-ant-real-value" } });
+  });
+
+  it("a deliberate secret clear (null) reaches the patch, distinct from the empty-string carve-out", () => {
+    // The counterpart to the sibling-edit test above: an untouched secret's
+    // RJSF-defaulted "" must still be dropped, but SecretField's explicit
+    // Clear affordance emits `null`, and null is not "" — the carve-out only
+    // ever matches the literal empty string, so a deliberate clear must
+    // survive the same diff that swallows the RJSF artefact.
+    const strippedConfig: Record<string, unknown> = {
+      llm: { model: "gpt-5", proxy_model_prefix: "openai" }, // no api_key key
+    };
+    const m = new SettingsModel(schema, strippedConfig);
+    const patch = m.patchFor("llm", {
+      model: "gpt-5", // unchanged
+      api_key: null, // the Clear button's onChange(null)
+      proxy_model_prefix: "openai", // unchanged
+    });
+    expect(patch).toEqual({ llm: { api_key: null } });
+  });
 });
 
 // --- sliceSchema -----------------------------------------------------------

@@ -96,7 +96,7 @@ function MermaidBlockInner({ diagramId, inlineSource, onZoom }: MermaidBlockProp
     <button
       type="button"
       onClick={onZoom}
-      className="group relative w-full my-6 rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))]/30 p-4 cursor-zoom-in hover:border-[hsl(var(--border-strong))] transition-colors overflow-hidden"
+      className="group relative w-full my-6 rounded-lg border border-[hsl(var(--border))] bg-[var(--diagram-surface)] p-4 cursor-zoom-in hover:border-[hsl(var(--border-strong))] transition-colors overflow-hidden"
       title="Click to zoom"
     >
       <div className="absolute top-2 right-2 inline-flex items-center gap-1 px-2 py-0.5 rounded text-2xs font-medium bg-[hsl(var(--muted))]/80 text-[hsl(var(--muted-foreground))] opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
@@ -107,7 +107,7 @@ function MermaidBlockInner({ diagramId, inlineSource, onZoom }: MermaidBlockProp
         <div className="text-xs text-[hsl(var(--destructive-text))] py-6 text-center">{error}</div>
       ) : svg ? (
         <div
-          className="flex items-center justify-center [&_svg]:max-w-full [&_svg]:h-auto"
+          className="mermaid-surface flex items-center justify-center [&_svg]:max-w-full [&_svg]:h-auto"
           dangerouslySetInnerHTML={{ __html: svg }}
         />
       ) : (

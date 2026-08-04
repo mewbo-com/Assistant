@@ -1,14 +1,16 @@
 # LDAP and Active Directory
 
-Mewbo can verify usernames and passwords directly against an LDAP directory, including Microsoft Active Directory. This is the one authenticator where Mewbo itself handles the user's password, so it works differently from the redirect-based providers and deserves a careful read.
+## Use existing directory logins
 
-Unlike OIDC or SAML, there is no browser redirect and no identity provider session. Mewbo serves a username and password form, and verifies the credentials by binding to the directory as that user.
+Mewbo can verify usernames and passwords directly against an LDAP directory, including Microsoft Active Directory. There is no browser redirect and no identity provider session. Mewbo serves the form itself and verifies the credentials by binding to the directory as that user.
+
+**This is the one authenticator where Mewbo handles the password.** Read this page carefully.
 
 ---
 
 ## What this unlocks
 
-- Username and password sign-in for the Mewbo console and REST API against an existing directory.
+- Username and password sign in for the Mewbo console and REST API against an existing directory.
 - Directory groups drive Mewbo roles, including nested groups on Active Directory.
 - No identity provider deployment required. If you have a directory, you have enough.
 
@@ -16,7 +18,7 @@ Unlike OIDC or SAML, there is no browser redirect and no identity provider sessi
 
 ## How the password check actually works
 
-This is worth understanding before you configure anything, because the security of the whole arrangement rests on one step.
+The security of the whole arrangement rests on one step, so read this before you configure anything.
 
 ```mermaid
 sequenceDiagram
@@ -40,12 +42,12 @@ sequenceDiagram
     M-->>U: 200 + session cookie
 ```
 
-**The rebind is the password check, and nothing else is.** A search that finds the user proves only that the account exists. Treating a successful search as verification is a classic authentication bypass, so Mewbo keeps the two visibly separate: the search returns a DN, and no identity is built until the rebind with the presented password succeeds.
+**The rebind is the password check, and nothing else is.** A search that finds the user proves only that the account exists, and treating a successful search as verification is a classic authentication bypass. Mewbo keeps the two visibly separate. The search returns a DN, and no identity is built until the rebind with the presented password succeeds.
 
-Two related traps are closed deliberately, both verified in [`ldap.py`](repo:packages/mewbo_iam/src/mewbo_iam/drivers/ldap.py):
+Two related traps are closed deliberately, both verified in [`ldap.py`](repo:packages/mewbo_iam/src/mewbo_iam/drivers/ldap.py).
 
 - **Empty passwords are rejected before a connection is opened.** LDAP treats a bind carrying a DN and an empty password as an *anonymous* bind, which succeeds. A login path that passed an empty password straight through would authenticate anyone who knows a username.
-- **An ambiguous filter refuses to authenticate.** If `user_filter` matches more than one entry, the login fails rather than resolving to the first hit. Which entry comes "first" is a server ordering detail, not an identity decision.
+- **An ambiguous filter refuses to authenticate.** If `user_filter` matches more than one entry the login fails rather than resolving to the first hit, because which entry comes first is a server ordering detail rather than an identity decision.
 
 ---
 
@@ -53,7 +55,7 @@ Two related traps are closed deliberately, both verified in [`ldap.py`](repo:pac
 
 === "OpenLDAP"
 
-    ```json
+    ```json title="configs/app.json" linenums="1"
     {
       "api": {
         "auth": {
@@ -89,7 +91,7 @@ Two related traps are closed deliberately, both verified in [`ldap.py`](repo:pac
 
 === "Active Directory"
 
-    ```json
+    ```json title="configs/app.json"
     {
       "name": "active-directory",
       "kind": "ldap",
@@ -111,9 +113,9 @@ Two related traps are closed deliberately, both verified in [`ldap.py`](repo:pac
     }
     ```
 
-    Active Directory's login name attribute is `sAMAccountName` rather than `uid`, and its display name is `displayName` rather than `cn`. `userPrincipalName` is the alternative if your users sign in with their email-shaped principal name.
+    Active Directory's login name attribute is `sAMAccountName` rather than `uid`, and its display name is `displayName` rather than `cn`. Use `userPrincipalName` instead if your users sign in with their email-shaped principal name.
 
-The `ldap` extra is required: `pip install mewbo-iam[ldap]`.
+The `ldap` extra is required. Run `pip install mewbo-iam[ldap]`.
 
 ### Field reference
 
@@ -139,24 +141,21 @@ The `ldap` extra is required: `pip install mewbo-iam[ldap]`.
 
 ## TLS: leave verification on
 
-**`tls_verify` defaults to `true`, and you should leave it there.** This is not ordinary transport hygiene, because of how the password check works.
+`tls_verify` defaults to `true`. Leave it there. This is not ordinary transport hygiene, because of how the password check works. The underlying ldap3 library validates nothing by default, so without an explicit certificate policy, `ldaps://` and StartTLS encrypt the connection but never authenticate the server.
 
-The underlying ldap3 library's default TLS configuration validates nothing. Without an explicit certificate policy, `ldaps://` and StartTLS encrypt the connection but never authenticate the server. Since Mewbo verifies passwords by *binding to the directory*, anyone able to intercept traffic between Mewbo and the directory could present any certificate at all and would be handed every password your users type. Encryption without authentication is not a weaker form of security here; it is an open credential harvest.
+Mewbo verifies passwords by binding to the directory, so anyone able to intercept traffic between Mewbo and the directory could present any certificate and would be handed every password your users type. Encryption without authentication is not weaker security here. It is an open credential harvest.
 
-With verification on, an untrusted certificate **refuses the handshake and the password never leaves Mewbo**. The same policy is applied to both the service connection and the user rebind, assembled in one place so the two legs cannot drift apart. The rebind is the leg the password crosses, so this matters.
+With verification on, an untrusted certificate refuses the handshake and the password never leaves Mewbo. The same policy covers the service connection and the user rebind, built in one place so the two legs cannot drift apart. The rebind is the leg the password crosses.
 
-**The hostname is checked as well as the chain**, and this is the likeliest support issue. A certificate that is perfectly valid but issued for a different name is refused. In practice that means:
+The hostname is checked along with the chain, and this is the likeliest support issue. A certificate valid for a different name is refused. Connecting by IP address fails unless the certificate lists that IP, and `ldaps://dc01.example.com` is not interchangeable with `ldaps://dc01`. Match `server_url` to the certificate's subject or subject alternative name.
 
-- **Connecting by IP address will fail** unless the certificate actually lists that IP. Use the hostname the certificate was issued for.
-- `ldaps://dc01.example.com` and `ldaps://dc01` are not interchangeable. Match `server_url` to the certificate's subject or subject alternative name.
+Setting `tls_verify: false` together with `tls_ca_file` is rejected when the config is parsed. A CA bundle is only consulted while validating, so the pair states two conflicting intentions and Mewbo refuses rather than silently picking one.
 
-If your directory presents a certificate from a private or internal CA, which is the usual case for an in-house Active Directory or OpenLDAP server, **set `tls_ca_file` rather than turning verification off**. Point it at a PEM bundle containing the CA certificate, and treat that as a normal part of setup rather than a workaround.
-
-**A self-signed certificate is also handled by `tls_ca_file`:** put the certificate itself in the bundle. "Self-signed" reads to many operators as "I have to disable verification", and it does not. You almost never need `tls_verify: false`.
-
-When you genuinely have no other option, understand what you are accepting rather than treating it as a connection-troubleshooting step: with verification off, anyone able to intercept traffic between Mewbo and the directory can present their own certificate and **collect every password your users type**. That is the consequence, stated once and plainly. If you find yourself reaching for it to make a handshake succeed, the actual fix is almost always `tls_ca_file` or correcting the hostname.
-
-Setting `tls_verify: false` together with `tls_ca_file` is rejected at parse time, because a CA bundle is only ever consulted while validating. The pair states two different intentions and one of them would be silently lost, so Mewbo refuses rather than picking a winner and leaving a configuration that reads as the opposite of what it does.
+| Situation | What to do |
+|---|---|
+| Private or internal CA, the usual case for an in house Active Directory or OpenLDAP server | Set `tls_ca_file` to a PEM bundle containing the CA certificate. Treat this as a normal part of setup |
+| Self signed certificate | Put the certificate itself in the `tls_ca_file` bundle. You almost never need `tls_verify: false` |
+| No other option at all | Know what you are accepting. With verification off, anyone able to intercept traffic between Mewbo and the directory can present their own certificate and collect every password your users type. The fix is almost always `tls_ca_file` or correcting the hostname |
 
 ---
 
@@ -166,17 +165,17 @@ Which strategy runs is decided by whether `group_base_dn` is set.
 
 === "memberOf on the user entry (default)"
 
-    With `group_base_dn` unset, Mewbo reads the `group_attribute` straight off the user's own entry. This is one fewer directory round trip and needs no extra permissions.
+    With `group_base_dn` unset, Mewbo reads the `group_attribute` straight off the user's own entry. That is one fewer directory round trip and needs no extra permissions.
 
-    `memberOf` returns **full DNs**, so your mapping rules must match DNs:
+    `memberOf` returns **full DNs**, so your mapping rules must match DNs.
 
-    ```json
+    ```json title="configs/app.json"
     { "match": "cn=mewbo-admins,ou=groups,dc=example,dc=com", "target": "admin" }
     ```
 
-    A regex rule is often more readable and survives the group moving between organisational units:
+    A regex rule reads better and survives the group moving between organisational units.
 
-    ```json
+    ```json title="configs/app.json"
     { "match": "cn=mewbo-admins,.*", "match_kind": "regex", "target": "admin" }
     ```
 
@@ -186,9 +185,9 @@ Which strategy runs is decided by whether `group_base_dn` is set.
 
     With `group_base_dn` set, Mewbo searches that subtree for group entries listing the user as a member, filtering on `group_member_attribute`. This is the only strategy that can expand nesting.
 
-    `group_name_attribute` chooses what becomes the group name. Set it to `cn` to match on bare names:
+    `group_name_attribute` chooses what becomes the group name. Set it to `cn` to match on bare names.
 
-    ```json
+    ```json title="configs/app.json"
     { "match": "mewbo-admins", "target": "admin" }
     ```
 
@@ -196,53 +195,55 @@ Which strategy runs is decided by whether `group_base_dn` is set.
 
 ### Nested groups on Active Directory
 
-Setting `nested_groups: true` makes the group search use Active Directory's `LDAP_MATCHING_RULE_IN_CHAIN` extensible match, OID `1.2.840.113556.1.4.1941`. The filter becomes:
+Setting `nested_groups: true` makes the group search use Active Directory's `LDAP_MATCHING_RULE_IN_CHAIN` extensible match, OID `1.2.840.113556.1.4.1941`. The filter becomes this.
 
 ```
 (member:1.2.840.113556.1.4.1941:=cn=alice,ou=people,dc=example,dc=com)
 ```
 
-The server then walks the membership chain transitively, so a user in `engineering`, which is itself a member of `all-staff`, matches a rule targeting `all-staff`. That is one server-side search rather than a recursive client-side crawl.
+The server then walks the membership chain transitively, so a user in `engineering`, itself a member of `all-staff`, matches a rule targeting `all-staff`. That is one server side search rather than a recursive client side crawl.
 
-This is an **Active Directory family feature**. Other directories ignore or reject the OID, which is why it is opt-in. `nested_groups` requires `group_base_dn`, enforced when the config is parsed, because the `memberOf` attribute cannot express nesting at all.
+Other directories ignore or reject the OID, which is why it is opt in. `nested_groups` requires `group_base_dn`, enforced when the config is parsed, because `memberOf` cannot express nesting at all.
 
 > [!NOTE] Group resolution is best-effort by design
-> If the directory refuses the group search, the login still succeeds and the user gets **no** groups, which lands them on the mapping's `default_role`. That degrades a user to least privilege, which is the safe direction. The alternative, keeping whatever roles they last had, fails open and is not what you want when the directory is misbehaving.
+> If the directory refuses the group search, the login still succeeds and the user gets **no** groups, landing on the mapping's `default_role`. That degrades a user to least privilege, the safe direction. Keeping whatever roles they last had would fail open, which is not what you want when the directory is misbehaving.
 >
-> The practical consequence: a user who unexpectedly drops to `viewer` may be hitting a group-search permission problem rather than a mapping mistake. Check the service account's read rights on the group subtree.
+> So a user who unexpectedly drops to `viewer` may be hitting a group-search permission problem rather than a mapping mistake. Check the service account's read rights on the group subtree.
 
 ---
 
 ## Signing in
 
-LDAP is served through a username and password endpoint rather than a redirect:
+LDAP is served through a username and password endpoint rather than a redirect. The console renders the form automatically when password login is configured.
 
 ```
 POST /api/auth/login/password
 { "username": "alice", "password": "..." }
 ```
 
-A success returns the profile and sets the session cookie. The route answers 404 when no LDAP authenticator is configured, 400 when either field is missing, and **401 with a single generic message for every authentication failure**. That last point is deliberate: no username oracle, and no "account disabled" disclosure. The audit trail carries the real reason, recorded as `invalid_credentials`, `account_disabled`, or `directory_error`.
+A success returns the profile and sets the session cookie. The route answers 404 when no LDAP authenticator is configured and 400 when either field is missing.
 
-The console renders this form automatically when password login is configured.
+Every authentication failure returns 401 with a single generic message. That is deliberate. There is no username oracle and no account disabled disclosure. The audit trail carries the real reason, recorded as `invalid_credentials`, `account_disabled` or `directory_error`.
 
 > [!WARNING] There is no rate limiting or account lockout
-> Mewbo does not throttle password attempts and has no lockout plane. **Your directory's own lockout policy is the only brake on password guessing.** Confirm it is configured before exposing this endpoint to an untrusted network.
+> Mewbo has no throttle or lockout plane, and a per attempt delay is not an option. See [Known limits](authentication.md#known-limits).
 >
-> A per-attempt delay was considered and rejected, because blocking a worker thread turns the login route into a cheap denial-of-service lever. If you need rate limiting today, apply it at the reverse proxy.
+> Your directory's own lockout policy is therefore the only brake on password guessing. Confirm it is configured before exposing this endpoint to an untrusted network, or apply rate limiting at the reverse proxy.
 
 ---
 
 ## Verify it works
 
 1. Sign in with a known-good account, then call `GET /api/auth/me`. Expect `authenticated: true`, your `uid_attribute` value as the subject, the resolved `roles`, and an `auth_method` object reporting `kind: "ldap"`.
-2. If `roles` shows only the default, print what the directory actually returns. On the `memberOf` strategy, run the equivalent search by hand with `ldapsearch` and compare the DN strings against your rules character for character. A DN that differs only in spacing after a comma will not match an exact rule.
-3. Confirm a **wrong** password fails and that an **empty** password fails. If an empty password ever succeeds, stop and investigate immediately, because that is the anonymous-bind failure mode.
+2. If `roles` shows only the default, run the equivalent search by hand with `ldapsearch` and compare the DN strings against your rules character for character. A DN differing only in spacing after a comma will not match an exact rule.
+3. Confirm a **wrong** password fails and that an **empty** password fails. If an empty password ever succeeds, stop and investigate immediately. That is the anonymous-bind failure mode.
 4. Test nested groups, if enabled, with a user whose membership is indirect only.
 
 ---
 
 ## Failure modes
+
+These are LDAP specific. Boot failures common to every provider are in the shared [Troubleshooting](authentication-providers.md#troubleshooting) table.
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -260,14 +261,13 @@ The console renders this form automatically when password login is configured.
 | TLS handshake failures against an internal directory | The certificate is signed by a private CA the system does not trust | Set `tls_ca_file`. Do **not** turn `tls_verify` off |
 | A password you know is correct is rejected as invalid | A connection-level failure on the **rebind** leg, most often a rejected certificate, is currently reported as an invalid credential rather than as a directory fault | Check the server log and confirm the directory's certificate is trusted. Suspect this whenever the service bind succeeds but every user login fails |
 | Logins hang, then fail | The directory is unreachable or wedged | Connections are bounded at 10 seconds. Check network reachability and firewall rules |
-| Server will not boot, naming the `ldap` extra | Driver dependencies are not installed | `pip install mewbo-iam[ldap]` |
 
 ---
 
 ## LDAP injection
 
-Every value interpolated into a search filter is escaped per RFC 4515, mapping backslash, `*`, `(`, `)`, `/`, and NUL to their hex forms. This applies to the login name in `user_filter` and to the user DN in the reverse group search. An unescaped `*` would otherwise rewrite the filter it lands in, which is the LDAP analogue of SQL injection.
+Every value interpolated into a search filter is escaped per RFC 4515, mapping backslash, `*`, `(`, `)`, `/` and NUL to their hex forms. This covers the login name in `user_filter` and the user DN in the reverse group search. An unescaped `*` would otherwise rewrite the filter it lands in, the LDAP analogue of SQL injection.
 
-You do not need to do anything to enable this, but do not build a `user_filter` that tries to pre-escape or quote the placeholder yourself.
+Nothing enables this, it is always on. Do not build a `user_filter` that pre-escapes or quotes the placeholder yourself.
 
-For the concepts behind this page, including roles, the permission catalogue, how a request resolves to a principal, and what is and is not enforced, see [Authentication and Access](authentication.md). This guide connects one provider; it deliberately does not restate the model.
+For the concepts behind this page, including roles, the permission catalogue, how a request resolves to a principal, and what is and is not enforced, see [Authentication and Access](authentication.md). This guide connects one provider. It deliberately does not restate the model.

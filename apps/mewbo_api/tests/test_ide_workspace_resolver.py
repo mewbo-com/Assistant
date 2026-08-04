@@ -7,7 +7,10 @@ not own: the session transcript/tag reads and the wiki store.
 
 What the three tiers must guarantee, and what these assert:
 
-* the CONFIG tier is unchanged and still wins first;
+* the CATALOG tier still wins first, and resolves every project kind the one
+  ``ProjectCatalog`` knows — a configured name AND a ``managed:<id>`` key — since
+  a private name→directory rule beside that catalog is what refused every
+  managed-project session an IDE;
 * a wiki maintainer session mounts its project's surviving checkout, addressed by
   the server-stamped ``wiki:maintain:<slug>`` TAG — a context ``slug`` key alone
   resolves NOTHING, because any caller can write one;
@@ -30,11 +33,14 @@ from mewbo_api.apps.models import AppFrontend, AppSpec, WorkspaceRef
 from mewbo_api.apps.store import JsonAppStore
 from mewbo_api.ide_routes import (
     AppStagingMount,
-    ConfigProjectMount,
+    CatalogProjectMount,
     IdeWorkspaceResolver,
     IdeWorkspaceUnavailable,
     WikiCheckoutMount,
 )
+from mewbo_core.config import ProjectConfig
+from mewbo_core.workspaces.project_catalog import ProjectCatalog
+from mewbo_core.workspaces.project_store import VirtualProject
 
 SESSION_ID = "b" * 32
 SLUG = "git.example.com/acme/beacon"
@@ -91,19 +97,87 @@ def _app(*, maintainer: str = SESSION_ID) -> AppSpec:
 
 
 # ---------------------------------------------------------------------------
-# tier 1 — the configured project
+# tier 1 — the project catalog
 # ---------------------------------------------------------------------------
 
 
-def test_config_tier_resolves_a_configured_project(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "mewbo_core.config.get_config",
-        lambda: SimpleNamespace(projects={"demo": SimpleNamespace(path="/tmp/demo")}),
+def _managed(project_id: str, name: str, path: str) -> VirtualProject:
+    return VirtualProject(
+        project_id=project_id,
+        name=name,
+        description="",
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+        path=path,
     )
-    runtime = _runtime(context_event={"type": "context", "payload": {"project": "demo"}})
-    workspace = ConfigProjectMount().resolve(SESSION_ID, runtime)
+
+
+def _catalog_tier(*, configured=None, managed=()) -> CatalogProjectMount:
+    """The tier over a REAL catalog, whose only stubbed leg is the project store."""
+    catalog = ProjectCatalog(
+        configured=configured or {},
+        project_store=SimpleNamespace(list_projects=lambda: list(managed)),
+    )
+    return CatalogProjectMount(lambda: catalog)
+
+
+def _project_context(key: str):
+    return _runtime(context_event={"type": "context", "payload": {"project": key}})
+
+
+def test_catalog_tier_resolves_a_configured_project(tmp_path) -> None:
+    demo = tmp_path / "demo"
+    demo.mkdir()
+    tier = _catalog_tier(configured={"demo": ProjectConfig(path=str(demo))})
+    workspace = tier.resolve(SESSION_ID, _project_context("demo"))
     assert workspace is not None
-    assert (workspace.project_name, workspace.project_path) == ("demo", "/tmp/demo")
+    assert (workspace.project_name, workspace.project_path) == ("demo", str(demo))
+
+
+def test_catalog_tier_resolves_a_managed_project(tmp_path) -> None:
+    """The key every console session carries — and the one the old tier refused."""
+    checkout = tmp_path / "wt"
+    checkout.mkdir()
+    tier = _catalog_tier(managed=[_managed("abc-123", "claude-code-plugin", str(checkout))])
+    workspace = tier.resolve(SESSION_ID, _project_context("managed:abc-123"))
+    assert workspace is not None
+    # The entry's NAME, not the raw key: it is persisted and shown to the user.
+    assert (workspace.project_name, workspace.project_path) == (
+        "claude-code-plugin",
+        str(checkout),
+    )
+
+
+def test_catalog_tier_falls_through_on_an_unknown_key(tmp_path) -> None:
+    """``not_found`` is "not my kind of session" — the wiki/app tiers still get a turn."""
+    assert _catalog_tier().resolve(SESSION_ID, _project_context("nope")) is None
+
+
+def test_catalog_tier_falls_through_on_the_auto_sentinel() -> None:
+    """``auto`` means no project has been chosen yet, not a project that is broken."""
+    assert _catalog_tier().resolve(SESSION_ID, _project_context("auto")) is None
+
+
+def test_catalog_tier_refuses_a_project_whose_directory_is_gone(tmp_path) -> None:
+    """Recognised and unmountable stops the walk, carrying the catalog's own sentence.
+
+    Restating it here would be a second copy of a message the catalog already
+    writes — and the catalog's version names the path and the Docker mount rule.
+    """
+    missing = tmp_path / "gone"
+    tier = _catalog_tier(managed=[_managed("abc-123", "vanished", str(missing))])
+    with pytest.raises(IdeWorkspaceUnavailable) as excinfo:
+        tier.resolve(SESSION_ID, _project_context("managed:abc-123"))
+    assert str(missing) in str(excinfo.value)
+
+
+def test_catalog_tier_is_first_in_the_production_order() -> None:
+    resolver = IdeWorkspaceResolver.over_catalog(lambda: ProjectCatalog(configured={}))
+    assert [type(t) for t in resolver.tiers] == [
+        CatalogProjectMount,
+        WikiCheckoutMount,
+        AppStagingMount,
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -29,7 +29,19 @@ dev = [
   "altair>=6.1.0",
   "autopep8==2.3.2",
   "flake8==7.3.0",
+  # mewbo-api's `docker` extra pulls the docker-py SDK. Only the api's OWN
+  # extras cover it (the workspace root's own optional-dependencies never
+  # forward it) — without this line `uv sync --all-extras` still leaves the
+  # SDK uninstalled, and the DockerContainerBackend test modules abort
+  # collection for the whole apps/mewbo_api/tests run.
+  "mewbo-api[docker]",
   "mewbo-demo-seeder",
+  # Both demo workspace members belong here, not only in [tool.uv.sources].
+  # A source entry says where a package RESOLVES from; it does not install it.
+  # Left out, a `uv sync` drops mewbo-demo-framer from the shared venv and its
+  # whole suite aborts collection with ModuleNotFoundError — which reads as a
+  # broken package rather than a missing install.
+  "mewbo-demo-framer",
   # The identity drivers live behind extras so a deployment installs only what
   # it federates with. The suite needs every one of them present, or the driver
   # paths import-guard themselves out and the run reports green having tested
@@ -42,6 +54,15 @@ dev = [
   "pylint==3.3.9",
   "pytest==8.4.2",
   "pytest-cov==7.1.0",
+  # Parallel execution, used only through an explicit `-n <N> --dist loadfile`
+  # on an invocation — never through addopts. `-n auto` is refused on purpose:
+  # this machine routinely runs several suites at once and auto sizes to the
+  # CPU count with no awareness of that, which turns failure counts into
+  # load-dependent noise. `loadfile` rather than `load` because several test
+  # files save and restore module globals within one file, and `load` can split
+  # a single file across workers.
+  "pytest-xdist==3.8.0",
+  "pytest-timeout==2.4.0",
   "ruff==0.15.8",
   "streamlit>=1.56.0",
   # zoneinfo has no tz database of its own: uv's managed CPython ships none, so
@@ -65,7 +86,7 @@ docs = [
   # vX.Y.Z in the fork, update this URL, then refresh the lock:
   #
   #   uv lock --upgrade-package mkdocs-shadcn-mewbo
-  "mkdocs-shadcn-mewbo @ https://github.com/mewbo-com/mkdocs-shadcn/releases/download/v1.6.1/mkdocs_shadcn_mewbo-1.6.1-py3-none-any.whl",
+  "mkdocs-shadcn-mewbo @ https://github.com/mewbo-com/mkdocs-shadcn/releases/download/v1.15.0/mkdocs_shadcn_mewbo-1.15.0-py3-none-any.whl",
   "mkdocstrings[python]",
   "pymdown-extensions>=10.20.1",
 ]
@@ -84,6 +105,7 @@ members = [
   "apps/mewbo_cli",
   "apps/mewbo_mcp",
   "demo/seeder",
+  "demo/framer",
 ]
 
 [tool.uv]
@@ -98,6 +120,7 @@ mewbo-cli = { workspace = true }
 mewbo-api = { workspace = true }
 mewbo-mcp = { workspace = true }
 mewbo-demo-seeder = { workspace = true }
+mewbo-demo-framer = { workspace = true }
 mewbo-ha-conversation = { path = "apps/mewbo_ha_conversation", editable = true }
 
 [build-system]
@@ -140,6 +163,7 @@ files = [
   "apps/mewbo_cli/src/mewbo_cli/**/*.py",
   "apps/mewbo_ha_conversation/**/*.py",
   "demo/seeder/src/mewbo_demo_seeder/**/*.py",
+  "demo/framer/src/mewbo_demo_framer/**/*.py",
 ]
 explicit_package_bases = true
 mypy_path = ["."]
@@ -150,12 +174,37 @@ warn_redundant_casts = true
 warn_unused_configs = true
 
 [tool.pytest.ini_options]
+# A strict, generous time budget rather than a tuned one. The cap exists to turn
+# pathology into a failure, NOT to encode today's speed as a contract: the
+# slowest legitimate case measures ~27s, so 300s leaves an order of magnitude of
+# headroom while still failing a run that has stopped making progress. A
+# quadratic-regex defect once shipped as a PASSING test that burned eight
+# minutes, and nothing could fail for it.
+#
+# `thread` is load-bearing, not a default. The signal method raises between
+# bytecode instructions, so it cannot interrupt a long call inside a C
+# extension — which is exactly what a runaway `re` match is. Only the thread
+# method observes that class of hang at all; the cost is that it takes the whole
+# process down rather than failing one test, which is the right trade when the
+# alternative is a run that never returns.
+timeout = 300
+timeout_method = "thread"
+# `--strict-markers`/`--strict-config` fail a typo instead of silently selecting
+# nothing, which becomes load-bearing as soon as markers gate a test tier.
+addopts = "--strict-markers --strict-config --durations=25"
+# Tier 2. The default run collects these and they SKIP when the container is
+# absent, so a plain `pytest` still needs no Docker; `make test-mongo` boots the
+# substrate and selects them with `-m realmongo`.
+markers = [
+  "realmongo: needs the real MongoDB from tests/docker-compose.test.yml (make test-mongo); skips when it is absent",
+]
 testpaths = [
   "tests",
   "apps/mewbo_api/tests",
   "apps/mewbo_mcp/tests",
   "apps/mewbo_cli/tests",
   "demo/seeder/tests",
+  "demo/framer/tests",
 ]
 
 [tool.coverage.run]

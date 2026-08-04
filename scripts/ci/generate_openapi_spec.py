@@ -26,27 +26,77 @@ Exit codes (matched with ``generate_config_schema.py``):
 Conflating "regenerated" with "failed" under one exit code forces every caller
 to mask this script with ``|| true``, which then also swallows real breakage.
 
+Generation is CONFIG-INDEPENDENT, and that is load-bearing rather than tidy.
+``backend.py`` registers some namespaces only when a feature is configured on
+and its infrastructure is present, so capturing the schema from whatever config
+the generating machine happens to load makes the published contract an accident
+of one machine: a shipped capability is simply absent from the reference, the
+diff is empty precisely when the artifact is wrong, and the next build on a
+differently-configured machine reverts it. Two things close that here, both in
+this script:
+
+- the config directory is PINNED to the repo's own ``configs/app.example.json``
+  (see ``OpenApiSpecExporter.pinned_config``), so nothing ambient — a local
+  ``configs/app.json``, a ``MEWBO_HOME`` — reaches the captured schema;
+- the config-gated namespaces in ``GATED_NAMESPACES`` are mounted explicitly
+  onto the imported ``Api`` before the schema is read.
+
+**This is generation-time composition, never a runtime mode.** The server never
+imports this script, and nothing here is reachable from ``backend.py``: there is
+no flag, env var or "documentation mode" that makes a running app serve a
+namespace its config did not enable. The runtime gating is untouched, which is
+the point — a reference that documents an endpoint an operator has switched off
+is honest, while an app that serves one is a security regression.
+
 ``--check`` writes nothing and exits non-zero when the committed artifact would
-change — a local check to run before opening a change, rather than an enforced
-gate. The captured schema varies with whether a Mongo-backed session store
-exists, since the Web IDE namespace registers only when one does and an
-environment without it yields a spec carrying no IDE paths. Gating on that would
-fail for environmental reasons more often than for genuine staleness, which is
-why no workflow invokes it. The non-zero is also coarse on purpose — "stale" and
-"the generator failed" share it — so fail closed on it rather than branching.
+change. Now that the capture no longer varies with the machine, it fails for
+staleness rather than for environment, which is what makes it usable as a gate
+(``tests/test_openapi_spec_freshness.py`` runs it). The non-zero is coarse on
+purpose — "stale" and "the generator failed" share it — so fail closed on it
+rather than branching.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
+import os
 import re
+import shutil
 import sys
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SPEC_OUTPUT_PATH = REPO_ROOT / "docs" / "openapi.json"
+
+# The configuration every generation runs against. It is the tracked example
+# file rather than a second document to keep in step: a fresh checkout already
+# falls back to it, so pinning it changes what a DEVELOPER's machine produces
+# and leaves the published artifact exactly where it was.
+GENERATION_CONFIG_PATH = REPO_ROOT / "configs" / "app.example.json"
+
+# Namespaces ``backend.py`` mounts only under some configurations, as
+# ``(module, attribute, mount path)``. The mount path is repeated from
+# ``backend.py`` rather than read back off the imported ``Api``, because a
+# namespace the local configuration gated OFF is absent from ``api.ns_paths``
+# — which is every namespace listed here, by definition. The duplication is
+# guarded instead: ``tests/test_openapi_spec_freshness.py`` reads
+# ``backend.py``'s own ``add_namespace`` call site and fails when the two
+# disagree, so a changed prefix cannot publish operations at a path the server
+# does not serve. A namespace missing from this list is invisible in the
+# reference, which is the failure this file exists to prevent.
+#
+# Web IDE (``agent.web_ide.enabled`` AND a Mongo-backed session store): the
+# infrastructure half is why a config-only fix is not enough — no configuration
+# gives a CI runner a Mongo database, so the namespace would stay missing.
+GATED_NAMESPACES: tuple[tuple[str, str, str], ...] = (
+    ("mewbo_api.ide_routes", "ide_ns", "/api"),
+)
 
 # Markdown rendered by Scalar as the reference's introduction section.
 #
@@ -294,12 +344,63 @@ class OpenApiSpecExporter:
     """Captures the live Flask-RESTX schema and decorates it for the docs."""
 
     @staticmethod
-    def capture() -> dict[str, Any]:
-        """Import the API app headlessly and return its live Swagger schema."""
-        from mewbo_api.backend import api, app  # noqa: PLC0415 — heavy import
+    @contextmanager
+    def pinned_config() -> Iterator[None]:
+        """Point config discovery at ``GENERATION_CONFIG_PATH`` for the duration.
 
-        with app.test_request_context():
-            return json.loads(json.dumps(api.__schema__))
+        ``MEWBO_CONFIG_DIR`` names a DIRECTORY holding ``app.json`` and wins
+        outright over the walk up from the working directory, so the example
+        config is copied under that name into a temporary directory. Pinning
+        the directory rather than editing the process's config in place is what
+        also covers a machine whose own ``configs/app.json`` carries an
+        unresolved ``${ENV_VAR}`` reference — that fails validation at import,
+        so generation there does not produce a different spec, it produces none.
+
+        The boot run-sweep is disabled alongside it: exporting a schema must not
+        write to whatever session store the pinned config resolves to.
+        """
+        previous = {
+            key: os.environ.get(key)
+            for key in ("MEWBO_CONFIG_DIR", "MEWBO_BOOT_RUN_SWEEP")
+        }
+        with tempfile.TemporaryDirectory(prefix="mewbo-openapi-") as directory:
+            shutil.copyfile(GENERATION_CONFIG_PATH, Path(directory) / "app.json")
+            os.environ["MEWBO_CONFIG_DIR"] = directory
+            os.environ["MEWBO_BOOT_RUN_SWEEP"] = "0"
+            try:
+                yield
+            finally:
+                for key, value in previous.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+
+    @staticmethod
+    def capture() -> dict[str, Any]:
+        """Import the API app headlessly and return its live Swagger schema.
+
+        The gated namespaces are mounted BEFORE the first read of
+        ``api.__schema__``: Flask-RESTX memoizes that schema, so a namespace
+        added afterwards is silently absent from it.
+        """
+        with OpenApiSpecExporter.pinned_config():
+            from mewbo_api.backend import api, app  # noqa: PLC0415 — heavy import
+
+            for module_name, attribute, mount_path in GATED_NAMESPACES:
+                namespace = getattr(importlib.import_module(module_name), attribute)
+                # Skip one this configuration already mounted. ``add_namespace``
+                # re-runs ``register_resource`` for every resource even when it
+                # has seen the namespace, re-minting each view. Measured on
+                # flask_restx 1.3.2 that is tolerated rather than fatal — a
+                # collision raises only when an endpoint changes CLASS — so this
+                # avoids redundant re-registration rather than a known crash,
+                # and does not rely on that tolerance holding.
+                if namespace not in api.namespaces:
+                    api.add_namespace(namespace, path=mount_path)
+
+            with app.test_request_context():
+                return json.loads(json.dumps(api.__schema__))
 
     @staticmethod
     def _tag_for_path(path: str) -> str:

@@ -1,11 +1,19 @@
 # LLM Setup
 
-This page covers the minimum LLM configuration required to run Mewbo.
+## Connect a model provider
+
+Mewbo needs two keys to start, an API key and a default model, set in `configs/app.json`.
 
 ## Minimum configuration
-Set these keys in [`configs/app.json`](repo:configs/app.example.json):
+Start from the shipped example rather than an empty file.
 
-```json
+```bash
+cp configs/app.example.json configs/app.json
+```
+
+Then set these two keys in [`configs/app.json`](repo:configs/app.example.json).
+
+```json title="configs/app.json"
 {
   "llm": {
     "api_key": "sk-ant-xxxxxxxx",
@@ -14,12 +22,10 @@ Set these keys in [`configs/app.json`](repo:configs/app.example.json):
 }
 ```
 
-That's it. LiteLLM auto-routes `anthropic/claude-sonnet-4-6` to the Anthropic API using the key you provide. No `api_base` URL is needed for direct provider access.
-
-See the optional configuration table below.
+That's it. LiteLLM routes `anthropic/claude-sonnet-4-6` to the Anthropic API using the key you provide, and direct provider access needs no `api_base` URL.
 
 > [!TIP] Edit it in the console
-> Every key here is also editable in the console's **Settings → Models & Inference** panel, which writes the same config. The panel maps the API base, the (write-only) API key, and the per-role model fields (default, action-plan, tool, and title) to the keys documented on this page.
+> The console's **Settings → Models & Inference** panel writes this same config. Its fields map one to one onto the keys documented on this page.
 
 <div style="display: flex; justify-content: center;">
   <img src="../assets/img/mewbo-settings-01-models.jpg" alt="The Models & Inference panel of the Mewbo console Settings screen, with fields for the API base, a configured (write-only) API key, and the default, action-plan, tool, and title model IDs" style="width: 100%; max-width: 880px; height: auto;" />
@@ -37,12 +43,9 @@ See the optional configuration table below.
 
 ## Model fallback
 
-When the primary model fails with a retryable error, Mewbo walks an ordered fallback
-list before giving up. Useful for rate-limit tolerance and provider outages.
+When the primary model fails with a retryable error, Mewbo walks an ordered fallback list before giving up. That is what carries a run through a rate limit or a provider outage. It is off by default and needs an explicit opt-in in [`configs/app.json`](repo:configs/app.example.json).
 
-Fallback is off by default and requires an explicit opt-in. Config (in [`configs/app.json`](repo:configs/app.example.json)):
-
-```json
+```json title="configs/app.json"
 {
   "llm": {
     "default_model": "anthropic/claude-sonnet-4-6",
@@ -57,37 +60,18 @@ Fallback is off by default and requires an explicit opt-in. Config (in [`configs
 }
 ```
 
-The flat `llm.fallback_models` array is also honoured: it supplies the ladder when `fallback.models` is empty, and a non-empty value there is treated as fallback enabled. Prefer the typed `fallback` block.
+The flat `llm.fallback_models` array is also honoured. It supplies the ladder when `fallback.models` is empty, and a non-empty value there counts as fallback enabled. Prefer the typed `fallback` block.
 
-Each fallback gets one attempt. Error classification:
+Each fallback gets one attempt, and the error class decides what happens next.
 
-- **Transient errors** (rate limits, timeouts): retry primary, then cascade
-- **Context overflow**: skip to next model
-- **Auth errors**: abort immediately (no point trying same provider)
+- **Transient errors**, such as rate limits or timeouts, retry the primary model first, then cascade.
+- **Context overflow** skips straight to the next model.
+- **Auth errors** abort immediately, since retrying the same provider wouldn't help.
 
-Set `agent.llm_call_retries` for how many times to retry the primary model before cascading (default: 2).
-
-## Short walkthrough
-1. Copy the example config:
-
-```bash
-cp configs/app.example.json configs/app.json
-```
-
-2. Set `llm.api_key` and `llm.default_model` (and `llm.api_base` only if using a proxy).
-3. Start a client (CLI, API, or chat). See the client pages for run commands.
+`agent.llm_call_retries` sets the retries against the primary before cascading, and defaults to 2.
 
 ## MCP setup
-MCP servers are optional. When enabled, they add external tools to the registry.
-
-1. Create `configs/mcp.json` (or run `/mcp init` in the CLI).
-2. Add MCP server URLs and headers.
-3. Start a client once to auto-discover tools and cache the manifest under `~/.mewbo/`.
-
-For more details, see [Installation](getting-started.md).
+MCP servers are optional, and each one adds external tools to the registry. Create `configs/mcp.json` or run `/mcp init` in the CLI, then start a client once to discover tools and cache the manifest under `~/.mewbo/`. [MCP Tools](features-mcp.md) has the file schema and the per-project merge.
 
 ## LiteLLM provider support
-The LLM layer is backed by LiteLLM via `langchain-litellm`.
-
-- Use `provider/model` syntax for model IDs (e.g. `anthropic/claude-sonnet-4-6`, `openai/gpt-4o`, `mistral/mistral-small`). LiteLLM routes to the correct API automatically.
-- `llm.api_base` is only needed when routing through a proxy. When set with no provider prefix on the model name, the system prepends `llm.proxy_model_prefix` (default `"openai"`) to match OpenAI-compatible endpoints. Override `proxy_model_prefix` if your proxy expects a different prefix.
+The LLM layer runs on LiteLLM through `langchain-litellm`. Model IDs use `provider/model` syntax, for example `anthropic/claude-sonnet-4-6`, `openai/gpt-4o`, or `mistral/mistral-small`. LiteLLM routes each one to the correct API. Behind a proxy with no provider prefix on the model name, `llm.proxy_model_prefix` is prepended to route to an OpenAI-compatible endpoint.

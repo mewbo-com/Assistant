@@ -1,11 +1,11 @@
 # Project Setup
 
-When you start a session, Mewbo looks for a `CLAUDE.md` in your project, walks up the directory tree to the git root collecting any parent `CLAUDE.md` files, and injects them into the assistant's context. Deeper nested `CLAUDE.md` files (inside sub-packages) are indexed but not injected. The assistant reads them on demand with `read_file` when work reaches that directory.
+## What a session loads at start
 
-The same mechanism handles MCP tool configuration, skills, and local overrides.
+When you start a session, Mewbo injects your project's `CLAUDE.md`, and any parent files, into the system prompt. The same discovery handles MCP servers, skills and local overrides.
 
 > [!TIP] Drop-in compatible with common agent conventions
-> Mewbo reads both the [Claude Code](https://docs.claude.com/en/docs/claude-code/memory) `CLAUDE.md` format and the open [`AGENTS.md`](https://agents.md) convention used by Codex, Aider, and other agent frameworks. MCP servers follow the [Model Context Protocol](https://modelcontextprotocol.io) and accept both `servers` (Mewbo) and `mcpServers` (Claude Code / VS Code) keys. Skills follow the [Agent Skills](https://docs.claude.com/en/api/agent-skills) standard. If you already use any of these tools, your existing project files work in Mewbo without modification.
+> Mewbo reads the [Claude Code](https://docs.claude.com/en/docs/claude-code/memory) `CLAUDE.md` format and the open [`AGENTS.md`](https://agents.md) convention used by Codex, Aider and other agent frameworks. MCP servers follow the [Model Context Protocol](https://modelcontextprotocol.io) and accept both `servers` and `mcpServers`. Skills follow the [Agent Skills](https://docs.claude.com/en/api/agent-skills) standard. Your existing project files work unmodified.
 
 ---
 
@@ -17,24 +17,20 @@ Every session runs somewhere on disk, and there are three ways to pick where.
 |---|---|---|
 | Temporary directory (default) | A fresh, empty scratch directory that exists only for the session | The task does not need an existing codebase: a one-off script, a calculation, a question with no repository behind it |
 | A named project | The directory you choose before the session starts | You already know which project the work belongs to |
-| Auto | A temporary directory at first, then wherever the model decides | The right project is not obvious up front, or the task genuinely touches more than one project |
+| Auto | A temporary directory at first, then any project the session moves into | The right project is not obvious up front, or the task genuinely touches more than one project |
 
-The first two choices are fixed for the life of the session: you name the working directory, or you leave it unset and Mewbo defaults to a scratch directory. Auto is dynamic. The session still starts in a temporary directory like the default case, but two tools are bound to it that let the model find the project the task actually needs and move into it, then change its mind later if the task grows to cover more than one.
+The default and named choices are fixed for the life of the session. Auto starts the same way and can move later.
 
 ### What the model sees in auto mode
 
-`list_projects` enumerates every project Mewbo currently knows about: directories an operator registered by hand, projects and worktrees Mewbo manages itself, and git repositories that have been registered but not necessarily checked out anywhere. Each entry reports a key, a name, its kind, a description, whether it is currently available, and its repository slug and branch when known. A registered repository with no local checkout still appears in the list, so the model can see that it exists; it cannot be worked in until something checks it out, and `switch_project` refuses a key pointing at one until then.
+Auto mode binds two extra tools to the top level agent. `list_projects` enumerates every project Mewbo knows about, including repositories registered but never checked out. `switch_project` moves the session into one of them, so the working directory changes and the new project's instruction files load as described below.
 
-`switch_project` takes a key from that list and moves the session into it. The working directory moves, the project's own instruction files are picked up the same way described below, and any sub-agent spawned after the switch inherits the new directory too. A sub-agent already running when the switch happens keeps the directory it started in; the switch moves the session going forward, not agents already in flight. The model can call `switch_project` repeatedly, and a task that legitimately spans several projects is expected to.
+Two constraints shape a switch, and both are deliberate.
 
-Two limits are worth knowing, because both are deliberate rather than gaps:
+- **A switch never grants more tools than the run started with.** The tool registry is rebuilt for the new directory, but the bound set narrows to what the agent already held, so a project's own `.mcp.json` servers are not admitted partway through a run. Otherwise moving between projects would be a way to acquire tools the caller never granted. Start a fresh session there and its servers resolve normally.
+- **A sub-agent already running keeps the directory it started in.** The switch moves the session going forward, not agents already in flight. A parent can hand a sub-agent its own project at spawn time instead, which is what lets one session run a fleet in one repository while another fleet works in a second.
 
-- **A switch never grants the agent more tools than it started with.** The tool registry is rebuilt for the new directory, but the set of tools bound to the agent narrows to what the run already held; a project's own `.mcp.json` servers are not admitted partway through a run. Otherwise moving between projects would be a way to acquire tools the caller never granted. Start a fresh session against that project and its servers resolve normally.
-- **Skills accumulate rather than being replaced.** The registry also holds plugin-contributed and user-level skills, and a fresh scan of the new directory alone would drop them. Carrying the previous project's skills costs less than losing those.
-
-A parent agent can also hand a sub-agent its own project at the moment it spawns it, independent of any switch. That is what lets one session run a fleet of agents in one repository while another fleet works in a second, all under the same session.
-
-Both tools exist only for the top-level agent, and only while the session is in auto mode. A sub-agent works in whatever directory it was spawned into or later switched to by its own parent; it never re-scopes the whole session. See [Built-in Tools](features-builtin-tools.md#list_projects) for the full parameter and result reference.
+Both tools exist only for the top level agent, and only in auto mode. See [Built-in Tools](features-builtin-tools.md#list_projects) for parameters, results and the full switch semantics.
 
 ---
 
@@ -42,7 +38,7 @@ Both tools exist only for the top-level agent, and only while the session is in 
 
 ### Upward pass: content injected at startup
 
-At session start, Mewbo walks up from your current working directory to the git root (or the filesystem root if you are not in a repo) and loads every instruction file it finds along the way. The full text of each file is concatenated and injected into the system prompt before the first LLM call. Each source is separated by a heading, so the assistant can tell where a rule came from.
+At session start, Mewbo walks up from your working directory to the git root, or the filesystem root outside a repo, and loads every instruction file along the way. Each file's full text is concatenated into the system prompt under a heading naming its source.
 
 | Priority | Path | Scope |
 |----------|------|-------|
@@ -51,11 +47,11 @@ At session start, Mewbo walks up from your current working directory to the git 
 | 30 | `.claude/rules/*.md` (all files, sorted) | Project-local rule set |
 | 40 | `CLAUDE.local.md` | Machine-local override (gitignore this) |
 
-Lower priority means lower precedence. Higher-priority content wins on conflict. If both `CLAUDE.md` and `AGENTS.md` exist at the same path, `CLAUDE.md` takes precedence and `AGENTS.md` is treated as a fallback.
+Lower priority means lower precedence, so higher priority content wins on conflict. Where `CLAUDE.md` and `AGENTS.md` sit at the same path, `CLAUDE.md` takes precedence and `AGENTS.md` is treated as a fallback.
 
 ### Downward pass: context map for on-demand loading
 
-Mewbo also scans *down* from your working directory to a maximum depth of 5, looking for `CLAUDE.md`, `AGENTS.md`, and `.claude/CLAUDE.md` in subdirectories. Critically, the content of these files is **not** injected. Only the file paths are collected and listed in the system prompt, like so:
+Mewbo also scans *down* from your working directory to a maximum depth of 5, looking for `CLAUDE.md`, `AGENTS.md`, and `.claude/CLAUDE.md` in subdirectories. The content of these files is **not** injected. Only the file paths are collected and listed in the system prompt, shown below.
 
 ```
 # Sub-package instruction files
@@ -68,15 +64,15 @@ Read them when working on the relevant package.
 - apps/mewbo_api/AGENTS.md
 ```
 
-When the assistant begins work in one of those directories, it reads the appropriate file with `read_file` before proceeding. This keeps large monorepos manageable: only the directly applicable instructions are in the active context, and nested package instructions are fetched on demand.
+Work starting in one of those directories reads the matching file with `read_file` first. That is what keeps a large monorepo manageable, since only the directly applicable instructions occupy the active context.
 
-**Pruned directories** (never walked): `node_modules`, `__pycache__`, `.venv`, `venv`, and all dotfile directories (`.git`, `.claude`, etc.).
+Some directories are never walked. `node_modules`, `__pycache__`, `.venv`, `venv`, and all dotfile directories such as `.git` and `.claude` are pruned.
 
 ### Noload marker
 
 Add `<!-- mewbo:noload -->` as the very first line of any instruction file to exclude it from both passes. The loader checks the first line before reading the rest of the file.
 
-Use this for shim files that redirect to another `CLAUDE.md` (so you do not get duplicate injection):
+Use this for shim files that redirect to another `CLAUDE.md`, so you do not get duplicate injection.
 
 ```markdown
 <!-- mewbo:noload -->
@@ -85,7 +81,7 @@ See ../CLAUDE.md. This file exists only for tool compatibility.
 
 ### Git context
 
-Mewbo can include git branch and status in the session context, so the assistant knows what branch you are on and what has changed since the last commit. Individual integrations (the CLI, specific skills) opt in to this. It is not always injected.
+Mewbo can add the current git branch and status to the session context. Individual integrations opt in, including the CLI and specific skills, so it is not always injected.
 
 ---
 
@@ -93,7 +89,7 @@ Mewbo can include git branch and status in the session context, so the assistant
 
 ### Config merge order
 
-MCP server definitions come from four layers, merged together in this order. Later layers win on key conflicts, using deep-merge semantics (nested objects are merged recursively, not replaced wholesale).
+MCP server definitions come from four layers. Later layers win on key conflicts, using deep merge semantics where nested objects merge recursively rather than getting replaced wholesale.
 
 | Layer | Source | Priority |
 |-------|--------|----------|
@@ -102,13 +98,13 @@ MCP server definitions come from four layers, merged together in this order. Lat
 | 3 | Subtree `.mcp.json` files, deepest-first | Mid-high |
 | 4 | CWD `.mcp.json` | Highest |
 
-The practical rule: **your CWD `.mcp.json` wins over the global one**, and subtree `.mcp.json` files deeper in the tree are merged in too. A project `.mcp.json` that adds a single server key leaves all global server definitions intact.
+A project `.mcp.json` that adds a single server key therefore leaves every global server definition intact.
 
-Mewbo re-runs this merge whenever the MCP pool reconnects, so edits to any `.mcp.json` in the hierarchy are picked up automatically. Unchanged servers keep their existing connections; changed or new servers reconnect; removed servers disconnect.
+Mewbo reruns the merge whenever the MCP pool reconnects, so edits anywhere in the hierarchy are picked up automatically. Unchanged servers keep their connections, changed ones reconnect, and removed ones disconnect.
 
 ### Config normalization
 
-All `.mcp.json` files are normalized before merging, so you can mix schemas freely:
+All `.mcp.json` files are normalized before merging, so you can mix schemas freely.
 
 | Input field | Normalized to | Notes |
 |-------------|---------------|-------|
@@ -119,11 +115,9 @@ All `.mcp.json` files are normalized before merging, so you can mix schemas free
 | `command` present, no `transport` | `transport: "stdio"` | Inferred |
 | `${VAR}` / `$VAR` in values | Expanded from process environment | Unresolved vars left as-is |
 
-This means Claude Code `.mcp.json` files (using `mcpServers`) work without modification.
-
 ### Example project `.mcp.json`
 
-```json
+```json title=".mcp.json"
 {
   "servers": {
     "project_db": {
@@ -134,38 +128,23 @@ This means Claude Code `.mcp.json` files (using `mcpServers`) work without modif
 }
 ```
 
-Or using the Claude Code schema (both accepted):
-
-```json
-{
-  "mcpServers": {
-    "project_db": {
-      "command": "mcp-sqlite",
-      "args": ["--db", "./dev.db"]
-    }
-  }
-}
-```
+The Claude Code shape works too. Write `mcpServers` with a string `command` and an `args` array, and normalization folds it into the form above.
 
 ---
 
 ## Skills and project context
 
-Skills follow the same layered discovery as instruction files. See [Skills](features-skills.md#where-skills-live) for the full path table. The key point: project-local skills (`.claude/skills/`) take precedence over personal skills (`~/.claude/skills/`), and subtree skills fill gaps without overriding either.
+Skills follow the same layered discovery as instruction files. See [Skills](features-skills.md#where-skills-live) for the full path table. Project local skills at `.claude/skills/` take precedence over personal skills at `~/.claude/skills/`, and subtree skills fill gaps without overriding either.
 
 ---
 
 ## Summary: what goes into the context at startup
 
-| Component | When loaded | How it enters the context |
-|-----------|-------------|---------------------------|
-| User + project CLAUDE.md files (upward) | Session start | Full text injected into system prompt |
-| Rules (`.claude/rules/*.md`) | Session start | Full text injected into system prompt |
-| Local CLAUDE.local.md | Session start | Full text injected into system prompt |
-| Subtree CLAUDE.md index (downward) | Session start | Path list only. Content loaded on demand via `read_file` |
-| Skills catalog | Session start | Name + description index in system prompt; body loaded via `activate_skill` |
-| MCP tool schemas | Session start | Tool schemas bound to the LLM call |
-| Subtree `.mcp.json` | Per reconnect | Merged into active server set |
+| How it enters | Components |
+|---|---|
+| Full text in the system prompt | User and project `CLAUDE.md` files, `.claude/rules/*.md`, `CLAUDE.local.md` |
+| Index only, body read on demand | Subtree `CLAUDE.md` paths via `read_file`, skills via `activate_skill` |
+| Bound to the LLM call | MCP tool schemas, remerged whenever the pool reconnects |
 
 > [!NOTE] How it works internally
 > See [Architecture Overview → Instruction loading](core-orchestration.md#instruction-loading) and [MCP connection pool](core-orchestration.md#mcp).

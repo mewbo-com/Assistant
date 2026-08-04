@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-import time
+import os
 
 import pytest
 from mewbo_core.tooling.skills import (
@@ -352,11 +352,14 @@ class TestSkillRegistry:
         registry.load(str(tmp_path))
         assert "original body" in registry.get("mutable").body
 
-        # Modify the file.
-        time.sleep(0.05)  # ensure mtime changes
+        # Modify the file. The mtime is SET rather than waited for — a
+        # filesystem timestamp is the one clock a test can write directly, so
+        # sleeping until it happens to tick is never the way to make it differ.
         skill_file = skills_dir / "mutable" / "SKILL.md"
         content = skill_file.read_text()
         skill_file.write_text(content.replace("original body", "updated body"))
+        future = skill_file.stat().st_mtime + 10
+        os.utime(skill_file, (future, future))
 
         changed = registry.maybe_reload()
         assert changed is True

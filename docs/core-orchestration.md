@@ -1,16 +1,21 @@
 # Architecture Overview
 
-This page is the canonical internals document for Mewbo. It is written for developers embedding the core as a library, contributing new tools or channel adapters, or debugging session behaviour. Every other page in the documentation describes *what* a feature does; this page describes *how* each feature is implemented, which modules own the behaviour, and which data structures survive compaction or restart.
+## How the engine runs a session
 
-If you are setting up the product, start at [Get Started](getting-started.md). If you are looking up a capability, browse the [Capabilities](features-builtin-tools.md) section. The Feature pages link back here for the implementation detail they intentionally omit.
+This page is the internals reference for Mewbo. It names the module that owns each behaviour and the
+state that survives compaction and restart. Setup lives in [Get Started](getting-started.md) and
+feature descriptions in [Capabilities](features-builtin-tools.md).
 
 ---
 
 ## Execution model
 
-Mewbo uses a single async execution engine for every agent at every depth: `ToolUseLoop`. There is no separate planner, executor, or synthesiser. The LLM drives tool selection via native `bind_tools`. The orchestration layer steps the message array forward.
+One async engine runs every agent at every depth, and that engine is `ToolUseLoop`. There is no
+separate planner, executor, or synthesiser. The LLM selects tools through native `bind_tools`, and
+the orchestration layer steps the message array forward.
 
-The loop runs until the LLM emits a text response with no tool calls. Budget warnings are injected as `SystemMessage` entries as the session approaches limits. The loop is never force-killed.
+The loop runs until the LLM emits a text response with no tool calls. Budget warnings are injected as
+`SystemMessage` entries as the session approaches limits. The loop is never force-killed.
 
 ```mermaid
 sequenceDiagram
@@ -34,7 +39,9 @@ sequenceDiagram
     Orchestrator-->>Client: response
 ```
 
-**Tool concurrency.** Tools are partitioned into concurrent-safe batches and exclusive calls. Concurrent-safe tools execute in parallel with `asyncio.gather`. Exclusive tools run alone. Each tool has a configurable timeout (default 120 s). A timeout does not cancel sibling calls.
+**Tool concurrency.** Tools are partitioned into concurrent-safe batches and exclusive calls.
+Concurrent-safe tools run in parallel through `asyncio.gather` and exclusive tools run alone. Each
+tool carries its own timeout, 120 seconds by default, and a timeout does not cancel sibling calls.
 
 ### Core components
 
@@ -50,15 +57,21 @@ sequenceDiagram
 | `SessionStore` | Transcript and summary storage. |
 | `ToolRegistry` | Local tools plus external MCP tools, with `filter_specs()` for allow/deny. |
 
+/// table-caption
+The modules that own each part of a session.
+///
+
 ### Execution flow
 
-Input arrives from a client (CLI, API, or a chat-platform adapter). The orchestrator builds a context snapshot (summary, recent events, selected history). In act mode, a single async `ToolUseLoop` executes. In plan mode, the `Planner` generates a plan without execution. The LLM can spawn sub-agents via `spawn_agent` for parallel sub-tasks, managed by the `AgentHypervisor`. Results are written to the session transcript.
+The orchestrator builds a context snapshot from the summary, recent events, and selected history.
+Results are written to the session transcript.
 
 ---
 
 ## Instruction loading {#instruction-loading}
 
-`discover_all_instructions()` performs an **upward pass** from the current working directory to the git root (or filesystem root) and loads instruction files in priority order (higher priority wins):
+`discover_all_instructions()` walks **upward** from the current working directory to the git root or
+the filesystem root, loading instruction files in priority order. Higher priority wins.
 
 | Priority | Path | Scope |
 |----------|------|-------|
@@ -67,9 +80,13 @@ Input arrives from a client (CLI, API, or a chat-platform adapter). The orchestr
 | 30 | `.claude/rules/*.md` (all files, sorted) | Project-local rule set |
 | 40 | `CLAUDE.local.md` | Machine-local override (gitignore this) |
 
-The full text of each file is concatenated and injected into the system prompt before the first LLM call. Each source is separated by a heading so content is traceable. When both `CLAUDE.md` and `AGENTS.md` exist at the same path, `CLAUDE.md` takes precedence.
+The full text of every file is concatenated into the system prompt before the first LLM call, each
+source under its own heading so content stays traceable. Where `CLAUDE.md` and `AGENTS.md` sit at the
+same path, `CLAUDE.md` takes precedence.
 
-`discover_subtree_instructions()` performs a **downward pass** from CWD to a maximum depth of 5, scanning for `CLAUDE.md`, `AGENTS.md`, and `.claude/CLAUDE.md`. Content is **not** injected; only paths are. The system prompt receives an index like:
+`discover_subtree_instructions()` walks **downward** from CWD to a maximum depth of 5, scanning for
+`CLAUDE.md`, `AGENTS.md`, and `.claude/CLAUDE.md`. It injects paths, never content. The system prompt
+receives an index.
 
 ```
 # Sub-package instruction files
@@ -77,17 +94,18 @@ The full text of each file is concatenated and injected into the system prompt b
 - apps/mewbo_console/CLAUDE.md
 ```
 
-When a later tool call targets a file inside `packages/mewbo_core/`, the model's next prediction produces a `read_file` call that pulls the relevant `CLAUDE.md` into the message array as a tool result. This keeps large monorepos manageable. Only directly applicable instructions occupy the active context.
+A later tool call under `packages/mewbo_core/` produces a `read_file` call that pulls the matching
+`CLAUDE.md` in as a tool result. Only the instructions that apply occupy the active context.
 
-Pruned directories (never walked): `node_modules`, `__pycache__`, `.venv`, `venv`, and all dotfile directories. A `<!-- mewbo:noload -->` marker on line 1 of any instruction file excludes it from both passes.
+`node_modules`, `__pycache__`, `.venv`, `venv`, and every dotfile directory are never walked. A
+`<!-- mewbo:noload -->` marker on line 1 excludes a file from both passes.
 
-`get_git_context()` collects branch, working-tree status, and recent commits. It is available as a helper; individual integrations decide whether to include it.
+`get_git_context()` collects branch, working-tree status, and recent commits. Each integration
+decides whether to include it.
 
 ---
 
 ## Skill loading {#skill-loading}
-
-Skills use a two-stage lazy-load pattern. A catalog (name + description only) is injected into the system prompt at session start. The full `SKILL.md` body enters the message array as a `ToolMessage` only when `activate_skill` is called.
 
 ```mermaid
 sequenceDiagram
@@ -107,15 +125,21 @@ sequenceDiagram
     MessageArray->>Model: next bind_tools call includes skill body\nand scoped tool set
 ```
 
-When `allowed-tools` is set on a skill, activation replaces the full tool list using the same `filter_specs()` mechanism that sub-agent spawning uses. Shell preprocessing (`` !`command` ``) executes each matched command (30-second timeout) and substitutes stdout into the body before it is handed to the model; errors become `[ERROR: ...]` placeholders.
+A skill that sets `allowed-tools` replaces the full tool list on activation, through the same
+`filter_specs()` mechanism sub-agent spawning uses. Shell preprocessing with `` !`command` `` runs
+each matched command under a 30 second timeout and substitutes stdout into the body. Errors become
+`[ERROR: ...]` placeholders.
 
-The skill registry checks file modification times and reloads changed files between sessions. New skill directories appearing while the server runs are detected on the next scan.
+The registry compares file modification times and reloads changed files between sessions. A skill
+directory added while the server runs is picked up on the next scan.
 
 ---
 
 ## Capability overlay {#capability-overlay}
 
-Capabilities are opaque string ids advertised by the client (e.g. `stlite`). They gate which agents and skills are visible to a given session. The model never sees a gated entry. The tool schema is not bound, the agent definition does not enter the spawn catalog, and the skill catalog line is omitted.
+Capabilities are opaque string ids advertised by the client, such as `stlite`. They gate which agents
+and skills are visible to a session. A gated entry never reaches the model, so its tool schema is not
+bound, its agent definition stays out of the spawn catalog, and its skill catalog line is omitted.
 
 ### Data flow
 
@@ -132,14 +156,18 @@ flowchart LR
     E --> I[filter_specs on bound tool schema]
 ```
 
-1. The HTTP layer reads `X-Mewbo-Capabilities` (comma-separated) and passes it through to session creation.
-2. The value is persisted on the session's context event as `client_capabilities`. It survives compaction because it lives on the event transcript, not in the LLM message array.
-3. `Orchestrator` reads the event once per session, normalises it through `parse_capabilities()`, and threads a `tuple[str, ...]` into the `ToolUseLoop` constructor. The tuple is immutable for the lifetime of the session.
-4. `AgentRegistry.visible_for(session_capabilities)` and `SkillRegistry.list_auto_invocable(session_capabilities)` / `list_user_invocable(session_capabilities)` apply the filter at every render of their catalogs.
+The header is a comma separated list. Its value persists on the session's context event as
+`client_capabilities` rather than in the LLM message array, which is why it survives compaction.
+
+`Orchestrator` normalises it once per session through `parse_capabilities()` and threads an immutable
+`tuple[str, ...]` onward. The registry methods above apply the filter on every catalog render.
 
 ### Filter implementation
 
-[`capabilities.py::filter_by_capabilities`](repo:packages/mewbo_core/src/mewbo_core/capabilities.py) is the single filter. An item whose `requires_capabilities` tuple is a subset of the session's set is included; an empty `requires_capabilities` is always included. Ordering and duplication of `session_capabilities` do not matter, as comparison uses set semantics.
+[`capabilities.py::filter_by_capabilities`](repo:packages/mewbo_core/src/mewbo_core/capabilities.py)
+is the single filter. An item is included when its `requires_capabilities` tuple is a subset of the
+session's set, and an empty tuple is always included. Comparison uses set semantics, so order and
+duplication do not matter.
 
 | Function | Purpose |
 |---|---|
@@ -149,7 +177,8 @@ flowchart LR
 
 ### Sources of `requires_capabilities`
 
-Capabilities can be declared at three levels. They are combined as a union at discovery time.
+Three levels can declare a capability, and discovery unions them through `overlay_capabilities()`,
+so an author never repeats a bundle capability file by file.
 
 | Source | Where it lives | Scope |
 |---|---|---|
@@ -157,21 +186,28 @@ Capabilities can be declared at three levels. They are combined as a union at di
 | `SkillSpec` frontmatter | Same block in a `SKILL.md` file | Single skill |
 | Plugin manifest | `"requires-capabilities": ["stlite"]` in `plugin.json` | Every agent and skill the plugin contributes |
 
-Plugin-level declarations are applied via `overlay_capabilities()` during discovery: the plugin's capabilities are unioned onto each contributed spec before the spec enters the registry. Authors never repeat a bundle-level capability per file.
-
 ### Tool gating
 
-Session tools bound to a gated agent are also hidden. When a session does not advertise `stlite`, the `st-widget-builder` agent is not in the spawn catalog, so the `submit_widget` session tool is never instantiated. No tool-schema filtering is required at the `filter_specs()` level for this path. The agent gate is upstream of binding.
+A session tool bound to a gated agent is hidden with it. Without `stlite` advertised, the
+`st-widget-builder` agent stays out of the spawn catalog and the `submit_widget` session tool is
+never instantiated. The agent gate sits upstream of binding, so `filter_specs()` does no work on this
+path.
 
 ---
 
 ## Sub-agents and the hypervisor {#sub-agents}
 
-Every session has a single `AgentHypervisor` instance shared across the entire agent tree. It has two layers.
+Every session has one `AgentHypervisor`, shared across the entire agent tree. It works in two layers.
 
-**Reflexes (code-level watchdog).** A background check runs every 30 seconds. It examines all running agents for stalls (no tool call within the stall threshold, default 120 s). When a stall is detected, a `SystemMessage` warning is injected into the stalled agent's queue. Budget enforcement is similarly graduated. As `session_step_budget` is approached, warnings are injected. The loop is never hard-killed. This preserves accumulated context.
+**Reflexes.** A code-level watchdog checks every running agent every 30 seconds. An agent with no
+tool call inside the stall threshold, 120 seconds by default, receives a `SystemMessage` warning in
+its queue. Budget enforcement is graduated the same way as `session_step_budget` is approached, and
+no hard kill follows, which preserves accumulated context.
 
-**Brain (global eye).** The root agent's system prompt is rebuilt each step. It includes `render_agent_tree()`, a compact live view of the entire agent tree. The tree shows status, steps completed, last tool, and progress notes. The root can read this at any time via `check_agents` without an extra LLM call. Compaction events are tracked per agent (`compaction_count`, `last_compacted_at`) and visible in the tree view.
+**Brain.** The second layer is a global view. The root agent's system prompt is rebuilt each step
+around `render_agent_tree()`, a compact live view of the whole tree carrying status, steps completed,
+last tool, progress notes, and the per-agent counters `compaction_count` and `last_compacted_at`.
+`check_agents` reads it at any time with no extra LLM call.
 
 ### Lifecycle
 
@@ -189,15 +225,44 @@ stateDiagram-v2
     rejected --> [*]
 ```
 
-Admission runs before a child is registered, and it is a gate with exactly two outcomes. An **accepted** spawn is registered immediately: it receives an `agent_id`, enters the hypervisor's registry, and starts in `submitted`, whether or not a concurrency slot is free at that moment. A `submitted` child holding no slot yet is fully visible to `check_agents` throughout, and moves to `running` on its own the moment a sibling completes and releases a slot; a parent waiting on that child's result does not itself consume a slot for the wait, only a `running` agent does. A **rejected** spawn is never registered at all. It is reserved for a refusal that would be identical on retry: an unresolvable `project`, an unknown `agent_type`, or a model this deployment cannot serve. Reaching `agent.max_concurrent` running agents is never one of those reasons; it only delays a `submitted` child's move to `running`.
+Admission runs before a child is registered and has exactly two outcomes.
 
-Agents run until the model returns a text response with no tool calls. This is **natural completion**. There is no hard step limit. Safety comes from `agent.llm_call_timeout`, stall detection, and `agent.session_step_budget`.
+An **accepted** spawn is registered immediately. It receives an `agent_id` and starts in `submitted`
+whether or not a slot is free, stays visible to `check_agents` throughout, and moves to `running`
+once a sibling completes and releases a slot. A parent waiting on that result holds no slot. Only a
+`running` agent does.
+
+A **rejected** spawn is never registered at all. Rejection covers refusals that would be identical on
+retry, meaning an unresolvable `project`, an unknown `agent_type`, or a model this deployment cannot
+serve. Reaching `agent.max_concurrent` is never one of them. It only delays the move to `running`.
+
+Agents run until the model returns a text response with no tool calls. That is **natural
+completion**, and there is no hard step limit. Safety comes from `agent.llm_call_timeout`, stall
+detection, and `agent.session_step_budget`.
 
 ### Spawning semantics
 
-Root spawns (depth = 0) are non-blocking: the call returns an envelope with an `agent_id` immediately, `status: "submitted"` whether or not a slot was free at that moment, and `_run_child_lifecycle` stores the `AgentResult` on the `AgentHandle` when the child finishes. A permanently refused root spawn returns `status: "rejected"` with no `agent_id` instead. Sub-agent spawns (depth ≥ 1) are blocking: the call waits for the child to reach a terminal state, including any time it spends `submitted` before a slot frees, and returns an `AgentResult` JSON payload inline. Capacity is never a reason a blocking spawn fails, and the parent's own wait consumes no slot; only the same permanent-refusal reasons stop a blocking spawn.
+| Caller depth | Call | Returns |
+|---|---|---|
+| 0 (root) | Does not block | An envelope with an `agent_id` and `status: "submitted"`, whether or not a slot was free. `_run_child_lifecycle` stores the `AgentResult` on the `AgentHandle` when the child finishes. |
+| 1 and deeper | Blocks | An `AgentResult` JSON payload inline, once the child reaches a terminal state. The wait includes any time the child spent `submitted`. |
 
-`task` is the only required parameter of `spawn_agent`. The rest are optional: `model`, `allowed_tools`, `denied_tools`, `acceptance_criteria`, `agent_type`, `project`, `retry`, `summary_kind`, `capability_mode`, `workspace_mode`, `approval_policy`, `contract`, and `verification`. `max_steps` is accepted but not enforced — sub-agents run to natural completion. Sub-agents inherit the parent's `approval_callback` so write, edit, and shell tools work in API and headless contexts. `spawn_agents(tasks=[...])` fans multiple independent sub-agents out from one call; see [Sub-agents → Spawning multiple sub-agents at once](features-agents.md#spawning-multiple-sub-agents-at-once) for the batch outcome shape.
+/// table-caption
+Spawn behaviour by the depth of the calling agent.
+///
+
+A permanently refused root spawn returns `status: "rejected"` with no `agent_id` instead. Capacity
+never fails a blocking spawn.
+
+`task` is the only required parameter of `spawn_agent`. The optional ones are `model`,
+`allowed_tools`, `denied_tools`, `acceptance_criteria`, `agent_type`, `project`, `retry`,
+`summary_kind`, `capability_mode`, `workspace_mode`, `approval_policy`, `contract`, and
+`verification`. `max_steps` is accepted but not enforced.
+
+Sub-agents inherit the parent's `approval_callback`, so write, edit, and shell tools work in API and
+headless contexts. `spawn_agents(tasks=[...])` fans several independent sub-agents out of one call.
+See [Sub-agents → Spawning multiple sub-agents at
+once](features-agents.md#spawning-multiple-sub-agents-at-once) for the batch outcome shape.
 
 ### AgentResult
 
@@ -210,9 +275,14 @@ Root spawns (depth = 0) are non-blocking: the call returns an envelope with an `
 | `warnings` | array | Non-fatal issues encountered |
 | `artifacts` | array | File paths touched by the agent |
 
+/// table-caption
+The result envelope a sub-agent returns to its parent.
+///
+
 ### Depth roles
 
-Each depth level has a distinct behavioural role injected into the system prompt via `_build_depth_guidance()`:
+Each depth level receives a distinct behavioural role in its system prompt through
+`_build_depth_guidance()`.
 
 | Depth | Role | Behaviour |
 |---|---|---|
@@ -220,7 +290,8 @@ Each depth level has a distinct behavioural role injected into the system prompt
 | 1–4 (mid) | Sub-orchestrator | Bounded scope; may further delegate |
 | 5 (leaf) | Executor | Complete task directly; self-terminate; admit failure explicitly |
 
-At depth 5 the `spawn_agent` tool is removed from the schema entirely. The LLM cannot attempt further delegation.
+At depth 5 the `spawn_agent` tool is removed from the schema entirely, so no further delegation can
+be attempted.
 
 ### Messaging
 
@@ -231,105 +302,184 @@ At depth 5 the `spawn_agent` tool is removed from the schema entirely. The LLM c
 | System → agent | Hypervisor injects budget warnings and stall nudges as `HumanMessage` |
 | User → root | `message_queue` (thread-safe `queue.Queue`), `interrupt_step` (`threading.Event`). Drained between steps as `HumanMessage`. Exposed via `/message` and `/interrupt`. Created in `RunRegistry.start()`. |
 
-Messages are drained between tool steps. They never interrupt an in-flight tool call.
+/// table-caption
+Every route by which a message reaches a running agent.
+///
+
+A drain happens between tool steps, so nothing interrupts an in-flight tool call.
 
 ### Compaction resilience
 
-Sub-agent state survives compaction because it lives outside the LLM conversation history. The agent tree is rebuilt each step into the root system prompt from live `AgentHandle` state. `check_agents` reads `AgentHandle` directly in memory. Completed child results are stored on `AgentHandle.result` and re-injected after compaction. Compaction never loses track of running or completed sub-agents.
+Sub-agent state survives compaction because it lives outside the LLM conversation history. The tree
+is rebuilt into the root system prompt each step from live `AgentHandle` state, `check_agents` reads
+`AgentHandle` directly in memory, and completed child results sit on `AgentHandle.result` for
+re-injection afterwards.
 
 ### Cleanup and structured errors
 
-Cleanup runs in three phases (cancel → wait with timeout → force-mark as cancelled). `await_lifecycle_managers(timeout)` runs before event-loop teardown. `AgentError` captures `agent_id`, `depth`, `task`, `message`, `last_tool`, `steps`. Sub-agent cleanup cascades to children before unregistering.
+Cleanup runs in three phases. Cancel, wait with a timeout, then force-mark as cancelled.
+`await_lifecycle_managers(timeout)` runs before event-loop teardown, and sub-agent cleanup cascades
+to children before unregistering. `AgentError` captures `agent_id`, `depth`, `task`, `message`,
+`last_tool`, and `steps`.
 
-On root step-limit with pending non-blocking children, a 2-second grace period applies before completed results are injected as a `SystemMessage` for synthesis; still-running agents are named in the warning prompt.
+When the root hits its step limit with children still pending, a 2 second grace period applies before
+completed results are injected as a `SystemMessage` for synthesis. Agents still running are named in
+the warning prompt.
 
 ---
 
 ## Permission policy {#permission-policy}
 
-Every tool call is represented as an `ActionStep` with a `tool_id` and an `operation` (e.g. `get`, `set`). Before the tool runs, `PermissionPolicy.decide()` walks a list of `PermissionRule` entries and returns `allow`, `deny`, or `ask`. Rules are evaluated in order; the first match wins.
+Every tool call is an `ActionStep` carrying a `tool_id` and an `operation` such as `get` or `set`.
+`PermissionPolicy.decide()` walks the list of `PermissionRule` entries before the tool runs, matching
+`fnmatch` glob patterns on both fields.
 
-Matching uses `fnmatch` glob patterns on both `tool_id` and `operation`. If no rule matches, the policy falls back to per-operation defaults (`get` → `allow`, `set` → `ask`), then to a catch-all `default_decision`.
+```mermaid
+flowchart LR
+    A[ActionStep] --> B{Rule matches<br/>tool_id and operation?}
+    B -- first match wins --> C[allow / deny / ask]
+    B -- no rule matches --> D{operation}
+    D -- get --> E[allow]
+    D -- set --> F[ask]
+    D -- anything else --> G[default_decision]
+```
 
-`permissions.approval_mode` sets a session-wide shortcut that overrides the policy file: `allow` (also `auto`, `approve`, `yes`), `deny` (also `never`, `no`), or `ask` (default).
+`permissions.approval_mode` overrides the policy file for a whole session. It accepts `allow`,
+`deny`, or `ask`, and `ask` is the default. `auto`, `approve` and `yes` alias `allow`. `never` and
+`no` alias `deny`.
 
 ---
 
 ## Policies {#policies}
 
-Policies hook into the **pre-execution gate** inside the tool-use loop: after MCP input coercion and the permission check, but before the pre-tool hook fires and before the tool itself executes. This is the single authoritative intercept point: no tool can execute without passing through it.
+Policies hook into the **pre-execution gate** inside the tool-use loop. No tool executes without
+passing through it.
 
-When a resolved tool call matches an active policy's greylist, the loop:
+```mermaid
+flowchart LR
+    A[Resolved tool call] --> B[MCP input coercion]
+    B --> C[Permission check]
+    C --> D[Policy pre-execution gate]
+    D --> E[pre_tool_use hook]
+    E --> F[Tool executes]
+```
 
-1. Captures the fully-resolved tool call.
-2. Starts an **isolated single-turn LLM invocation** with minimal context: the policy body and only the exception-structure tool are available. The checker cannot see the session's conversation history.
-3. If the checker returns nothing, the call proceeds normally. If it calls the exception tool, the call is blocked and the exception text is returned to the agent as the tool result.
-4. If `isTerminal: true` and a violation fires, the session ends immediately after the exception is delivered.
+A resolved tool call matching an active policy's greylist goes through four steps.
 
-Multiple policies matching the same call run concurrently. A policy violation from any one of them is sufficient to block the call; all concurrent checks must clear for execution to proceed.
+1. The fully resolved call is captured.
+2. An **isolated single-turn LLM invocation** starts with only the policy body and the
+   exception-structure tool available. The session's conversation history is not in that context.
+3. A checker returning nothing lets the call proceed. A checker calling the exception tool blocks it,
+   and the exception text is returned to the agent as the tool result.
+4. With `isTerminal: true`, a violation ends the session immediately after the exception is
+   delivered.
 
-`PolicyRegistry` mirrors `SkillRegistry` in structure: a catalog is advertised at session start, and individual policy bodies are loaded lazily. Policy files live alongside skill files and are discovered through the same scan paths.
+Policies matching the same call run concurrently. Every check must clear for execution to proceed, so
+one violation blocks the call.
+
+`PolicyRegistry` mirrors `SkillRegistry`. A catalog is advertised at session start, bodies load
+lazily, and policy files share the skill scan paths.
 
 ---
 
 ## Monitors {#monitors}
 
-Monitors are spawned in the `on_session_start` hook and torn down in `on_session_end`. Each monitor is a **restricted tool-use loop session** tracked by the hypervisor as a peer of regular sub-agents: it has its own `AgentHandle`, lifecycle states, and token accounting. Monitors never appear in the agent tree visible to the root agent.
+Monitors are spawned in the `on_session_start` hook and torn down in `on_session_end`. Each is a
+**restricted tool-use loop session** that the hypervisor tracks as a peer of regular sub-agents, with
+its own `AgentHandle`, lifecycle states, and token accounting. Monitors never appear in the agent
+tree the root agent sees.
 
-The monitor's tool set is hard-restricted at the tool-registry level before the session is constructed. Only `inject_message`, `interrupt_session`, and any tools listed in the monitor definition's `allowed-tools` are registered. The periodic invocation loop receives a read-only snapshot of the full agent tree at each tick as a structured `SystemMessage`.
+A monitor's tool set is hard-restricted at the tool-registry level before its session is constructed.
+Only `inject_message`, `interrupt_session`, and the definition's own `allowed-tools` are registered.
+Each tick of the periodic invocation loop delivers a read-only snapshot of the full agent tree as a
+structured `SystemMessage`.
 
 | Tool | Mechanism |
 |------|-----------|
 | `inject_message` | Routes through `AgentHypervisor.send_message()` to the target agent's queue; drained between tool steps |
 | `interrupt_session` | Sets a checked signal on the target loop's step boundary; never interrupts an in-flight tool call |
 
-Crashed monitors are automatically respawned by the hypervisor after a short backoff. A monitor that crashes repeatedly is marked `failed` and not retried for the remainder of the session.
+/// table-caption
+The two tools a monitor can call against the session it watches.
+///
 
-`MonitorRegistry` mirrors `PolicyRegistry` and `SkillRegistry`. Monitor definitions ship as files in the standard scan paths and are loaded at session init.
+A crashed monitor is respawned after a short backoff. One that crashes repeatedly is marked `failed`
+and not retried for the rest of the session. `MonitorRegistry` mirrors `PolicyRegistry` and
+`SkillRegistry`, with definitions shipping as files in the standard scan paths.
 
 ---
 
 ## Hook manager {#hook-manager}
 
-`HookManager` dispatches hooks at lifecycle points and around individual tool calls. Every invocation is wrapped in `try/except`. A failing hook logs a warning and never blocks execution. `HookManager.load_from_config()` wires external hooks declared in `HooksConfig` into the manager. The API server calls this at startup and passes `hook_manager` to every `start_async()` call.
+`HookManager` dispatches hooks at lifecycle points and around individual tool calls. Every invocation
+is wrapped in `try/except`, so a failing hook logs a warning and never blocks execution.
+`HookManager.load_from_config()` wires `HooksConfig` entries into the manager, and the API server
+calls it at startup and passes `hook_manager` into every `start_async()` call.
 
-Two hook types:
+There are two hook types.
 
-- **Command hooks.** Shell subprocess. `_session_env()` provides `MEWBO_SESSION_ID`, `MEWBO_ERROR`, `MEWBO_TOOL_ID`, `MEWBO_OPERATION`, and `MEWBO_TOOL_RESULT` (first 2 000 chars). Waits up to `timeout` seconds (default 30), then moves on.
-- **HTTP hooks.** Fire-and-forget JSON POST to an external URL in a daemon thread. Does not block execution. Failures are logged.
+- **Command hooks.** A shell subprocess. `_session_env()` provides `MEWBO_SESSION_ID`,
+  `MEWBO_ERROR`, `MEWBO_TOOL_ID`, `MEWBO_OPERATION`, and the first 2 000 characters of
+  `MEWBO_TOOL_RESULT`. The manager waits up to `timeout` seconds, 30 by default, then moves on.
+- **HTTP hooks.** A fire-and-forget JSON POST to an external URL from a daemon thread. Nothing blocks
+  on it and failures are logged.
 
-An optional `matcher` (fnmatch pattern) restricts which tool IDs trigger the hook. `matcher: "mcp__*"` restricts to all MCP tools; omitting the matcher matches every call.
+An optional `matcher` fnmatch pattern restricts which tool ids fire the hook. `matcher: "mcp__*"`
+restricts to all MCP tools, and omitting it matches every call.
 
-Lifecycle events: `on_session_start`, `on_session_end`, `pre_tool_use`, `post_tool_use`. `on_compact` is fired programmatically from the compaction path. It is not configurable via `HooksConfig` but can be registered in code.
+Lifecycle events are `on_session_start`, `on_session_end`, `pre_tool_use`, and `post_tool_use`.
+`on_compact` fires programmatically from the compaction path. It cannot be configured through
+`HooksConfig` but can be registered in code.
 
 ---
 
 ## Plan mode signals {#plan-mode}
 
-In plan mode, the LLM binds only read-only tools plus the `exit_plan_mode` signal. Writes are blocked. Once the model calls `exit_plan_mode`, `ToolUseLoop` emits a `plan_proposed` event and terminates the run, waiting for a decision.
+In plan mode the LLM binds read-only tools plus the `exit_plan_mode` signal, and writes are blocked.
+Free text feedback on a rejection reaches the model as context for a revision.
 
-Approval emits `plan_approved` and starts a new act-mode run. Rejection emits `plan_rejected`. Free-text feedback is provided to the model as context for a revised plan.
+```mermaid
+stateDiagram-v2
+    [*] --> planning : plan mode run starts
+    planning --> plan_proposed : exit_plan_mode called, run terminates
+    plan_proposed --> plan_approved : approved
+    plan_proposed --> plan_rejected : rejected
+    plan_rejected --> planning : revised plan
+    plan_approved --> acting : new act-mode run
+    acting --> [*]
+```
 
-Plan approval is **episodic**: approval and rejection events persist in the session transcript and survive process restarts. `SessionRuntime.resolve_session()` checks for unresolved `plan_proposed` events before starting a new run.
+Plan approval is **episodic**. Approval and rejection events persist in the session transcript and
+survive a process restart, and `SessionRuntime.resolve_session()` checks for unresolved
+`plan_proposed` events before starting a new run.
 
-Each `exit_plan_mode` call increments a per-session counter stored at `<plan_dir>/revision.txt`. The revision number appears in `plan_proposed` events so the UI can distinguish between first drafts and revised plans.
+Each `exit_plan_mode` call increments a per-session counter stored at `<plan_dir>/revision.txt`. The
+revision number rides on `plan_proposed` events, so a UI can tell a first draft from a revision.
 
 ### Shell allowlist
 
-During exploration Mewbo enforces a shell allowlist via `agent.plan_mode_shell_allowlist`. Only commands whose first token matches a configured prefix are permitted. Commands containing an unquoted pipe (`|`), redirect (`>`, `<`), chain (`&`, `;`), variable expansion (`$`), or command substitution (`` ` ``) are rejected regardless of the allowlist. Prefixes match at word boundaries. For example, `"git log"` matches `"git log --oneline"` but not `"git logger"`. An empty list blocks shell access entirely.
+Exploration runs against the shell allowlist `agent.plan_mode_shell_allowlist`. Only commands whose
+first token matches a configured prefix are permitted, and prefixes match at word boundaries, so
+`"git log"` matches `"git log --oneline"` and not `"git logger"`.
 
-MCP tools are never mode-filtered in plan mode: Mewbo cannot classify a third-party MCP tool's effect, so the plan-mode filter admits every MCP tool unconditionally rather than guessing.
+A command carrying an unquoted pipe `|`, redirect `>` or `<`, chain `&` or `;`, variable expansion
+`$`, or backtick substitution is rejected regardless of the allowlist. An empty list blocks shell
+access entirely.
+
+MCP tools are never mode-filtered in plan mode. Mewbo cannot classify a third-party MCP tool's
+effect, so the filter admits every MCP tool unconditionally rather than guessing.
 
 ---
 
 ## Compaction pipeline {#compaction}
 
-Compaction has two modes:
+Compaction has two modes.
 
-- **`PARTIAL`**: default for auto-compact. Keeps the most recent `context.recent_event_limit` events verbatim (default 8). Everything older is summarised.
-- **`FULL`**: summarises the entire transcript, including recent events. Clean-slate prompt.
+- **`PARTIAL`** is the default for auto-compact. The most recent `context.recent_event_limit` events
+  stay verbatim, 8 of them by default, and everything older is summarised.
+- **`FULL`** summarises the entire transcript, recent events included, from a clean-slate prompt.
 
-The compaction LLM receives the raw event transcript and produces a structured response in two XML sections:
+The compaction LLM receives the raw event transcript and returns two XML sections.
 
 ```xml
 <analysis>
@@ -346,21 +496,32 @@ The compaction LLM receives the raw event transcript and produces a structured r
 </summary>
 ```
 
-Only the `<summary>` block is stored. The `<analysis>` scratchpad is stripped before injection into subsequent prompts.
+Only the `<summary>` block is stored.
 
-After the summary is generated, Mewbo scans summarised events for file paths referenced by tool calls and re-reads up to 5 files (up to 5 000 tokens each) back into the compacted context. Recently edited files land in the prompt as literal content so the model can continue editing without re-reading them.
+Mewbo then scans the summarised events for file paths referenced by tool calls and re-reads up to 5
+of those files back into the compacted context, up to 5 000 tokens each. A recently edited file lands
+as literal content, so editing continues without a re-read.
 
-**Caveman mode** (`compaction.caveman_mode = true`) activates a terse summarisation prompt. It drops articles, filler phrases, and hedging. Code blocks, file paths, URLs, commands, and error strings are preserved verbatim. Output tokens drop by ~30–60 % on prose-heavy sessions without changing the XML structure.
+Setting `compaction.caveman_mode` to `true` activates a terse summarisation prompt. It drops
+articles, filler phrases, and hedging, while code blocks, file paths, URLs, commands, and error
+strings survive verbatim. Output tokens drop by roughly 30 to 60 percent on prose-heavy sessions,
+with the XML structure unchanged.
 
-Each compaction emits a `context_compacted` event with payload `{model, tokens_before, tokens_saved, events_summarized}`. The console timeline renders compaction events as a distinct pill. The context-window bar popover includes a **Compactions** row when at least one has run.
+Each compaction emits a `context_compacted` event carrying
+`{model, tokens_before, tokens_saved, events_summarized}`. The console timeline renders it as a
+distinct pill, and the context-window bar popover gains a **Compactions** row once one has run.
 
-Auto-compact fires when the most recent root prompt size crosses `token_budget.auto_compact_threshold` (default 0.8 of the model's context window). The threshold is evaluated after every LLM call using the actual `input_tokens` reported by the provider. This is not a character-count estimate.
+Auto-compact fires when the most recent root prompt size crosses
+`token_budget.auto_compact_threshold`, 0.8 of the model's context window by default. The threshold is
+evaluated after every LLM call against the `input_tokens` the provider reported, not a
+character-count estimate.
 
 ---
 
 ## Token tracking {#token-tracking}
 
-Mewbo tracks usage separately for the root agent (depth = 0) and all sub-agents (depth ≥ 1). Three distinct input-token semantics:
+Mewbo tracks usage separately for the root agent at depth 0 and for all sub-agents below it. Input
+tokens carry three distinct semantics.
 
 | Semantic | Fields | When to use |
 |----------|--------|-------------|
@@ -368,17 +529,24 @@ Mewbo tracks usage separately for the root agent (depth = 0) and all sub-agents 
 | Context pressure (peak) | `root_peak_input_tokens`, `sub_peak_input_tokens` | Worst-case historical pressure. Popover secondary stat. |
 | Billable (cost) | `*_input_tokens_billed` | Cumulative sum across all calls. Cost dashboards. |
 
-Do **not** sum `input_tokens` across calls within a turn. The prompt grows as tool results accumulate. Each step re-sends the full context, so summing double-counts the baseline. Use the peak or the last value. Output tokens are always additive. Each output token is produced once.
+Do **not** sum `input_tokens` across calls within a turn. Each step re-sends the full context as tool
+results accumulate, so summing double-counts the baseline. Use the peak or the last value. Output
+tokens are always additive, because each one is produced once.
 
-Prompt caching auto-enables via LiteLLM for models that report support. No configuration is required. Mewbo queries `litellm.utils.supports_prompt_caching` to decide whether to enable caching for a given model name.
+Prompt caching is enabled automatically through LiteLLM for models that report support, with no
+configuration. Mewbo queries `litellm.utils.supports_prompt_caching` for the model name.
 
-When using a proxy (`llm.api_base` set), the proxy must expose `/v1/model/info` advertising each model's capabilities. Mewbo fetches this endpoint once per process at startup and registers the results with LiteLLM so `supports_prompt_caching` returns accurate results for proxy-routed custom model names. Without `/v1/model/info`, caching falls back to disabled for those models.
+Behind a proxy, meaning `llm.api_base` is set, the proxy must expose `/v1/model/info` advertising
+each model's capabilities. Mewbo fetches that endpoint once per process at startup and registers the
+results with LiteLLM, so `supports_prompt_caching` answers accurately for proxy-routed custom model
+names. Without it, caching falls back to disabled for those models.
 
 ---
 
 ## MCP connection pool {#mcp}
 
-MCP server definitions are assembled from four layers, merged deepest-first with deep-merge semantics (later layers win on key conflicts):
+MCP server definitions come from four layers, deep-merged deepest-first so later layers win on key
+conflicts.
 
 | Layer | Source | Priority |
 |-------|--------|----------|
@@ -387,11 +555,13 @@ MCP server definitions are assembled from four layers, merged deepest-first with
 | 3 | Subtree `.mcp.json` files, deepest-first | Middle |
 | 4 | CWD `.mcp.json` | Highest |
 
-The session's project directory is passed as `cwd` to `MCPToolRunner`. Each `connect_all` call re-invokes `get_merged_mcp_config(cwd)` and hashes the merged result with SHA-256; changed or new servers reconnect, removed servers disconnect, unchanged servers keep their existing connections.
+The session's project directory is passed to `MCPToolRunner` as `cwd`. Each `connect_all` call
+re-runs `get_merged_mcp_config(cwd)` and hashes the result with SHA-256. Changed and new servers
+reconnect, removed servers disconnect, and unchanged servers keep their connections.
 
 ### Config normalization
 
-All `.mcp.json` files are normalised before merging:
+Every `.mcp.json` file is normalised before merging.
 
 | Input field | Normalized to | Notes |
 |-------------|---------------|-------|
@@ -408,10 +578,13 @@ All `.mcp.json` files are normalised before merging:
 |-----------|--------|
 | Persistent connections | One `MultiServerMCPClient` per server, reused across all requests. |
 | Auto-reconnect | After 3 consecutive call errors on a server, the pool invalidates it and attempts a single reconnect before retrying the failed call. |
-| Config change detection | Config hash is compared on each `connect_all` call. |
 | Connect timeout | 30 seconds per server. |
 | Call timeout | 60 seconds per tool invocation. |
 | Concurrent connects | Up to 5 servers connect in parallel at startup. |
+
+/// table-caption
+How the pool holds connections open and recovers from a failing server.
+///
 
 A one-shot client is the fallback when the pool is unavailable.
 
@@ -419,23 +592,32 @@ A one-shot client is the fallback when the pool is unavailable.
 
 ## LSP tool {#lsp}
 
-`lsp_tool` is backed by `pygls` and `lsprotocol`. When these optional dependencies are absent, the tool is silently disabled on startup. There is no crash and no error.
+`lsp_tool` is backed by `pygls` and `lsprotocol`. Without those optional dependencies it is silently
+disabled on startup rather than raising.
 
-Servers are auto-discovered via `shutil.which`. They are spawned lazily per-session on the first request for a matching file type. A server that fails to start is added to a `_failed` set. It is not retried for the lifetime of the session. `shutdown_all()` terminates running servers at session end.
+Servers are auto-discovered through `shutil.which` and spawned lazily per session on the first
+request for a matching file type. One that fails to start joins a `_failed` set and is not retried
+for the lifetime of the session. `shutdown_all()` terminates running servers at session end.
 
-The manager walks up from CWD looking for each server's `root_markers`. If no marker is found within 20 directory levels, CWD itself becomes the workspace root.
+The manager walks up from CWD for each server's `root_markers`, falling back to CWD itself when no
+marker appears within 20 directory levels.
 
-Passive diagnostics run via an `_append_lsp_feedback` hook inside `ToolUseLoop` after every file edit. The diagnostics are appended to the context as a tool result. The LLM sees type errors and lint warnings in the same turn it wrote the edit, with no explicit `lsp_tool` call required. Disable by setting `agent.lsp.enabled` to `false`.
+Passive diagnostics run through an `_append_lsp_feedback` hook inside `ToolUseLoop` after every file
+edit and are appended to the context as a tool result. Type errors and lint warnings reach the model
+in the same turn as the edit, with no explicit `lsp_tool` call. Set `agent.lsp.enabled` to `false` to
+disable this.
 
-Custom servers defined under `agent.lsp.servers` specify `command`, `extensions`, and optionally `root_markers` and `language_id`. Disable a built-in server with `{"pyright": {"disabled": true}}`.
+A custom server under `agent.lsp.servers` specifies `command` and `extensions`, and optionally
+`root_markers` and `language_id`. Disable a built-in server with `{"pyright": {"disabled": true}}`.
 
 ---
 
 ## Web IDE manager {#web-ide}
 
-`IdeManager` manages per-session code-server containers. State is persisted in the `ide_instances` MongoDB collection so the IDE survives API restarts and multiple browser tabs. The Web IDE feature requires MongoDB as the storage backend.
-
-The API container needs access to the Docker socket (`/var/run/docker.sock`) to spawn sibling code-server containers. In the Docker Compose stack this is wired automatically.
+`IdeManager` runs one code-server container per session. State is persisted in the `ide_instances`
+MongoDB collection, so the IDE survives API restarts and multiple browser tabs. The Web IDE requires
+MongoDB as the storage backend, and the API container needs the Docker socket at
+`/var/run/docker.sock` to spawn sibling containers. The Docker Compose stack wires that up.
 
 ```mermaid
 sequenceDiagram
@@ -457,7 +639,10 @@ sequenceDiagram
     Console->>User: Open /ide/{id}/ in new tab
 ```
 
-The session's project directory is mounted at `/home/coder/project`. A deadline file is bind-mounted at `/mewbo/deadline`. The container's internal watchdog reads it on a 15-second interval and self-terminates when the epoch passes. `POST /api/sessions/{session_id}/ide/extend` overwrites the deadline file and updates MongoDB. `DELETE` force-removes the container, deadline file, and MongoDB document.
+The project directory is mounted at `/home/coder/project` and a deadline file at `/mewbo/deadline`.
+The container's internal watchdog reads the deadline every 15 seconds and self-terminates once the
+epoch passes. `POST /api/sessions/{session_id}/ide/extend` overwrites the file and updates MongoDB.
+`DELETE` force-removes the container, the deadline file, and the MongoDB document.
 
 ---
 
@@ -465,11 +650,14 @@ The session's project directory is mounted at `/home/coder/project`. A deadline 
 
 ### read_file cache
 
-`read_file` maintains a per-session cache keyed by `(path, offset, limit)`. If the session calls `read_file` on the same slice twice without any intervening edit to that file, the second call returns immediately from cache. It does not re-read or re-emit the content into the context window. In real sessions this cuts 60–99 % of context consumed by repeated reads of the same large file.
+`read_file` maintains a per-session cache keyed by `(path, offset, limit)`. A repeated call on the
+same slice with no intervening edit returns from cache, without re-reading the file or re-emitting
+content into the context window. In real sessions this cuts 60 to 99 percent of the context spent on
+repeated reads of one large file.
 
 ### Tool output schemas
 
-Each built-in tool returns a JSON payload tagged with `kind`:
+Each built-in tool returns a JSON payload tagged with `kind`.
 
 ```json
 // read_file
@@ -488,9 +676,15 @@ Each built-in tool returns a JSON payload tagged with `kind`:
 
 ### Edit tool selection
 
-Both edit backends share [`edit_common.py`](repo:packages/mewbo_tools/src/mewbo_tools/integration/edit_common.py) and emit `{"kind": "diff", ...}`. `AgentConfig.edit_tool` selects `"search_replace_block"` or `"structured_patch"`. When empty (default), `ToolUseLoop._configured_edit_tool_id()` auto-selects based on model identity via `llm.model_prefers_structured_patch()`. The tool schema, LLM prompt instructions, and backend implementation all switch together. They are bundled in the same `ToolSpec` registration.
+Both edit backends share
+[`edit_common.py`](repo:packages/mewbo_tools/src/mewbo_tools/integration/edit_common.py) and emit
+`{"kind": "diff", ...}`. `AgentConfig.edit_tool` selects `search_replace_block` or
+`structured_patch`. Left empty, the default, `ToolUseLoop._configured_edit_tool_id()` auto-selects
+from model identity through `llm.model_prefers_structured_patch()`. The tool schema, the prompt
+instructions, and the backend all switch together, bundled in one `ToolSpec` registration.
 
-Extend which models receive the structured-patch backend via `llm.structured_patch_models` (accepts wildcards): `["my-custom-model*", "openai/gpt-5"]`.
+`llm.structured_patch_models` extends which models receive the structured-patch backend and accepts
+wildcards, for example `["my-custom-model*", "openai/gpt-5"]`.
 
 ---
 
@@ -508,27 +702,42 @@ flowchart TD
     E & F & G & H --> I[Session ready: all plugin components active]
 ```
 
-`load_all_plugin_components()` runs during session initialisation. It reads the installed-plugins registry file, discovers each plugin's directory, and fans contributions into the live registries. The result is cached by registry-file mtime. Repeated calls within the same process are free unless a plugin was installed or uninstalled.
+`load_all_plugin_components()` runs during session initialisation. Its result is cached by
+registry-file mtime, so repeated calls within one process are free unless a plugin was installed or
+uninstalled. `${CLAUDE_PLUGIN_ROOT}` inside a plugin's `.mcp.json` or
+`hooks/hooks.json` is substituted at discovery time with the plugin's installation directory.
 
-`${CLAUDE_PLUGIN_ROOT}` in a plugin's `.mcp.json` or `hooks/hooks.json` is substituted at discovery time with the plugin's installation directory.
+**Precedence.** A plugin skill never overrides a personal skill in `~/.claude/skills/` or a
+project-local one in `.claude/skills/` with the same name. Plugin MCP servers merge additively, and a
+later plugin does not overwrite an earlier one for the same server name. Plugin hooks are
+format-translated and merged into the live `HooksConfig`.
 
-**Precedence.** Plugin skills do not override personal (`~/.claude/skills/`) or project-local (`.claude/skills/`) skills with the same name. Plugin MCP servers are merged additively. Later plugins do not overwrite earlier ones for the same server name. Plugin hooks are format-translated and merged into the live `HooksConfig`.
-
-`PluginsConfig` lives in `config.py` and defines `enabled`, `enabled_plugins`, `marketplaces`, `marketplace_default_host`, and `install_path`. The CLI exposes `/plugins`; the API exposes `GET/POST /api/plugins`, `GET/POST /api/plugins/marketplace`, and [`DELETE /api/plugins/{plugin_name}`](endpoint:DELETE /api/plugins/{plugin_name}); the console renders `PluginsView`.
-
-See [Session tools](#session-tools) for plugin-contributed per-agent stateful tools.
+`PluginsConfig` lives in `config.py` and defines `enabled`, `enabled_plugins`, `marketplaces`,
+`marketplace_default_host`, and `install_path`. The CLI exposes `/plugins`. The API exposes
+`GET/POST /api/plugins`, `GET/POST /api/plugins/marketplace`, and
+[`DELETE /api/plugins/{plugin_name}`](endpoint:DELETE /api/plugins/{plugin_name}). The console
+renders `PluginsView`. See [Session tools](#session-tools) for plugin-contributed per-agent stateful
+tools.
 
 ### Built-in plugin scan path
 
-A fourth scan source sits alongside the registry-driven paths: the directory [`packages/mewbo_core/src/mewbo_core/builtin_plugins/`](repo:packages/mewbo_core/src/mewbo_core/builtin_plugins). Any plugin checked in under this path is discovered through the **same** pipeline as user-installed and marketplace-installed plugins. It is byte-for-byte a normal plugin (manifest, `agents/`, `skills/`, `hooks/hooks.json`, `.mcp.json`, `session_tools`) with no `installed_plugins.json` entry required.
+A fourth scan source sits alongside the registry-driven paths. Any plugin checked in under
+[`packages/mewbo_core/src/mewbo_core/builtin_plugins/`](repo:packages/mewbo_core/src/mewbo_core/builtin_plugins)
+is discovered through the **same** pipeline as a user-installed or marketplace-installed one. It is
+byte-for-byte a normal plugin, with a manifest, `agents/`, `skills/`, `hooks/hooks.json`, `.mcp.json`
+and `session_tools`, and it needs no `installed_plugins.json` entry.
 
-The path is resolved at runtime via `importlib.resources.files("mewbo_core") / "builtin_plugins"` so discovery works identically for editable installs (`pip install -e .`), wheels, and zipapps. The scanner iterates every immediate subdirectory that contains a `.claude-plugin/plugin.json`.
-
-Currently bundled: `widget_builder/` (declares `requires-capabilities: ["stlite"]`). Other bundles slot in by dropping a plugin-shaped directory next to it. No discovery code needs to change.
+The path resolves at runtime through `importlib.resources.files("mewbo_core") / "builtin_plugins"`,
+so discovery behaves identically for editable installs, wheels, and zipapps. The scanner iterates
+every immediate subdirectory containing a `.claude-plugin/plugin.json`. `widget_builder/` is the only
+bundle today and declares `requires-capabilities: ["stlite"]`. Another needs no discovery code
+change, only a plugin-shaped directory beside it.
 
 ### Path substitution
 
-Plugin-owned agent bodies and skill bodies can reference three placeholders. Substitution is a single linear `str.replace` pass per placeholder. There is no template engine, no expression language, and bodies with no placeholders are byte-identical after the pass.
+A plugin-owned agent body or skill body can reference three placeholders. Substitution is a single
+linear `str.replace` pass per placeholder, with no template engine and no expression language, so a
+body with no placeholders comes out byte-identical.
 
 | Placeholder | Resolved at | Value |
 |---|---|---|
@@ -536,19 +745,26 @@ Plugin-owned agent bodies and skill bodies can reference three placeholders. Sub
 | `${SESSION_ID}` | Agent spawn | The current session's id |
 | `${MEWBO_WIDGET_ROOT}` | Agent spawn | Widget-builder output root; supports `:-` default syntax |
 
-`${CLAUDE_PLUGIN_ROOT}` is also substituted inside `.mcp.json` and `hooks/hooks.json` at discovery time, as noted above. `${SESSION_ID}` and `${MEWBO_WIDGET_ROOT}` are agent-body-only and resolve inside `spawn_agent` just before the body is handed to the child `ToolUseLoop`.
+`${CLAUDE_PLUGIN_ROOT}` is also substituted inside `.mcp.json` and `hooks/hooks.json` at discovery
+time. The other two are agent-body only and resolve inside `spawn_agent`, just before the body
+reaches the child `ToolUseLoop`.
 
 ---
 
 ## Session tools {#session-tools}
 
-A **session tool** is a per-agent stateful tool whose lifecycle is coupled to one specific agent instance rather than the global `ToolRegistry`. The handler holds state (accumulated across calls within the agent's run), declares its own OpenAI function schema, and can signal clean loop termination independently of the model's final text response. The core `ExitPlanModeTool` is a session tool. The widget-builder's `SubmitWidgetTool` is a session tool contributed by a plugin.
+A **session tool** is a per-agent stateful tool whose lifecycle is coupled to one agent instance
+rather than to the global `ToolRegistry`. Its handler holds state across calls within that agent's
+run, declares its own OpenAI function schema, and can signal clean loop termination independently of
+the model's final text response.
 
-Session tools are defined in [`session_tools.py`](repo:packages/mewbo_core/src/mewbo_core/tooling/session_tools.py).
+The core `ExitPlanModeTool` is one. So is the widget-builder's `SubmitWidgetTool`, contributed by a
+plugin. The protocol lives in
+[`session_tools.py`](repo:packages/mewbo_core/src/mewbo_core/tooling/session_tools.py).
 
 ### Protocol
 
-```python
+```python title="packages/mewbo_core/src/mewbo_core/tooling/session_tools.py"
 class SessionTool(Protocol):
     tool_id: str
     schema: dict[str, object]
@@ -566,9 +782,15 @@ class SessionTool(Protocol):
 | `handle(action_step)` | Executes the call, returns a `MockSpeaker` with the tool result (consumed like any `ToolMessage`). |
 | `should_terminate_run()` | Returns `True` (once, consuming the flag) when the loop should exit cleanly after the current step. |
 
+/// table-caption
+The five members a session tool declares.
+///
+
 ### Registry and factories
 
-`SessionToolRegistry` holds one `SessionToolFactory` per `tool_id`. A factory is `Callable[[session_id, event_logger], SessionTool]`. Construction is cheap and happens per agent.
+`SessionToolRegistry` holds one `SessionToolFactory` per `tool_id`. A factory is
+`Callable[[session_id, event_logger], SessionTool]`, and construction is cheap and happens once per
+agent.
 
 ```mermaid
 sequenceDiagram
@@ -592,9 +814,9 @@ sequenceDiagram
 
 ### Plugin contract
 
-Plugins contribute session tools via a `session_tools` array in `plugin.json`:
+A plugin contributes session tools through a `session_tools` array in `plugin.json`.
 
-```json
+```json title="plugin.json"
 {
   "session_tools": [
     {
@@ -606,17 +828,27 @@ Plugins contribute session tools via a `session_tools` array in `plugin.json`:
 }
 ```
 
-`SessionToolRegistry.load_entry()` imports the class at session start and registers a factory. `build_for(allowed_tools, …)` instantiates one per-agent instance when an agent spawns with a matching `tool_id` in its `allowed_tools`. A broken plugin (missing fields, import error, constructor raises) is logged and skipped. It never crashes the host session.
+`SessionToolRegistry.load_entry()` imports the class at session start and registers a factory.
+`build_for(allowed_tools, …)` instantiates one instance per agent when an agent spawns with a
+matching `tool_id` in its `allowed_tools`. A broken plugin is logged and skipped, whether a field is
+missing, the import fails, or the constructor raises. It never crashes the host session.
 
 ### Loop integration
 
-Inside `ToolUseLoop`, schema injection, dispatch, and termination all iterate a single `list[SessionTool]`. Core's built-in session tools and plugin-contributed ones are handled by the same three call sites. There is no widget-specific branch; the only asymmetry is the built-in set (just `ExitPlanModeTool` today) versus the plugin-loaded set. Gated agents (see [Capability overlay](#capability-overlay)) never reach `build_for`, so a plugin session tool on a hidden agent is never instantiated.
+Inside `ToolUseLoop`, schema injection, dispatch, and termination all iterate a single
+`list[SessionTool]`, so core and plugin tools share the same three call sites with no widget-specific
+branch. The only asymmetry is the built-in set, just `ExitPlanModeTool` today, against the
+plugin-loaded set.
+
+A gated agent never reaches `build_for`, so a session tool on a hidden agent is never instantiated.
+See [Capability overlay](#capability-overlay) for the gate itself.
 
 ---
 
 ## Channel adapters {#channel-adapters}
 
-Chat-platform adapters implement the `ChannelAdapter` protocol ([`channels/base.py`](repo:apps/mewbo_api/src/mewbo_api/channels/base.py)):
+A chat-platform adapter implements the `ChannelAdapter` protocol in
+[`channels/base.py`](repo:apps/mewbo_api/src/mewbo_api/channels/base.py).
 
 | Method / property | Purpose |
 |---|---|
@@ -625,29 +857,43 @@ Chat-platform adapters implement the `ChannelAdapter` protocol ([`channels/base.
 | `send_response` | Deliver the final answer back to the channel |
 | `system_context` | Injected into the LLM system prompt. Makes the model aware it is communicating through this adapter |
 
-`ChannelRegistry` lookup and `DeduplicationGuard` replay protection are shared. The webhook endpoint `POST /api/webhooks/<platform>` authenticates via HMAC (not API key). Poll-driven channels (e.g. Email) call `_process_inbound()` directly from their own poller instead of via the webhook route.
+`ChannelRegistry` lookup and `DeduplicationGuard` replay protection are shared. The webhook endpoint
+`POST /api/webhooks/<platform>` authenticates with HMAC rather than an API key. A poll-driven channel
+such as Email calls `_process_inbound()` from its own poller instead.
 
-The shared `_process_inbound()` pipeline in [`routes.py`](repo:apps/mewbo_api/src/mewbo_api/channels/routes.py) runs dedup → mention gate → session resolve → commands → LLM for every channel. `requires_mention(message)` is optional on the adapter for dynamic mention gating (Email uses this to skip the `@Mewbo` requirement on 1-to-1 threads).
+The shared `_process_inbound()` pipeline in
+[`routes.py`](repo:apps/mewbo_api/src/mewbo_api/channels/routes.py) runs dedup, mention gate, session
+resolve, commands, and the LLM, for every channel. An adapter may implement
+`requires_mention(message)` for dynamic mention gating. Email uses it to drop the `@Mewbo`
+requirement on threads between two participants.
 
-Channel sessions are standard API sessions. They are created via `session_store.create_session()`, mapped via session tags (`tag_session` / `resolve_tag`), and visible in the console and Langfuse. The completion callback reads `source_platform` from the transcript context event and dispatches the final answer through the adapter.
+Channel sessions are standard API sessions, created via `session_store.create_session()`, mapped
+through session tags, and visible in the console and in Langfuse. The completion callback reads
+`source_platform` from the transcript context event and dispatches the final answer through the
+adapter.
 
-Existing adapters: Nextcloud Talk ([`nextcloud_talk.py`](repo:apps/mewbo_api/src/mewbo_api/channels/nextcloud_talk.py), HMAC-SHA256, ActivityStreams 2.0, OCS Bot API) and Email ([`email_adapter.py`](repo:apps/mewbo_api/src/mewbo_api/channels/email_adapter.py), IMAP polling + SMTP reply, markdown-to-HTML rendering via `mistune`, Jinja2 HTML template).
+Two adapters ship today. Nextcloud Talk in
+[`nextcloud_talk.py`](repo:apps/mewbo_api/src/mewbo_api/channels/nextcloud_talk.py) uses HMAC-SHA256,
+ActivityStreams 2.0, and the OCS Bot API. Email in
+[`email_adapter.py`](repo:apps/mewbo_api/src/mewbo_api/channels/email_adapter.py) polls IMAP, replies
+over SMTP, and renders markdown to HTML with `mistune` and a Jinja2 template.
 
 ---
 
 ## Extensibility points
 
-- **Tools**: implement `AbstractTool` or register an MCP server with a schema.
-- **File edit tool**: set `agent.edit_tool` to `"search_replace_block"` or `"structured_patch"`, or leave empty for auto-selection.
-- **Plugins**: install from configured marketplaces; see [Plugins & Marketplace](features-plugins.md).
-- **Web IDE**: opt-in per-session code-server containers via `agent.web_ide`; see [Web IDE](web/ide.md).
-- **Hooks**: shell command (`type: "command"`) or HTTP webhook (`type: "http"`); see [Permissions & Hooks](features-permissions-hooks.md).
-- **Interfaces**: reuse `SessionRuntime` and the event transcript model.
-- **Chat platforms**: implement `ChannelAdapter`, register in `init_channels()`; see [Nextcloud Talk](clients-nextcloud-talk.md) and [Email](clients-email.md).
-- **LSP**: add a custom server under `agent.lsp.servers` with `command`, `extensions`, `root_markers`.
+- **Tools.** Implement `AbstractTool` or register an MCP server with a schema.
+- **File edit tool.** Set `agent.edit_tool`, or leave it empty for auto-selection.
+- **Plugins.** See [Plugins & Marketplace](features-plugins.md).
+- **Web IDE.** Opt in per session through `agent.web_ide`. See [Web IDE](web/ide.md).
+- **Hooks.** See [Permissions & Hooks](features-permissions-hooks.md).
+- **Interfaces.** Reuse `SessionRuntime` and the event transcript model.
+- **Chat platforms.** Implement `ChannelAdapter` and register it in `init_channels()`. See
+  [Nextcloud Talk](clients-nextcloud-talk.md) and [Email](clients-email.md).
+- **LSP.** Add a custom server under `agent.lsp.servers`.
 
 ## Further reading
 
-- [Session Runtime](session-runtime.md): the shared facade used by CLI and API.
-- [Building a Client](api/building-a-client.md): full walkthrough for embedding the core.
-- [API Reference](reference.md): mkdocstrings reference for every module.
+- [Session Runtime](session-runtime.md) is the shared facade used by CLI and API.
+- [Building a Client](api/building-a-client.md) walks through embedding the core.
+- [API Reference](reference.md) is the mkdocstrings reference for every module.

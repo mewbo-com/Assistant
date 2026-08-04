@@ -4,9 +4,11 @@
  * The widget is rendered directly with a minimal `WidgetProps` stub (no full
  * RJSF form) so the state machine is exercised in isolation:
  *   - unconfigured → password input
- *   - configured   → masked indicator + Replace
+ *   - configured   → masked indicator + Replace/Clear
  *   - Replace      → password input
  *   - Cancel       → onChange(undefined)
+ *   - Clear        → confirm dialog → onChange(null)
+ *   - pending clear (value === null) → "will be cleared" + Undo
  */
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -76,6 +78,85 @@ describe("SecretField", () => {
     expect(
       screen.getByRole("button", { name: "Cancel" })
     ).toBeInTheDocument();
+  });
+
+  test("configured → renders a Clear action alongside Replace", () => {
+    render(
+      <SecretField {...makeProps({ options: { secretConfigured: true } })} />
+    );
+    expect(screen.getByRole("button", { name: "Clear" })).toBeInTheDocument();
+  });
+
+  test("configured → Clear opens a confirm dialog and does NOT call onChange yet", async () => {
+    const onChange = vi.fn();
+    render(
+      <SecretField
+        {...makeProps({ onChange, options: { secretConfigured: true } })}
+      />
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Clear" }));
+    expect(
+      screen.getByRole("heading", { name: "Clear API Key?" })
+    ).toBeInTheDocument();
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  test("configured → confirming Clear calls onChange(null), the clear signal", async () => {
+    const onChange = vi.fn();
+    render(
+      <SecretField
+        {...makeProps({ onChange, options: { secretConfigured: true } })}
+      />
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Clear" }));
+    await userEvent.click(screen.getByRole("button", { name: "Clear secret" }));
+    expect(onChange).toHaveBeenCalledWith(null);
+    expect(onChange).toHaveBeenCalledTimes(1);
+  });
+
+  test("configured → cancelling the confirm dialog leaves the value untouched", async () => {
+    const onChange = vi.fn();
+    render(
+      <SecretField
+        {...makeProps({ onChange, options: { secretConfigured: true } })}
+      />
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Clear" }));
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onChange).not.toHaveBeenCalled();
+    // Dialog closed; masked Configured view is still showing.
+    expect(screen.getByText("Configured")).toBeInTheDocument();
+  });
+
+  test("a pending clear (value === null) renders the will-clear state with Undo", () => {
+    const onChange = vi.fn();
+    render(
+      <SecretField
+        {...makeProps({
+          onChange,
+          value: null,
+          options: { secretConfigured: true },
+        })}
+      />
+    );
+    expect(screen.getByText("Will be cleared on save")).toBeInTheDocument();
+    expect(screen.queryByText("Configured")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Clear" })).toBeNull();
+  });
+
+  test("pending clear → Undo reverts to onChange(undefined), not a second clear", async () => {
+    const onChange = vi.fn();
+    render(
+      <SecretField
+        {...makeProps({
+          onChange,
+          value: null,
+          options: { secretConfigured: true },
+        })}
+      />
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Undo" }));
+    expect(onChange).toHaveBeenCalledWith(undefined);
   });
 
   test("editing → Cancel reverts the value via onChange(undefined)", async () => {

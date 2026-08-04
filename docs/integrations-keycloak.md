@@ -1,14 +1,16 @@
 # Keycloak
 
-[Keycloak](https://www.keycloak.org) is a standards-clean OpenID Connect provider, which makes it the least surprising identity provider to put in front of Mewbo. The one thing that reliably catches people out is that **Keycloak puts roles and groups in three different places in the token**, and none of them is a plain top-level `groups` claim unless you create it. This guide covers all three.
+## Find roles inside the token
+
+[Keycloak](https://www.keycloak.org) is a standards-clean OpenID Connect provider and the least surprising one to put in front of Mewbo. One thing catches people out. **Keycloak puts roles and groups in three different places in the token**, and none is a plain top-level `groups` claim unless you create it. This guide covers all three.
 
 ---
 
 ## What this unlocks
 
-- Single sign-on for the Mewbo console and REST API against a Keycloak realm.
+- Single sign on for the Mewbo console and REST API against a Keycloak realm.
 - Realm roles, client roles, or group membership can each drive Mewbo roles.
-- Keycloak's authentication flows (multi-factor, step-up, identity brokering to an upstream provider) apply to Mewbo without Mewbo implementing any of them.
+- Keycloak's authentication flows, multi factor, step up and identity brokering to an upstream provider, apply to Mewbo without Mewbo implementing any of them.
 
 ---
 
@@ -54,13 +56,13 @@ Copy the generated client secret from the Credentials tab.
 
 ## Choosing where roles come from
 
-This is the decision that shapes the rest of the configuration. Mewbo reads a single claim path, and `groups_claim` accepts a **dotted path**, so a nested claim is reachable without any code change. The dotted read descends one mapping segment at a time and yields nothing if a segment is missing, so a provider that omits an optional claim degrades cleanly rather than erroring.
+This decision shapes the rest of the configuration. `groups_claim` accepts a **dotted path**, so a nested claim is reachable without any code change. A path whose segments do not all exist yields nothing rather than an error.
 
 === "Realm roles"
 
     Realm roles live at `realm_access.roles` and are included in tokens by default, with no mapper to configure. This is the simplest option and the one to reach for first.
 
-    ```json
+    ```json title="configs/app.json"
     "groups_claim": "realm_access.roles"
     ```
 
@@ -70,13 +72,13 @@ This is the decision that shapes the rest of the configuration. Mewbo reads a si
     { "realm_access": { "roles": ["mewbo-admins", "engineering", "offline_access"] } }
     ```
 
-    Note that Keycloak mixes its own built-in roles such as `offline_access` and `uma_authorization` into this list. That is harmless, since unmatched names simply match no rule, but do not be surprised to see them.
+    Keycloak mixes its own built-in roles such as `offline_access` and `uma_authorization` into this list. Unmatched names match no rule, so they are harmless.
 
 === "Client roles"
 
-    Client roles are scoped to one client and live under that client's name, which keeps Mewbo's roles from colliding with another application's.
+    Client roles live under their client's name, which keeps Mewbo's roles from colliding with another application's.
 
-    ```json
+    ```json title="configs/app.json"
     "groups_claim": "resource_access.mewbo.roles"
     ```
 
@@ -86,13 +88,13 @@ This is the decision that shapes the rest of the configuration. Mewbo reads a si
     { "resource_access": { "mewbo": { "roles": ["admin", "operator"] } } }
     ```
 
-    Substitute your actual client ID for `mewbo` in the path. If you renamed the client, the claim path changes with it.
+    Substitute your own client ID for `mewbo` in the path. Renaming the client changes the claim path with it.
 
 === "Groups"
 
-    Group membership is **not in the token by default**. You must add a mapper explicitly, which is the single most common reason a Keycloak setup resolves everyone to the default role.
+    Group membership is **not in the token by default**. A missing mapper is the single most common reason a Keycloak setup resolves everyone to the default role.
 
-    In the client, go to Client scopes, open the dedicated `mewbo-dedicated` scope, and add a mapper of type **Group Membership** with:
+    In the client, go to Client scopes, open the dedicated `mewbo-dedicated` scope, and add a mapper of type **Group Membership**.
 
     | Mapper setting | Value |
     |---|---|
@@ -102,18 +104,20 @@ This is the decision that shapes the rest of the configuration. Mewbo reads a si
     | Add to ID token | On |
     | Add to access token | On |
 
-    ```json
+    ```json title="configs/app.json"
     "groups_claim": "groups"
     ```
 
 > [!IMPORTANT] The full-group-path toggle changes what you must match on
-> With **Full group path off**, a group emits its bare name: `engineering`. With it **on**, the same group emits its hierarchical path: `/acme/engineering`. Mewbo matches whatever string arrives, so the toggle and your `role_mappings` rules must agree. If you enable full paths, either write the leading-slash form into `match`, or switch that rule to `match_kind: "regex"` and use a pattern such as `.*/engineering` so nesting changes do not break it.
+> With **Full group path off** a group emits its bare name, `engineering`. With it **on** the same group emits `/acme/engineering`. Mewbo matches whatever string arrives, so the toggle and your `role_mappings` rules must agree.
+>
+> With full paths on, write the leading-slash form into `match`, or set `match_kind` to `regex` with a pattern such as `.*/engineering` so nesting changes do not break it.
 
 ---
 
 ## Configure Mewbo
 
-```json
+```json title="configs/app.json" linenums="1"
 {
   "api": {
     "auth": {
@@ -150,78 +154,52 @@ This is the decision that shapes the rest of the configuration. Mewbo reads a si
 }
 ```
 
-Field notes, verified against [`authenticators.py`](repo:packages/mewbo_iam/src/mewbo_iam/authenticators.py) and [`mappings.py`](repo:packages/mewbo_iam/src/mewbo_iam/mappings.py):
+Field notes, verified against [`authenticators.py`](repo:packages/mewbo_iam/src/mewbo_iam/authenticators.py) and [`mappings.py`](repo:packages/mewbo_iam/src/mewbo_iam/mappings.py).
 
 - `issuer` must equal the `iss` claim in the token exactly. For Keycloak that is `<base>/realms/<realm>` with no trailing slash.
-- `identity_claim` defaults to `sub`, which for Keycloak is a stable UUID. Leave it unless you have a strong reason, since anything else risks changing when a user is renamed.
-- `email_claim`, `name_claim`, and `picture_claim` default to `email`, `name`, and `picture`, all of which Keycloak populates under the standard `profile` and `email` scopes.
-- Rules are **ordered** and every matching rule contributes its target, deduplicated in rule order. A user in two matching groups gets both roles.
-- Matching is case-insensitive for both `exact` and `regex`, and a regex must match the whole string. An invalid pattern is rejected when the config is parsed, not at login.
-- `default_role` applies when no rule matches, so every user lands with a defined, least-privilege role. It defaults to `viewer`.
-- `team_mappings` has no default, so an unmatched user simply joins no team, which is a valid state.
+- `identity_claim` defaults to `sub`, a stable UUID on Keycloak. Anything else risks changing when a user is renamed.
+- `email_claim`, `name_claim` and `picture_claim` default to `email`, `name` and `picture`. Keycloak populates all three under the standard `profile` and `email` scopes.
 
-The `oidc` extra is required: `pip install mewbo-iam[oidc]`. If it is absent, Mewbo refuses to boot with a message naming the kind, the extra, and the missing module rather than failing at first login.
+How the rules themselves evaluate, ordering, case sensitivity and the `default_role` fallback, is covered once in [Mapping groups to roles](authentication.md#mapping-groups-to-roles).
+
+The `oidc` extra is required. Run `pip install mewbo-iam[oidc]`.
 
 ---
 
 ## Bootstrapping the first administrator
 
-Before anyone can be granted the admin role through the console, an admin has to exist. The `bootstrap` block is the cold-start escape hatch and confers admin on a matching login.
+The `bootstrap` block gets the first administrator in before anyone can be granted admin through the console. How it works, and why a hand-granted role does not survive the next login, is covered once in [Bootstrapping the first administrator](authentication.md#bootstrapping-the-first-administrator).
 
-```json
-"bootstrap": {
-  "admin_group": "mewbo-admins",
-  "admin_subjects": ["cccccccc-1111-2222-3333-444444444444"]
-}
-```
-
-`admin_group` is matched case-insensitively against the identity provider's group names. `admin_subjects` is an exact-match allowlist of subject identifiers, which for Keycloak means the user's `sub` UUID rather than their username. Either one matching confers admin.
-
-> [!IMPORTANT] Roles are recomputed on every login, not merged
-> Each time a federated user signs in, their roles are resolved afresh from the group mapping plus the bootstrap rule, and the stored user record is overwritten with that result.
->
-> This is what you want when groups drive roles: remove someone from `mewbo-admins` in Keycloak and they lose admin at their next sign-in, with no separate step in Mewbo. It has one consequence worth knowing before it surprises you, though. **A role granted by hand through the admin surface does not survive the user's next login** if the group mapping does not also produce it. For a federated user, the identity provider is the source of truth for roles; change the group, not the user.
+One value is Keycloak specific. `admin_subjects` is an exact-match allowlist of subject identifiers, which here means the user's `sub` UUID rather than their username. Since Keycloak does supply groups, prefer `admin_group` and drop the subject list.
 
 ---
 
 ## Verify it works
 
 1. Sign in through the console, then call `GET /api/auth/me`. A working setup returns `authenticated: true`, your `sub` as the subject, the resolved `roles`, the full `permissions` set, your `teams`, and an `auth_method` object reporting `kind: "oidc"` with your issuer.
-2. If `roles` contains only `viewer`, the group claim did not arrive. Decode the ID token at the Keycloak client's Client scopes, Evaluate tab, which shows the exact generated token. Confirm the claim exists at the path you configured before changing anything in Mewbo.
-3. Test a logout round trip with `POST /api/auth/logout?idp=true`, which clears the Mewbo session and redirects to Keycloak's end-session endpoint.
+2. If `roles` contains only `viewer`, the group claim did not arrive. The Keycloak client's Client scopes, Evaluate tab shows the exact generated token. Confirm the claim exists at the path you configured before changing anything in Mewbo.
+3. Test a logout round trip with `POST /api/auth/logout?idp=true`. It clears the Mewbo session and redirects to Keycloak's end-session endpoint.
 
 ---
 
 ## Failure modes
+
+These are Keycloak specific. Boot failures and generic callback errors are in the shared [Troubleshooting](authentication-providers.md#troubleshooting) table.
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | Everyone lands on `viewer` | The claim is not in the token, most often the Group Membership mapper was never added | Use the Evaluate tab to inspect the real token, then fix the mapper or the claim path |
 | Everyone lands on `viewer`, and the claim *is* present | `groups_claim` path does not match the token's nesting | Match the path exactly, for example `resource_access.mewbo.roles` rather than `roles` |
 | Group names do not match the rules | Full group path is on, so names arrive as `/acme/engineering` | Match the path form, or switch the rule to `match_kind: "regex"` |
-| `?auth_error=login_failed` | The callback was rejected: state mismatch, expired login, bad signature, or a failed token exchange | Check the server log, which carries the structural reason, and confirm the registered redirect URI matches `<origin>/api/auth/callback` byte for byte |
+| `?auth_error=login_failed` | The callback was rejected | Check the server log, then confirm the registered redirect URI matches `<origin>/api/auth/callback` byte for byte |
 | `?auth_error=provider_error` | Keycloak returned an error to the callback, usually a policy or consent denial | Check the Keycloak event log |
-| `?auth_error=account_disabled` | The user exists in Mewbo but has been disabled | Re-enable the user through the admin surface |
-| Redirect URI mismatch, and the URI reads `http://` when you expected `https://` | The reverse proxy is not forwarding `X-Forwarded-Proto` | Forward `X-Forwarded-Proto` and `X-Forwarded-Host` |
-| Server will not boot, naming the `oidc` extra | OIDC driver dependencies are not installed | `pip install mewbo-iam[oidc]` |
-| Server will not boot, complaining about `session.secret` | A non-API-key authenticator is configured with no signing secret | Set `api.auth.session.secret` |
-| Server will not boot, complaining about a wildcard CORS origin | A browser-login authenticator plus `CORS_ORIGIN: "*"` | Pin the origin to the console's exact URL, since a credentialed cross-origin request cannot use a wildcard |
 
 ---
 
 ## Running Keycloak alongside other authenticators
 
-`authenticators` is a list, and local API keys are themselves an authenticator kind. A deployment can keep issuing service keys for automation while humans sign in through Keycloak.
+A deployment can keep issuing service keys for automation while humans sign in through Keycloak. See [Running more than one at once](authentication-providers.md#running-more-than-one-at-once) for the list shape and for selecting one authenticator by name.
 
-```json
-"authenticators": [
-  { "name": "local-keys", "kind": "api_key" },
-  { "name": "keycloak", "kind": "oidc", "...": "..." }
-]
-```
+The ordering matters when both are in play. Mewbo resolves a request through ordered channels. API key first, then bearer token, then session cookie, then trusted proxy header. An explicit credential always outranks an ambient one, so a script presenting an API key is never silently re-identified as whoever happens to be browsing.
 
-Mewbo resolves a request through ordered channels: API key first, then bearer token, then session cookie, then trusted proxy header. An explicit credential always outranks an ambient one, so a script presenting an API key is never silently re-identified as whoever happens to be browsing.
-
-When more than one OIDC authenticator is configured, `GET /api/auth/login?authenticator=keycloak` selects one by name. Without the parameter, the default is used.
-
-For the concepts behind this page, including roles, the permission catalogue, how a request resolves to a principal, and what is and is not enforced, see [Authentication and Access](authentication.md). This guide connects one provider; it deliberately does not restate the model.
+For the concepts behind this page, including roles, the permission catalogue, how a request resolves to a principal, and what is and is not enforced, see [Authentication and Access](authentication.md). This guide connects one provider. It deliberately does not restate the model.

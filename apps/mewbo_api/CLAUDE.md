@@ -365,15 +365,32 @@ Entry point: `backend.py`. The full route inventory is the Scalar reference
     the single implementation of "drop every trace of a session" — `stop()`, the failed-launch
     rollback and both lazy drift reconciliations all call it.
   - **Which directory a session mounts is an ORDERED WALK of tiers, first match wins**
-    (`ide_routes.py`: `IdeWorkspaceResolver` over `ConfigProjectMount` → `WikiCheckoutMount` →
-    `AppStagingMount`). Each tier owns its own binding rule and its own refusal, so a fourth
-    surface is a new tier class, never an arm in the walk. A tier answers `None` for "not my
-    kind of session" and raises `IdeWorkspaceUnavailable` for "I recognise this session and
-    still cannot give it a current directory" — the split matters because the generic
-    "no project in context" 409 tells a console user nothing about a wiki project whose
-    checkout was reaped. A tier's INCIDENTAL failure (dead store, missing optional extra) is
-    logged and falls through to the next; only the deliberate refusal stops the walk, so a wiki
-    outage cannot cost a configured project its IDE.
+    (`ide_routes.py`: `IdeWorkspaceResolver` over `CatalogProjectMount` → `WikiCheckoutMount` →
+    `AppStagingMount`, assembled by `IdeWorkspaceResolver.over_catalog`). Each tier owns its own
+    binding rule and its own refusal, so a fourth surface is a new tier class, never an arm in
+    the walk. A tier answers `None` for "not my kind of session" and raises
+    `IdeWorkspaceUnavailable` for "I recognise this session and still cannot give it a current
+    directory" — the split matters because the generic "session has no project in context" 409
+    tells a console user nothing about a wiki project whose checkout was reaped. A tier's
+    INCIDENTAL failure (dead store, missing optional extra) is logged and falls through to the
+    next; only the deliberate refusal stops the walk, so a wiki outage cannot cost a configured
+    project its IDE.
+  - **The first tier resolves the context `project` key through the ONE `ProjectCatalog`, and
+    that is the whole point of it.** It reads the key with the bounded
+    `latest_event_of_type(..., payload_key="project")` store call, then hands it to the catalog
+    — which is injected as a `Callable[[], ProjectCatalog]` through `init_ide` from
+    `backend.py`'s `_catalog()` accessor, a callable because that accessor re-points the catalog
+    at the live config and project store per call. Reading `get_config().projects` here instead
+    recognised a CONFIGURED project and nothing else, so every session anchored to a managed
+    project (`managed:<id>`), a worktree or a repository slug — which is what the console's own
+    picker writes — was refused an IDE with a message saying it had no project at all. The
+    catalog's `ProjectResolutionError.code` decides which answer this is: `not_found` / `empty` /
+    `auto_sentinel` mean "not this tier's kind" and fall through, anything else (`unavailable`,
+    `no_checkout`) is the tier's own refusal and travels out carrying the catalog's message
+    verbatim — it already names the path and the Docker mount rule, so restating it here would
+    be a second copy that drifts. The mount is stamped with the resolved `ProjectEntry.name`,
+    never the raw key: that string is persisted on `IdeInstance` and shown in the console
+    capsule, where `managed:<uuid>` names nothing a user recognises.
   - **The wiki tier reads the server-stamped `wiki:maintain:<slug>` TAG, never the `slug`
     context key — and this is the one a future reader will try to "simplify".** A request's
     `context` is merged VERBATIM into the session (`backend.py:_build_context_payload` refuses
@@ -632,8 +649,22 @@ classes, declared via `x-*` in core `config.py`:
   `secrets: {dot.path: bool}` reports is-set only. (`llm.api_key`, `langfuse.*`,
   `home_assistant.token`.)
 
-The console's `SecretField` is the matching write-only 3-state widget. Multi-token API auth is a
-separate concern — the `KeyStore` + `/api/keys` routes.
+**An EMPTY secret in a PATCH means UNCHANGED, and the write boundary is where that is decided.**
+A client hydrates its form from a read that strips the value, so it re-sends the section with the
+field empty — taken literally that erases the credential and answers 200, which is how a settings
+save took a deployment's model gateway offline. `ConfigSchemaView.resolve_secret_writes(patch,
+stored)` resolves it: empty carries the stored value forward, an explicit `null` clears (the only
+spelling left, since absence and empty both mean "the client had nothing to send"), anything else
+is written. Two things that look optional and are not: it must **carry the value forward, not drop
+the key**, because `_deep_merge` replaces a list wholesale so a patched authenticator entry would
+otherwise land without its `client_secret`; and *stored* must be the operator's own document, or an
+`${ENV_VAR}` reference is carried forward as the literal it resolved to. A front end may drop empty
+secrets from its own diff as well, but that is defence in depth — the console is not the only client
+and the rule cannot live only where it can be routed around.
+
+The console's `SecretField` is the matching write-only 3-state widget (unconfigured / configured /
+editing — note there is no Clear affordance yet, so the `null` clear is an API-client path today).
+Multi-token API auth is a separate concern — the `KeyStore` + `/api/keys` routes.
 
 ## Custom system instructions — REST surface
 

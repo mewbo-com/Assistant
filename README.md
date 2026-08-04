@@ -21,13 +21,13 @@
 
 ## 🧭 Overview
 
-Mewbo is an open, model agnostic stack for putting long-running agents to work across your code, your tools and your data, under a harness that keeps each one bounded and auditable.
+Mewbo is an open stack for putting long running agents to work across enterprise systems, each one bounded, auditable and scoped to the person it runs for. Hosted assistants limit what connects and building past them takes engineering, so operators wait or move that data into an unapproved tool.
 
-Every run is bounded before it starts. It gets a fixed tool surface and a spend ceiling. Permissions decide what it can reach. A failed call retries or falls back to another model. Every step lands on one trace. Work is split across sub-agents. The context that has to hold it is not.
+Whoever owns lead routing can put enrichment behind a schedule or a webhook. A support manager can stand up a live view over systems they already use without filing a ticket. Engineering gets the same session for a refactor or a migration, and anyone can ask a repository a question instead of reading it.
 
-That harness is the reusable part. Generating a wiki is a Mewbo session. A search fans out probe agents on the same hypervisor. An app comes from a builder agent under the same rules. Four products, one engine. An improvement to the loop reaches all of them.
+Permissions resolve ahead of the run rather than call by call, from the roles, teams and workspaces an owner defines. Every model call writes to one trace with token counts, so an audit answers who ran what and a failed step shows up instead of passing as done.
 
-An agent acts as a principal in the identity model you already enforce. It holds the same grants and leaves the same audit trail as any other actor. Bringing in a new system therefore creates no second place where access is decided. Swapping the model underneath changes none of it. A team can keep widening what it automates while auditing the same set of rules.
+The wiki, the search, the apps and the task runner all run on one harness, so an improvement to the loop reaches all of them.
 
 ## ✨ Features
 

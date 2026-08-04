@@ -1,10 +1,12 @@
 # Configuration
 
-The terminal client reads its behavior from three places. Command-line flags set what one launch does. Config files set the defaults. Slash commands manage the session while it runs. This page covers all three.
+## Set launch flags and defaults
+
+Flags set what one launch does, config files set the defaults, and slash commands manage the running session.
 
 ## Command-line flags
 
-Pass these flags to `mewbo` at launch. The parser is defined in [`cli_master.py`](repo:apps/mewbo_cli/src/mewbo_cli/cli_master.py).
+The parser is defined in [`cli_master.py`](repo:apps/mewbo_cli/src/mewbo_cli/cli_master.py).
 
 | Flag | Purpose |
 |------|---------|
@@ -28,47 +30,42 @@ Pass these flags to `mewbo` at launch. The parser is defined in [`cli_master.py`
 | `--log-console` | With a log file set, also keep logs on stderr. |
 | `--config PATH` | Path to the app config file. The default is auto-discover. |
 
+/// table-caption
+Every flag `mewbo` accepts at launch.
+///
+
 ## Model fallback
 
-When a model fails mid-run, the client retries it, then escalates down a ladder of alternate models. The ladder comes from the `llm.fallback` config by default. Two flags override it per run.
+When a model fails during a run, the client retries it, then escalates down a ladder of alternate models. The ladder comes from the `llm.fallback` config. Two flags override it for one launch.
 
 ```bash
 mewbo --fallback-models gpt-5.4,claude-sonnet-5
 mewbo --no-fallback
 ```
 
-The first line sets the ladder for this launch only. The second disables fallback entirely. `--no-fallback` wins when you pass both.
+`--no-fallback` wins when you pass both.
 
-After each turn, the client replays the run's resilience events as short notices. You see a retry, a fallback, or a halt without opening a log. When a fallback pins a new model for the rest of the run, the notice says so.
+After each turn, the client replays the run's resilience events as short notices, a retry, a fallback, or a halt, so you never open a log to find one. When a fallback pins a new model for the rest of the run, the notice says so.
 
 ## The config chain
 
 Mewbo loads config from the first directory that contains it, checked in this order.
 
-1. `CWD/configs/`: project-local config, highest priority.
+1. `CWD/configs/`: config local to the project, highest priority.
 2. `$MEWBO_HOME/`: a custom home directory, if you set one.
-3. `~/.mewbo/`: the user-home fallback.
+3. `~/.mewbo/`: the fallback in your home directory.
 
-To point the app at one specific file and skip discovery, pass `--config`. To scaffold the config files from scratch, run `/init` from inside the app. It creates both the app config and an MCP example config.
-
-The two files you edit most are the app config, [`configs/app.example.json`](repo:configs/app.example.json), which holds runtime settings and LLM keys, and the MCP config, `configs/mcp.json`, which defines your MCP servers. For every key in the app config, see the site's [Configuration Reference](../configuration.md).
+Run `/init` inside the app to scaffold both config files. The app config, [`configs/app.example.json`](repo:configs/app.example.json), holds runtime settings and LLM keys. The MCP config, `configs/mcp.json`, defines your MCP servers.
 
 ## Session recovery
 
-A session is durable. You can leave one and come back to it.
+A session is durable, so you can leave one and come back to it. Resume at launch with `--session`, `--tag` or `--fork`. Inside the app, press ++ctrl+s++ or type `/resume` to open the session switcher and pick one.
 
-Resume an existing session at launch with a flag. Pass `--session` with its id, or `--tag` with its tag, or `--fork` to branch a new session from another one. Inside the app, press `ctrl+s` or type `/resume` to open the session switcher and pick one.
-
-Recover a run that ended badly with a command. A killed or incomplete run is recoverable, and the client offers two ways back.
-
-- `/continue` resumes the same session. Its memory and transcript stay intact. The agent picks up where it left off without redoing finished work.
-- `/retry` restarts the last turn from a clean slate. It re-runs the last step.
-
-Both paths run through the same engine, so a recovered run inherits the model fallback ladder like any other run.
+A killed or incomplete run is recoverable through `/continue` or `/retry`, both described in [Plan Mode](../features-plan-mode.md). Either path runs through the same engine, so a recovered run inherits the model fallback ladder like any other run.
 
 ## Next steps
 
-- [The Interface](interface.md): the live transcript, the plan dock, and approval prompts.
-- [Agent Fleet](agent-fleet.md): sub-agent orchestration and the fleet sidebar.
-- [Remote Sync](remote-sync.md): the local-first default and the opt-in remote seam.
-- [Configuration Reference](../configuration.md): every config key on the site, with defaults.
+- [The Interface](interface.md) covers the live transcript, the plan dock, and approval prompts.
+- [Agent Fleet](agent-fleet.md) covers sub-agent orchestration and the fleet sidebar.
+- [Remote Sync](remote-sync.md) covers the local default and the remote opt in.
+- [Configuration Reference](../configuration.md) lists every config key on the site, with defaults.

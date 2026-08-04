@@ -1,17 +1,23 @@
-# MCP Tools
+# External MCP Tools
 
-Model Context Protocol (MCP) tools extend Mewbo with external tool servers. Any MCP-compatible server can be plugged in via a config file. This includes file systems, databases, APIs, code execution environments, and search engines. Tools contributed by MCP servers appear in the tool registry alongside Mewbo's built-in tools and are available to every session.
+## Connect external tool servers
 
-> [!TIP] Drop-in compatible with Claude Code and VS Code
-> Mewbo reads the same `.mcp.json` / `mcp.json` schema, accepting both the `servers` (Mewbo-native) and `mcpServers` (Claude Code / VS Code) top-level keys. Environment variable expansion follows the same `${VAR}` convention. If you already have an MCP config for another tool, copy it in and it will work unchanged. See the official [Model Context Protocol](https://modelcontextprotocol.io) specification.
+Model Context Protocol (MCP) tools extend Mewbo with external tool servers. Any server that speaks
+MCP plugs in through a config file, including file systems, databases, APIs, code execution
+environments, and search engines. Its tools land in the registry alongside the built-in ones and
+are available to every session.
+
+> [!TIP] Compatible with Claude Code and VS Code
+> Mewbo reads the same `.mcp.json` or `mcp.json` schema, and environment variable expansion follows
+> the same `${VAR}` convention. An existing MCP config from another tool works unchanged. See the
+> official [Model Context Protocol](https://modelcontextprotocol.io) specification.
 
 ## Configuring MCP servers
 
-Define the servers you want the assistant to reach through a JSON config. The primary file is `configs/mcp.json` at the repo root (or `$MEWBO_HOME/mcp.json` for a global install).
+Servers are defined in `configs/mcp.json` at the repo root, or `$MEWBO_HOME/mcp.json` for a global
+install.
 
-**Example `configs/mcp.json`:**
-
-```json
+```json title="configs/mcp.json"
 {
   "servers": {
     "codex_tools": {
@@ -29,7 +35,9 @@ Define the servers you want the assistant to reach through a JSON config. The pr
 }
 ```
 
-`${VAR_NAME}` and `$VAR_NAME` patterns are expanded from the process environment at load time. Both `"servers"` and `"mcpServers"` (Claude Code / VS Code format) are accepted as the top-level key. Mewbo normalises them to a common shape internally, so you can drop in config files written for other tools.
+`${VAR_NAME}` and `$VAR_NAME` patterns are expanded from the process environment at load time. Both
+`servers` and `mcpServers` are accepted as the top-level key, the second matching Claude Code and
+VS Code.
 
 ## Supported transports
 
@@ -41,17 +49,34 @@ Define the servers you want the assistant to reach through a JSON config. The pr
 
 ## Tool discovery
 
-At session start, Mewbo connects to each configured MCP server, fetches its tool schema, and registers those tools in the registry. Connections are persistent. There is no per-request reconnect overhead, and a config change picks up on the next session.
+At session start Mewbo connects to each configured server, fetches its tool schema, and registers
+the tools. Connections persist, so no request pays a reconnect cost.
 
 ## Deferred tool-schema loading (tool search)
 
-Every MCP tool carries a JSON schema, and binding all of them to the model on **every** turn is expensive. A typical fleet of MCP servers can add tens of thousands of tokens of tool definitions to each request. Mewbo avoids this with **on-demand schema loading**.
+Every MCP tool carries a JSON schema, and binding all of them to the model on **every** turn is
+expensive. A fleet of MCP servers can add tens of thousands of tokens of tool definitions to each
+request. Mewbo loads schemas only when they are needed.
 
-When deferral is active, MCP tool schemas (and any tool explicitly marked deferrable) are **stripped from the initial request** and surfaced to the model by name only, grouped by server, via a compact `<available-mcp-servers>` block. The model fetches the schemas it actually needs by calling the built-in **`tool_search`** tool (`select:tool_a,tool_b` for a direct fetch, or keywords for a fuzzy search). Mewbo then re-binds those tools so they become callable. Discovery is replayed from the conversation each turn, so it survives compaction.
+```mermaid
+flowchart LR
+    A(["Turn starts"]) --> B["Deferrable schemas stripped<br/>names only, grouped by server"]
+    B --> C{"Model calls<br/>tool_search?"}
+    C -->|"no"| E(["Turn proceeds"])
+    C -->|"yes"| D["Schemas return as a tool result<br/>and those tools are rebound"]
+    D --> E
+    E -.->|"discovery replays from<br/>the conversation"| A
+```
 
-Because the search round-trip happens **client-side** (the schemas come back as a normal tool result), this works through any LLM proxy. It does not depend on the provider forwarding tool-reference blocks.
+Deferral covers MCP tool schemas and any tool explicitly marked deferrable. The names arrive in a
+compact `<available-mcp-servers>` block, and the model fetches what it needs by calling the
+built-in **`tool_search`** tool, either `select:tool_a,tool_b` for a direct fetch or keywords for a
+fuzzy search. Replay is what makes the mechanism survive compaction.
 
-Configure it under `agent.tool_search` in `app.json`:
+The round trip happens on the client, since the schemas come back as a normal tool result. It works
+through any LLM proxy and needs no provider support for tool reference blocks.
+
+Configure it under `agent.tool_search` in `app.json`.
 
 | `mode` | Behaviour |
 |--------|-----------|
@@ -59,7 +84,7 @@ Configure it under `agent.tool_search` in `app.json`:
 | `auto` | Defer only when the number of deferrable tools exceeds `auto_threshold` (default `25`). |
 | `off` | Never defer. Every schema is bound on turn one. |
 
-```json
+```json title="configs/app.json"
 {
   "agent": {
     "tool_search": { "mode": "on" }
@@ -67,25 +92,30 @@ Configure it under `agent.tool_search` in `app.json`:
 }
 ```
 
-`on` costs a zero-MCP session nothing: deferral engages only when the deferrable set is non-empty, so with no MCP servers configured `on` and `off` bind an identical list. The only range where `auto` differs is 1 to `auto_threshold` tools — and there it binds every one of those schemas verbatim on every turn. Because the gate is a tool *count*, adding or removing a server can silently move a deployment across the cliff in either direction, which is why the adaptive mode is not the default.
+`on` costs a session with no MCP servers nothing. Deferral only engages when the deferrable set is
+non empty, so `on` and `off` bind an identical list there.
 
-The `tool_search` tool is always available (it is exempt from `allowed_tools` scoping), so even a tightly scoped sub-agent can still reach its deferred tools. A model that cannot reliably issue a `tool_search` call simply sees no MCP tools for that turn. That is a graceful degradation rather than an error.
+`auto` differs only in the range 1 to `auto_threshold` tools, where it binds every schema verbatim
+on every turn. The gate is a tool count, so adding or removing a server can move a deployment
+across the cliff in either direction. That is why the adaptive mode is not the default.
+
+`tool_search` is exempt from `allowed_tools` scoping, so even a tightly scoped sub-agent can still
+reach its deferred tools. A model that cannot reliably issue a `tool_search` call sees no MCP tools
+for that turn, which degrades rather than errors.
 
 ## Choosing which tools a session sees
 
-You can control which MCP tools are bound to a session:
-
-- **Console**: the config menu has a tool selector. Pick which MCP tools to enable for the current session.
-- **API**: pass `allowed_tools` in the session create payload or the query body to scope which tools the LLM can call.
-- **CLI**: run `/mcp select` to interactively pick servers and tools.
+- **Console.** The config menu has a tool selector for the current session.
+- **API.** Pass `allowed_tools` in the session create payload or the query body.
+- **CLI.** Run `/mcp select` to interactively pick servers and tools.
 
 ## Per-project MCP config
 
-Drop a `.mcp.json` file at your project root. When you start a session inside that project, its servers are merged with the global `configs/mcp.json` automatically. You can also place `.mcp.json` files deeper in the tree for sub-package–specific tools.
+Drop a `.mcp.json` at your project root and its servers merge with the global `configs/mcp.json`
+when a session starts inside that project. Files placed deeper in the tree scope their servers to
+that subtree.
 
-**Example project `.mcp.json`:**
-
-```json
+```json title=".mcp.json"
 {
   "servers": {
     "project_db": {
@@ -96,17 +126,21 @@ Drop a `.mcp.json` file at your project root. When you start a session inside th
 }
 ```
 
-Both the Mewbo schema (`"servers"`) and the Claude Code schema (`"mcpServers"`) are accepted. See [Project Configuration](project-configuration.md#project-level-mcp-configuration) for the full merge reference.
+See [Project Configuration](project-configuration.md#project-level-mcp-configuration) for the full
+merge reference.
 
 ## Troubleshooting
 
 ### "MCP server 'X' not found in config"
 
-The session started without the project directory set correctly, so the project-level `.mcp.json` was not picked up. Make sure the session has a valid `project` set and that the project path is mounted (Docker) or accessible on the host.
+The session started without the project directory set, so the project-level `.mcp.json` was never
+picked up. Check that the session has a valid `project` and that the path is mounted in Docker or
+reachable on the host.
 
 ### Tool not available after a config change
 
-Edits to `mcp.json` are picked up on the next session start. Start a new session (or restart the API if you need the change to propagate to every running session) and the updated servers will connect.
+Edits to `mcp.json` are picked up on the next session start. Restart the API to propagate a change
+to every running session.
 
 ### Common error signatures
 
@@ -117,7 +151,7 @@ Edits to `mcp.json` are picked up on the next session start. Start a new session
 | `Tool 'X' not found on server 'Y' after reconnect` | The tool was removed from the server between sessions. |
 | Session starts but MCP tools missing | An `allowed_tools` filter excluded them; check the console tool selector or the API payload. |
 
-See also: [Troubleshooting](troubleshooting.md) for the general debugging methodology.
+See also [Troubleshooting](troubleshooting.md) for the general debugging methodology.
 
 ---
 

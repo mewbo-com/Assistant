@@ -1,13 +1,21 @@
 # Plugins & Marketplace
 
+## Add skills, tools and hooks
+
 <div style="display: flex; justify-content: center;">
-  <img src="../assets/img/mewbo-console-05-plugins.png" alt="The Plugins page in the Mewbo console showing four installed plugins and a marketplace listing with install buttons" style="width: 100%; max-width: 720px; height: auto;" />
+  <img src="../assets/img/mewbo-console-05-plugins.png" alt="The Plugins page in the Mewbo console showing six installed plugins and a marketplace listing with install buttons" style="width: 100%; max-width: 720px; height: auto;" />
 </div>
 
-Plugins extend Mewbo with new agent definitions, skills, hooks, and MCP tool configurations. Install them from a marketplace or from a local directory. They activate automatically at session start without a restart. Plugins are first-class citizens. A plugin's skills appear in the skill catalogue, its hooks fire alongside native hooks, and its MCP servers appear in the tool list.
+Plugins add agent definitions, skills, hooks, MCP servers and session tools to a running Mewbo.
+Install one from a marketplace or a local directory and it activates at the next session start, with
+no restart. Nothing marks its contributions as second class, and its hooks fire alongside native ones.
 
 > [!TIP] Drop-in compatible with Claude Code plugins
-> Mewbo reads the exact same [Claude Code plugin](https://docs.claude.com/en/docs/claude-code/plugins) manifest, directory layout (`.claude-plugin/plugin.json`, `agents/`, `skills/`, `hooks/hooks.json`, `.mcp.json`), and marketplace format. The default marketplace is the [official Claude plugins marketplace](https://github.com/anthropics/claude-plugins-official). Any private marketplace that follows the Claude Code marketplace schema works too, on any git host (GitHub, Gitea, GitLab, Forgejo, GitHub Enterprise, or plain SSH). Point `plugins.marketplaces` at the catalog and it loads without translation. Plugins authored for Claude Code work in Mewbo unchanged.
+> Mewbo reads the exact same [Claude Code plugin](https://docs.claude.com/en/docs/claude-code/plugins)
+> manifest, directory layout and marketplace format, so a plugin authored for Claude Code runs
+> unchanged. The default catalog is the
+> [official Claude plugins marketplace](https://github.com/anthropics/claude-plugins-official), and
+> any private one following the same schema loads from any git host.
 
 For setup and installation, see [Getting Started](getting-started.md).
 
@@ -17,17 +25,17 @@ For setup and installation, see [Getting Started](getting-started.md).
 
 | Contribution type | How it works |
 |---|---|
-| **Agent definitions** | `.md` files in the plugin's `agents/` directory; addressable via `agent_type` in `spawn_agent` |
-| **Skills** | `SKILL.md` files under `skills/<name>/SKILL.md`; added to the skill catalogue at session start |
-| **Hooks** | `hooks/hooks.json`; fires on `pre_tool_use`, `post_tool_use`, and `on_session_end` events |
-| **MCP tool configurations** | `.mcp.json` at the plugin root; merged into the MCP server list, making the plugin's external tools available to the session |
-| **Session tools** | Python classes listed under `session_tools` in `plugin.json`; per-session stateful tools bound to the `ToolUseLoop`. See [Session tools](#session-tools). |
+| **Agent definitions** | `.md` files in `agents/`, addressable via `agent_type` in `spawn_agent` |
+| **Skills** | `SKILL.md` files under `skills/<name>/`, added to the skill catalogue at session start |
+| **Hooks** | `hooks/hooks.json`, firing on `pre_tool_use`, `post_tool_use` and `on_session_end` |
+| **MCP tool configurations** | `.mcp.json` at the plugin root, merged into the session's MCP server list |
+| **Session tools** | Python classes listed under `session_tools` in `plugin.json`. See [Session tools](#session-tools). |
 
 ---
 
 ## Plugin directory layout
 
-A plugin is a directory with the following optional structure:
+A plugin is a directory. Every entry below except the manifest is optional.
 
 ```
 my-plugin/
@@ -45,7 +53,7 @@ my-plugin/
 
 ### plugin.json manifest
 
-```json
+```json title=".claude-plugin/plugin.json"
 {
   "name": "my-plugin",
   "description": "A short description",
@@ -64,24 +72,32 @@ my-plugin/
 
 | Field | Required | Description |
 |---|---|---|
-| `name` | Yes | Unique plugin name; used as the registry key |
-| `description` | No | Human-readable description |
+| `name` | Yes | Unique plugin name, used as the registry key |
+| `description` | No | Free text |
 | `version` | No | Semver string |
-| `author` | No | Author name or `{"name": "..."}` object |
-| `requires-capabilities` | No | List of capability ids the whole plugin bundle needs; unioned into every contributed agent and skill. See [Capability gating](#capability-gating). |
-| `session_tools` | No | List of `{tool_id, module, class}` entries describing Python classes that implement the [Session tools](#session-tools) protocol. |
+| `author` | No | Name, or an object with a `name` key |
+| `requires-capabilities` | No | Capability ids the bundle needs, unioned into every agent and skill it contributes. See [Capability gating](#capability-gating). |
+| `session_tools` | No | `{tool_id, module, class}` entries implementing the [Session tools](#session-tools) protocol |
+
+/// table-caption
+Every field of `plugin.json`. Only `name` is required.
+///
 
 ### Path substitution
 
-Inside any plugin-owned file (`.mcp.json`, `hooks/hooks.json`, `agents/*.md` bodies, `skills/*/SKILL.md` bodies) you can reference the plugin's own installation directory with `${CLAUDE_PLUGIN_ROOT}`. It is substituted when the plugin is discovered. In agent bodies, additional placeholders are resolved at spawn time:
+| Placeholder | Resolves at | Resolves to |
+|---|---|---|
+| `${CLAUDE_PLUGIN_ROOT}` | Discovery | Absolute path to the plugin's install directory |
+| `${SESSION_ID}` | Spawn | The current session's id |
+| `${MEWBO_WIDGET_ROOT}` | Spawn | Widget output root, widget-builder only. `:-` default syntax supported |
 
-| Placeholder | Resolves to |
-|---|---|
-| `${CLAUDE_PLUGIN_ROOT}` | Absolute path to the plugin's install directory |
-| `${SESSION_ID}` | The current session's id |
-| `${MEWBO_WIDGET_ROOT}` | Widget output root (widget-builder only); `:-` default syntax supported |
+/// table-caption
+Placeholders a plugin's `.mcp.json`, `hooks/hooks.json`, `agents/*.md` and `skills/*/SKILL.md` bodies
+can reference.
+///
 
-Substitution is a single linear `replace` pass (no template engine), so a body with no placeholders is byte-identical after substitution.
+Substitution is a single linear `replace` pass with no template engine, so a body carrying no
+placeholders comes out byte for byte the same.
 
 ---
 
@@ -98,7 +114,8 @@ Substitution is a single linear `replace` pass (no template engine), so a body w
 
 ### Via the console
 
-Open the **Plugins** view from the left-hand navigation. The view shows all installed plugins with their version, marketplace origin, and a contribution summary (skill count, hook count, MCP server count). A **Marketplace** tab lists available plugins with install / uninstall buttons. Changes take effect on the next session start.
+Open the **Plugins** view from the navigation rail. The **Marketplace** tab lists what is available
+to install.
 
 ### Via API
 
@@ -123,7 +140,7 @@ Plugin system settings live under `plugins` in [`configs/app.json`](configuratio
 | `plugins.marketplace_default_host` | string | `github.com` | Default host for bare `owner/repo` entries |
 | `plugins.install_path` | string | `""` | Override for the plugin cache directory; defaults to `$MEWBO_HOME/plugins/` |
 
-Each `marketplaces` entry can take any of three forms. The catalog is **not** locked to GitHub:
+Each `marketplaces` entry takes one of three forms. The catalog is **not** locked to GitHub.
 
 | Form | Example | Resolves to |
 |---|---|---|
@@ -131,7 +148,7 @@ Each `marketplaces` entry can take any of three forms. The catalog is **not** lo
 | `host/owner/repo` | `git.example.com/team/plugins` | `https://git.example.com/team/plugins.git` |
 | Bare `owner/repo` | `anthropics/claude-plugins-official` | `https://<marketplace_default_host>/owner/repo.git` (GitHub by default) |
 
-```json
+```json title="configs/app.json"
 {
   "plugins": {
     "enabled": true,
@@ -146,62 +163,65 @@ Each `marketplaces` entry can take any of three forms. The catalog is **not** lo
 }
 ```
 
-When `marketplaces` lists catalogs that are not yet cloned locally, Mewbo shallow-clones them the first time you browse or install, into a per-host/per-owner cache directory so catalogs that share a leaf name never collide. Subsequent runs use the local cache; a fast-forward `git pull` keeps it up to date.
+A catalog not yet cloned is shallow cloned the first time you browse or install. The cache directory
+is keyed by host and owner, so two catalogs sharing a leaf name never collide. Later runs read the
+cache, refreshed by a fast forward `git pull`.
 
 ### Authenticating to private and self-hosted catalogs
 
-Catalogs are fetched with plain `git clone`, so they inherit your ambient git configuration. No host-specific path is required. For private or self-hosted hosts (Gitea, GitLab, Forgejo, GitHub Enterprise, and similar):
+Catalogs are fetched with plain `git clone`, so they inherit your ambient git configuration.
 
-- **HTTPS token**: provide a credential helper. In containers, mount `~/.git-credentials` (`https://user:token@host`); the Docker image enables `credential.helper store`. `GITHUB_TOKEN` is still bridged to `github.com` automatically.
-- **SSH**: use an `ssh://` or scp-style entry and mount an SSH key or agent socket; git picks it up.
-- **Self-signed internal CA**: point `GIT_SSL_CAINFO` at your CA bundle. Git reads it from the environment, so verification stays on. You never need a global `GIT_SSL_NO_VERIFY`.
-
-Plugin skills never override personal (`~/.claude/skills/`) or project-local (`.claude/skills/`) skills with the same name. Plugin MCP servers are merged additively. Later plugins do not overwrite earlier ones for the same server name.
+- **HTTPS token.** Provide a credential helper. In containers, mount `~/.git-credentials` in the form
+  `https://user:token@host`. The Docker image enables `credential.helper store`, and `GITHUB_TOKEN`
+  is still bridged to `github.com` automatically.
+- **SSH.** Use an `ssh://` or scp style entry and mount an SSH key or an agent socket. Git picks it up.
+- **A private CA.** Point `GIT_SSL_CAINFO` at your CA bundle. Git reads it from the environment, so
+  verification stays on. You never need a global `GIT_SSL_NO_VERIFY`.
 
 ---
 
 ## Capability gating
 
-A plugin can declare that its agents, skills, and session tools only make sense on sessions that advertise a specific capability. For instance, the widget-builder bundle only makes sense when the client has an stlite runtime.
+A plugin can gate its agents, skills and session tools on a capability the client advertises. An
+entry whose `requires-capabilities` is not a subset of what the session advertised gets no tool
+schema and no catalog line, so nothing can invoke it by accident.
 
-Capabilities flow top-down:
+The web console sends `X-Mewbo-Capabilities: stlite,apps,ask_user,generative_ui` by default, one id
+per surface it can render. The CLI and webhook adapters send nothing unless configured to.
 
-1. The **client** announces its capabilities on every request. The web console sends `X-Mewbo-Capabilities: stlite,apps,ask_user,generative_ui` by default, one id per surface it can render. Other clients (CLI, webhook adapters) send nothing unless configured to.
-2. The **API** writes the advertised list onto the session's context event.
-3. The **orchestrator** resolves `session_capabilities` once per session and passes the tuple to `ToolUseLoop`.
-4. The **registries** apply `filter_by_capabilities` before rendering the agent and skill catalogs. An entry whose `requires-capabilities` is not a subset of the session's set is invisible: no tool schema, no catalog line, no accidental invocation.
+Declare a capability in either place. Discovery unions the two, so one line in `plugin.json` overlays
+every agent and skill in the bundle.
 
-Declare capabilities at the bundle level in `plugin.json`:
-
-```json
+/// tab | Whole bundle
+```json title=".claude-plugin/plugin.json"
 {
   "name": "widget-builder",
   "requires-capabilities": ["stlite"]
 }
 ```
+///
 
-Or per file on the agent / skill frontmatter:
-
-```yaml
+/// tab | One agent or skill
+```yaml title="SKILL.md"
 ---
 name: st-widget-builder
 requires-capabilities: [stlite]
 ---
 ```
+///
 
-Both are combined as a union at discovery time, so a plugin-level capability overlays every contributed agent and skill without the author repeating it per file.
-
-Empty `requires-capabilities` is the default and means "always visible".
+An empty `requires-capabilities` is the default and leaves the entry always visible.
 
 ---
 
 ## Session tools
 
-A **session tool** is a per-agent stateful tool: its lifecycle is coupled to a specific agent instance rather than the global `ToolRegistry`. The core `exit_plan_mode` tool is a session tool; the widget-builder's `submit_widget` is a session tool.
+A **session tool** holds state for one agent instance rather than living in the global `ToolRegistry`.
+The core `exit_plan_mode` tool is one. So is the widget-builder's `submit_widget`.
 
-Plugins contribute session tools through the `session_tools` array in `plugin.json`:
+Plugins contribute session tools through the `session_tools` array in `plugin.json`.
 
-```json
+```json title=".claude-plugin/plugin.json"
 {
   "session_tools": [
     {
@@ -213,48 +233,46 @@ Plugins contribute session tools through the `session_tools` array in `plugin.js
 }
 ```
 
-The class must implement the `SessionTool` protocol:
-
-| Member | Type | Purpose |
-|---|---|---|
-| `tool_id` | `str` | Tool identifier used in the LLM's function schema and for dispatch |
-| `schema` | `dict` | OpenAI function schema (same shape as any other bound tool) |
-| `async handle(action_step)` | coroutine | Called when the LLM invokes the tool; returns a `MockSpeaker` with the tool result |
-| `should_terminate_run()` | `bool` | Returns `True` to signal the `ToolUseLoop` to exit cleanly after this step |
-
-At session start, the core instantiates a `SessionToolRegistry`, imports each listed `module` + `class`, and registers a factory. When an agent spawns with a `session_tools`-contributed tool in its `allowed_tools`, the loop instantiates one per-agent instance and wires it alongside the built-in session tools. Dispatch, schema injection, and termination all go through the same path. No widget-specific branch exists in core.
-
-This keeps core widget-agnostic: the full contract for a capability bundle is **(a)** a plugin manifest and **(b)** a Python class that satisfies the protocol.
+The class must implement the `SessionTool` protocol, whose members are listed under
+[Architecture Overview → Session tools](core-orchestration.md#session-tools). An agent spawning with
+one of those tool ids in its `allowed_tools` gets its own instance. Dispatch, schema injection and
+termination take the same path as any bound tool, and core carries no widget branch.
 
 ---
 
 ## Built-in plugins
 
-Some plugins ship inside the product itself rather than a marketplace. They are discovered through the same plugin pipeline as user and marketplace plugins. They are byte-for-byte normal plugins, indistinguishable except for their location on the scan path. No `installed_plugins.json` entry is needed.
-
-Two packages carry them. The core package ships the widget-builder at [packages/mewbo_core/src/mewbo_core/builtin_plugins/](repo:packages/mewbo_core/src/mewbo_core/builtin_plugins). The `mewbo_graph` capability library ships the wiki and SCG suites, at [packages/mewbo_graph/src/mewbo_graph/plugins/wiki/](repo:packages/mewbo_graph/src/mewbo_graph/plugins/wiki) and [packages/mewbo_graph/src/mewbo_graph/plugins/scg/](repo:packages/mewbo_graph/src/mewbo_graph/plugins/scg).
-
-Currently bundled:
+Some plugins ship inside the product rather than in a marketplace, and need no
+`installed_plugins.json` entry.
 
 | Plugin | Ships in | Capability | What it contributes |
 |---|---|---|---|
 | [widget-builder](web/widgets.md) | `mewbo_core` | `stlite` | `st-widget-builder` agent + skill, `submit_widget` session tool, an stlite example library, and an AST-based import allowlist |
-| [wiki](features-wiki.md) | `mewbo_graph` | `wiki` | The MewboWiki suite behind [Agentic Wiki](features-wiki.md): the `wiki-indexer`, `wiki-enricher`, `wiki-page-writer`, and `wiki-qa` agents, plus the `wiki_*` session tools that clone a repo, scan it, build the code graph, write pages, answer questions, and submit insights |
-| [scg](features-search-scg.md) | `mewbo_graph` | `scg` | The Source Capability Graph suite behind [Agentic Search](features-search.md): the `scg-mapper` and `scg-search` agents, plus the `scg_*` session tools that map connector reachability and route or traverse the graph |
+| [wiki](features-wiki.md) | `mewbo_graph` | `wiki` | The Agentic Wiki suite. The `wiki-indexer`, `wiki-enricher`, `wiki-page-writer` and `wiki-qa` agents, plus the `wiki_*` session tools they run on |
+| [scg](features-search-scg.md) | `mewbo_graph` | `scg` | The Source Capability Graph suite behind [Agentic Search](features-search.md). The `scg-mapper` and `scg-search` agents, plus the `scg_*` session tools they run on |
+
+/// table-caption
+The three bundled suites, at [builtin_plugins/](repo:packages/mewbo_core/src/mewbo_core/builtin_plugins), [plugins/wiki/](repo:packages/mewbo_graph/src/mewbo_graph/plugins/wiki) and [plugins/scg/](repo:packages/mewbo_graph/src/mewbo_graph/plugins/scg).
+///
 
 ### How a library ships plugins
 
-Plugins whose tools wrap a heavier substrate ship **with that substrate**, not in the core wheel. That is why the wiki and SCG suites live in `mewbo_graph` (as `mewbo_graph.plugins.wiki` and `mewbo_graph.plugins.scg`) rather than in core: their tools import the graph engine, so they belong beside it. Importing the library pushes its plugin root to the core loader through `register_builtin_root` (in `mewbo_core.plugins`), so plugin discovery walks core's own built-in root plus every root a library registered. Core never imports up to find them. The library registers itself on import. A lean install without `mewbo_graph` never registers those suites, so the wiki and SCG features are simply absent rather than broken.
-
-The built-in path is resolved via `importlib.resources`, so it survives editable installs, wheels, and zipapps identically.
+A plugin whose tools wrap a heavier substrate ships **with that substrate**, never in the core wheel.
+The wiki and SCG suites live in `mewbo_graph` because their tools import the graph engine. So a lean
+install without `mewbo_graph` registers neither suite, and those features are absent rather than
+broken.
 
 ---
 
 ## Writing a local plugin
 
-To develop a plugin locally before publishing it to a marketplace, place the plugin directory anywhere on disk and add an entry for it to an `installed_plugins.json` on a scanned registry path. Two paths are scanned: `~/.claude/plugins/installed_plugins.json` and `installed_plugins.json` inside the plugin cache directory (`plugins.install_path`, defaulting to `$MEWBO_HOME/plugins/`). Alternatively, use the CLI install flow with a `./relative-path` source in a local `marketplace.json`.
+Put the plugin directory anywhere on disk and add an entry for it to an `installed_plugins.json`. Two
+paths are scanned, `~/.claude/plugins/installed_plugins.json` and one in the plugin cache directory
+that `plugins.install_path` sets. The CLI install flow is the alternative, with a relative path
+source in a local `marketplace.json`.
 
-The minimum viable plugin is a directory containing only `.claude-plugin/plugin.json`. Everything else (`skills/`, `agents/`, `hooks/`, `.mcp.json`, `session_tools`) is optional and discovered automatically. The bundled [widget-builder](web/widgets.md) is a complete working example. See [packages/mewbo_core/src/mewbo_core/builtin_plugins/widget_builder/](repo:packages/mewbo_core/src/mewbo_core/builtin_plugins/widget_builder).
+The smallest working plugin is a directory holding only `.claude-plugin/plugin.json`. Everything else
+is discovered automatically. The bundled [widget-builder](web/widgets.md) is a complete example at [packages/mewbo_core/src/mewbo_core/builtin_plugins/widget_builder/](repo:packages/mewbo_core/src/mewbo_core/builtin_plugins/widget_builder).
 
 ---
 

@@ -1,51 +1,67 @@
 # Agentic Search
 
+## Ask across connected sources
+
 <div style="display: flex; justify-content: center;">
-  <img src="../assets/img/mewbo-search-01-landing.jpg" alt="The Agentic Search landing page in the Mewbo Console: a question box scoped to the OSS Repo Scout workspace on the Fast tier, chips showing 6 of 7 sources mapped, graph node-edge counts, and memory notes, above a grid of saved workspaces (Knowledge graph, Beacon Ops, OSS Repo Scout)" style="width: 100%; max-width: 960px; height: auto;" />
+  <img src="../assets/img/mewbo-search-01-landing.jpg" alt="The Agentic Search landing page in the Mewbo Console: a question box scoped to the OSS Repo Scout workspace on Auto mode with gpt-oss-120b, chips showing 6 of 7 sources mapped, graph node-edge counts, and memory notes, above a grid of saved workspaces (Knowledge graph, Beacon Ops, OSS Repo Scout)" style="width: 100%; max-width: 960px; height: auto;" />
 </div>
 
-Ask a question in plain English and Mewbo searches across everything you've connected. A coordinating agent decomposes the question, routes each part to the right sources via the [Source Capability Graph](features-search-scg.md), fans out probe agents to execute the retrieval, and synthesises one ranked answer with citations and a full agent trace.
+Ask a question in plain English and Mewbo searches everything you have connected. A coordinating
+agent splits the question, routes each part through the
+[Source Capability Graph](features-search-scg.md), and fans out probe agents to run the retrieval.
+Back comes one ranked answer with citations and the trace that produced it.
 
 ---
 
 ## Workspaces scope the search
 
-A **workspace** is a named bundle of connected sources for one topic. *Engineering docs* might point at your repos, RFCs, and architecture pages; *Support intel* at customer tickets, Slack threads, and public issues; *Research library* at papers and reading lists. Each workspace shows the MCP sources wired into it, and every question runs against the workspace you pick. A query about a customer issue won't trawl your design system, and vice versa.
+A **workspace** is a named bundle of connected sources for one topic. *Engineering docs* might point
+at your repos and RFCs, *Support intel* at customer tickets and Slack threads. Every question runs
+against the workspace you pick, so a query about a customer issue never trawls your design system.
 
-Spin up a new workspace whenever you have a new question domain: name it, choose which MCP servers it can reach, and start asking.
+Make one per question domain. Name it, choose which MCP servers it reaches, and start asking.
 
 ### Edit the purpose, re-index the graph
 
-Every workspace card carries an edit (pencil) button. It opens the workspace's name, its source selection, and a **Purpose & instructions** field. That text is not decoration. It codifies what the workspace's graph is for, and it seeds the enrichment step that runs when sources are mapped. Save a meaningful change (the purpose text, the description, or the source selection) and Mewbo re-maps and re-enriches the workspace's mapped sources in the background; the console confirms with a re-index toast. A name-only edit changes nothing in the graph and stays quiet.
+The edit button on a workspace card opens its name, its sources, and a **Purpose & instructions**
+field that seeds the enrichment step run when sources are mapped.
+
+Save a change to the purpose, the description or the sources and Mewbo re-maps and re-enriches in the
+background. A change to the name alone leaves the graph untouched.
 
 ### See what a workspace knows
 
-Each card also has a graph button. It opens the workspace's capability graph in a dialog, served by [GET /api/agentic_search/workspaces/{workspace_id}/graph](endpoint:GET /api/agentic_search/workspaces/{workspace_id}/graph). The view is layered, with a toggle per layer:
+The graph button opens the workspace's capability graph, served by
+[GET /api/agentic_search/workspaces/{workspace_id}/graph](endpoint:GET /api/agentic_search/workspaces/{workspace_id}/graph).
+**Schema** holds capability, entity type and field nodes, **Memory** the notes past runs deposited,
+and **Entity** the concepts resolved across sources.
 
-- **Schema**: capability, entity-type, and field nodes from the workspace's mapped sources.
-- **Memory**: the learned connector notes deposited by past runs.
-- **Entity**: abstract concepts resolved across sources.
-
-Sources you enabled but have not yet mapped appear as ghost nodes with a hint to map them, so a half-configured workspace is visible at a glance instead of silently smaller.
+A source you enabled but have not mapped appears as a ghost node, so a partly configured workspace is
+visible instead of silently smaller.
 
 ---
 
 ## One question, parallel probe agents
 
 <div style="display: flex; justify-content: center;">
-  <img src="../assets/img/mewbo-search-02-results.jpg" alt="An Agentic Search results page: a synthesised answer to a question about popular agentic coding tools on the Fast tier, with an 86% High confidence bar, All/Docs/Code source-type filters, ranked GitHub result cards comparing agentic coding tools, each showing stars, language, and licence, and a right rail with the agent trace and capability graph" style="width: 100%; max-width: 960px; height: auto;" />
+  <img src="../assets/img/mewbo-search-02-results.jpg" alt="An Agentic Search results page: a synthesised answer to a question about how acme splits its self-hosted CI tooling between runners and control-plane services, with an 86% High confidence bar, All/Code/Web source-type filters, ranked GitHub result cards for acme repositories each showing stars and language, and a right rail with the agent trace and capability graph" style="width: 100%; max-width: 960px; height: auto;" />
 </div>
 
-A single `scg-search` agent handles the full query lifecycle. It decomposes the question into sub-queries, calls `scg_route` to find the highest-ranked pathways through the Source Capability Graph, and spawns a bounded set of probe agents (each scoped to one pathway) to execute the actual retrieval in parallel. Because it runs on the same hypervisor as every other Mewbo task, the fan-out is observable, steerable, and bounded. A typical query resolves in seconds.
+A single `scg-search` agent owns the query lifecycle. It calls `scg_route` for the highest ranked
+pathways, then spawns a bounded set of probe agents, each scoped to one pathway and running in
+parallel. A typical query resolves in seconds.
+
+That fan-out sits on the same hypervisor as every other Mewbo task, so you can watch and steer it.
 
 > [!NOTE] How the routing works
-> The Source Capability Graph is the reachability index that decides which sources can answer each sub-query and how to chain them, all before any data is fetched. See [The Source Capability Graph](features-search-scg.md) for the full mechanics: indexing, zero-LLM routing, cross-source entity resolution, and the shared multiplex graph.
+> Every routing decision is made before any data is fetched.
+> [The Source Capability Graph](features-search-scg.md) has the mechanics.
 
 ---
 
 ## Search tiers
 
-Every search runs at one of three tiers, selectable per query. The tier is the run's single knob. It sets the decomposition budget, the probe fan-out, and the model the run thinks with.
+Every search runs at one of three tiers, chosen per query. The tier is the run's single knob.
 
 | Tier | Sub-query decomposition | Probe fan-out | Default model | Best for |
 |---|---|---|---|---|
@@ -53,75 +69,89 @@ Every search runs at one of three tiers, selectable per query. The tier is the r
 | **Auto** (default) | 2–3 | 3 | `openai/gpt-oss-120b` | General multi-source questions |
 | **Deep** | 3–5 | 5 | `openai/gpt-oss-120b` | Exhaustive research; cross-source synthesis |
 
-The model mapping lives at `scg.traversal.tier_models` (keys `fast`, `auto`, `deep`) and is editable in Settings like any other config key. Probe agents inherit the session model, so one tier choice moves the whole run, coordinator and probes alike. A blank mapping or an unrecognised tier falls back to `llm.default_model`, never an error. Where a request offers an explicit `model` override, it wins over the tier map.
+The mapping lives at `scg.traversal.tier_models`, editable in Settings. Probe agents inherit the
+session model, so one tier choice moves the whole run. A blank mapping or an unrecognised tier falls
+back to `llm.default_model` rather than erroring, and an explicit `model` on the request beats the
+tier map.
 
-Tiers add no verification rounds and no consensus voting. Each probe agent queries its connector directly and returns what it finds. Connector returns are ground truth: if a pathway returns data, the answer is grounded in it; if it returns nothing, the pathway is marked as a miss in the trace.
+Tiers add no verification rounds and no consensus voting. Each probe agent queries its connector
+directly. A pathway that returns data grounds the answer, one that returns nothing is marked a miss.
 
 ---
 
 ## A synthesised answer, with receipts
 
-The top of every result is a **Synthesis** card: a direct, written answer to your question rather than ten blue links. It carries:
+The top of every result is a **Synthesis** card, a written answer rather than ten blue links. Each
+claim links to the result it came from. The confidence score is how many independent pathways
+returned corroborating evidence, weighted by each probe agent's relevance scores.
 
-- **Inline citations**: each claim links to the source result it came from.
-- **A confidence score**: reflects how many independent pathways returned corroborating evidence, weighted by the relevance scores returned by each probe.
-- **Ask a follow-up**: keep pulling the thread without re-scoping; the workspace and context carry over.
+Below it the **results** are listed in rank order with source, status and a snippet. One click
+filters to **Docs**, **Code**, **Threads**, **Design**, **Tickets** or **Web**.
 
-Below it, the underlying **results** are listed in rank order (a merged PR, a Slack thread, a tracker issue), each with its source, status, and a snippet. Filter the list by type with one click: **Docs**, **Code**, **Threads**, **Design**, **Tickets**, or **Web**.
+**Ask a follow-up** keeps the workspace and context, so you need not scope again.
 
 > [!TIP]
-> When a wiki-indexed project is part of the workspace, search and wiki share the same multiplex graph. Search results that touch that codebase automatically draw on the wiki's entity and memory layers, surfacing what a module does, how subsystems relate, and what past Q&A sessions have established, alongside the raw connector results. No extra setup is needed.
+> When a workspace includes a project the Agentic Wiki has indexed, results touching that codebase
+> draw on the wiki's entity and memory layers with no extra
+> setup. → [The shared multiplex graph](features-search-scg.md#the-shared-multiplex-graph)
 
 ---
 
 ## See how it got there
 
-Agentic Search is transparent by design. Alongside each answer:
-
 <div style="display: flex; justify-content: center;">
-  <img src="../assets/img/mewbo-search-04-agent-trace.jpg" alt="An Agentic Search result with the Agent trace rail expanded, showing the scg-search coordinator and its claude-sonnet-4-6 probe agents, beside a synthesised answer and a ranked table of matching repositories" style="width: 100%; max-width: 960px; height: auto;" />
+  <img src="../assets/img/mewbo-search-04-agent-trace.jpg" alt="An Agentic Search result with the Agent trace rail expanded, showing the coordinator and its gpt-oss-120b scg-path-probe agents, beside a synthesised answer and ranked repository result cards" style="width: 100%; max-width: 960px; height: auto;" />
 </div>
 
-- **Agent trace**: which sources were queried and which returned a hit, so you can see the search actually ran end to end.
-- **Related questions**: the obvious next questions, one click away.
-- **People**: who authored, merged, or reported the artefacts behind the answer, pulled straight from the sources.
+The **agent trace** names which sources were queried and which returned a hit. **Related questions**
+are the obvious next ones. **People** are whoever authored, merged or reported the artefacts behind
+the answer.
 
 ### Share a run with a link
 
-Every run has a stable, shareable URL: `/search?ws=<workspace>&run=<run>`. Opening it loads the saved run directly: the synthesis, results, and trace render from a single durable snapshot, then live updates attach if the run is still in flight. The link is deterministic and multi-user: it resolves the same run for anyone with access, survives a server restart, and re-opens to the exact answer (linked to its underlying session for auditing). A link to a run that no longer exists returns a clean "not found" rather than an error page.
+Every run has a stable, shareable URL, `/search?ws=<workspace>&run=<run>`. It renders the synthesis,
+results and trace from one durable snapshot, then attaches live updates if the run is still in
+flight. The link resolves the same run for anyone with access, survives a restart, and stays linked
+to the session behind it.
 
 ---
 
 ## Programmatic access via MCP
 
-Agentic Search is accessible through the [MCP server](clients-mcp.md), so external agents and automated pipelines can run searches without the console:
+External agents and pipelines search through the [MCP server](clients-mcp.md).
 
 | Tool | What it does |
 |---|---|
-| `list_search_workspaces` | List your saved workspaces. Returns each workspace's id, name, and connected sources. Pass an optional query string to filter by name, description, or past-query text. |
-| `search` | Run a query against a workspace and receive a cited answer. Pass the workspace id or name; optionally scope to a specific project. |
-| `get_search_run` | Fetch the result of a prior search run. Useful for long-running searches or replaying past results. |
+| `list_search_workspaces` | Each workspace's id, name and sources. An optional query filters by name, description or past-query text. |
+| `search` | Query a workspace by id or name for a cited answer, optionally scoped to one project. |
+| `get_search_run` | Fetch a prior run, for a long search or to replay a result. |
 
-Results come back at two detail tiers: **`answer`** (synthesis plus a compact result index, the default) and **`full`** (adds per-result snippets and entity insights).
+Two detail tiers. **`answer`** is the default, returning the synthesis and a compact result index.
+**`full`** adds a snippet per result and entity insights.
 
 > [!TIP]
-> When you need the answer in a validated JSON structure rather than prose, the [Structured Outputs](api/structured-outputs.md) endpoint runs an agentic session grounded in a search workspace and emits a machine-readable object matching your schema. Useful for automated pipelines.
+> For validated JSON rather than prose, the [Structured Outputs](api/structured-outputs.md) endpoint
+> runs an agentic session grounded in a search workspace and emits an object matching your schema.
 
 ---
 
 ## Availability
 
-Agentic Search lives in the **Mewbo Console**, reachable from the top navigation next to Tasks and Wiki. It reads the MCP servers you've already configured (the same connections used everywhere else in Mewbo) and groups them into workspaces.
+Agentic Search lives in the **Mewbo Console**, next to Tasks and Wiki.
 
 ### Enabling search
 
-Orchestrated search ships disabled. To turn it on:
+Orchestrated search ships disabled. Three steps turn it on.
 
-1. Enable the **SCG** switch in Settings (the `scg.enabled` key).
-2. Open **Sources** on the Search landing page and **map** each source you want searchable. Mapping introspects the source's schema and builds its capability subgraph. Progress streams live and survives a page reload.
-3. Pick a **tier** (Fast / Auto / Deep) next to the search bar; the default comes from `scg.traversal.default_tier`.
+1. Enable the **SCG** switch in Settings, the `scg.enabled` key.
+2. Open **Sources** on the Search landing page and **map** each source you want searchable. Mapping
+   introspects its schema and builds its capability subgraph, streaming progress that survives a
+   reload.
+3. Pick a **tier** next to the search bar. The default comes from `scg.traversal.default_tier`.
 
-Until search is enabled and at least one source is mapped, queries run against bundled demo fixtures so you can explore the surface. The switch to real orchestrated runs takes effect on the next query, no restart required.
+Until then queries run against bundled demo fixtures. The switch to real orchestrated runs takes
+effect on the next query, with no restart.
 
 > [!NOTE] Going deeper
-> For the routing engine under the hood, see [The Source Capability Graph](features-search-scg.md). Search reuses the same primitives as the rest of the engine: [External Tools (MCP)](features-mcp.md) for how connected sources are configured, and [Sub-agents](features-agents.md) for the parallel fan-out and the hypervisor that bounds it.
+> [External Tools (MCP)](features-mcp.md) covers how connected sources are configured, and
+> [Sub-agents](features-agents.md) covers the hypervisor that bounds the fan-out.

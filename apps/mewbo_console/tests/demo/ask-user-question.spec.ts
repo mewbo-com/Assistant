@@ -1,4 +1,3 @@
-import type { Locator, Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
 import { SEED } from "./shots";
 
@@ -41,16 +40,9 @@ test.use({ viewport: { width: 1400, height: 2000 } });
  * "Still open" was the first casualty). A clipped card is a wrong screenshot
  * with a green test.
  */
-async function expectWithinViewport(page: Page, target: Locator, label: string) {
-  const box = await target.boundingBox();
-  if (!box) throw new Error(`${label}: no bounding box`);
-  const viewport = page.viewportSize();
-  if (!viewport) throw new Error(`${label}: no viewport size`);
-  expect(box.y, `${label} is clipped at the top`).toBeGreaterThanOrEqual(0);
-  expect(box.y + box.height, `${label} is clipped at the bottom`).toBeLessThanOrEqual(
-    viewport.height,
-  );
-}
+// The check itself now lives on `DemoHelper` (`fixtures.ts`), because the
+// Security shot needed the same gate for the same reason and two copies of a
+// rule drift the moment one of them learns something.
 
 test("askUserQuestion — timed-out, multi-select and bounded cards", async ({ page, demo }) => {
   await demo.openSession(SEED.session.askUserTitle);
@@ -113,7 +105,7 @@ test("askUserQuestion — timed-out, multi-select and bounded cards", async ({ p
 
   // The crop can only clip what the viewport already holds, so the column must
   // be on screen whole: the user turn, all three cards, and the closing turn.
-  await expectWithinViewport(page, column, "the conversation column");
+  await demo.expectWithinViewport(column, "the conversation column");
 
   // openSession leaves the pointer over the clicked landing row; park it so no
   // card renders a :hover state in the still (widget-shot trap, same cause).

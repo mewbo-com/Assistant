@@ -18,6 +18,11 @@ hypothetical:
    loop honours a model-supplied ``root``, so deriving scope from it would let
    the model choose its own sandbox.
 5. **A kernel without Landlock degrades**, logging once and completing the run.
+6. **A grant that cannot be added narrows the scope, never removes it.** Any
+   ``OSError`` from one path's open used to drop the whole ruleset and spawn the
+   shell unconfined — a transient path error turning a sandbox into no sandbox,
+   with one warning line as the only trace. A ruleset the kernel refuses
+   outright, on a kernel that HAS Landlock, refuses the shell instead.
 
 Enforcement is exercised by spawning REAL processes through the real
 ``ShellSession``: the claim is about what the kernel does to a child, and a
@@ -27,6 +32,7 @@ mocked spawn would prove nothing.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 
@@ -58,6 +64,9 @@ class _RecordingLogger:
 
     def warning(self, *_a: object, **_k: object) -> None:
         self.calls.append("warning")
+
+    def debug(self, *_a: object, **_k: object) -> None:
+        self.calls.append("debug")
 
 
 @pytest.fixture
@@ -472,6 +481,116 @@ class TestDegradesAndDisables:
         assert proc.returncode == 127
         assert not marker.exists(), "FAIL-OPEN: the command ran without a ruleset"
         assert b"refusing to run unscoped" in out
+
+
+class TestAGrantThatCannotBeAddedNarrowsTheScope:
+    """(6) A rule that will not go in must never cost the whole sandbox.
+
+    The compile opens every granted path, and an open can fail for reasons that
+    have nothing to do with the agent: a directory removed by another process, a
+    mount going away, a permissions flap, an fd limit. Reading any of those as
+    "run unconfined" inverts the control exactly when it is least expected —
+    measured, with one warning line as the only trace on a run that otherwise
+    looked successful.
+    """
+
+    @requires_landlock
+    def test_a_granted_path_that_vanishes_still_confines_the_shell(
+        self, projects, tmp_path, monkeypatch
+    ):
+        """The reproduction, in its original shape: a grant lost to a race.
+
+        ``grants()`` filters on ``os.path.isdir`` and the ruleset opens the
+        survivors, so a path that exists at the filter and is gone at the open is
+        reachable by construction. What must NOT follow is an unscoped shell.
+        """
+        vanishing = tmp_path / "vanishes_between_the_filter_and_the_open"
+        vanishing.mkdir()
+        real_grants = ShellScope.grants
+
+        def grants_then_vanish(self) -> list[str]:
+            compiled = real_grants(self)
+            shutil.rmtree(vanishing)  # the window, forced open deterministically
+            return compiled
+
+        monkeypatch.setattr(ShellScope, "grants", grants_then_vanish)
+        scope = ShellScope(denied=(projects["beta"],), allowed=(str(vanishing),))
+        payload = _run(f"cat {projects['beta']}/secret.env", projects["alpha"], scope)
+        assert payload["exit_code"] != 0, "FAIL-OPEN: one lost grant unscoped the shell"
+        assert "SECRET_BETA" not in str(payload["output"])
+
+    @requires_landlock
+    def test_the_lost_grant_is_named_to_the_caller_and_not_only_to_a_log(
+        self, projects, monkeypatch
+    ):
+        """A narrower scope than was asked for is a fact the caller has to see.
+
+        A log sink is not a return channel: the process that would act on the
+        difference is the one that never learns of it.
+        """
+        recorder = _RecordingLogger()
+        monkeypatch.setattr(landlock, "logger", recorder)
+        doomed = projects["gamma"]
+        real_add = ShellScope._add_rule
+
+        def refuse_one(fd: int, path: str, access: int) -> None:
+            if path == doomed:
+                raise OSError(2, "No such file or directory")
+            real_add(fd, path, access)
+
+        monkeypatch.setattr(ShellScope, "_add_rule", staticmethod(refuse_one))
+        scope = ShellScope(denied=(projects["beta"],))
+        build = scope._create_ruleset()
+        try:
+            assert build.fd is not None, "the ruleset must survive one refused rule"
+            assert build.ungranted == (doomed,), "the caller reads the loss by name"
+            warnings = [c for c in recorder.calls if c == "warning"]
+            assert warnings == ["warning"], "summarised once, not once per lost path"
+        finally:
+            if build.fd is not None:
+                os.close(build.fd)
+
+    def test_a_ruleset_the_kernel_refuses_outright_fails_the_shell(self, projects, monkeypatch):
+        """Landlock is present and still produced nothing — so refuse, do not spawn.
+
+        This is the repo's own law in the direction that matters: a filter that
+        cannot be applied refuses rather than falling back to everything. It is
+        NOT the absent-kernel path, which stays a documented degradation.
+        """
+        monkeypatch.setattr(LandlockAbi, "probe", staticmethod(lambda: LandlockAbi(version=5)))
+        monkeypatch.setattr(landlock, "_syscall", lambda *_a: -1)
+        scope = ShellScope(denied=(projects["beta"],))
+        with pytest.raises(landlock.SandboxUnavailableError):
+            with scope.enforced():
+                pytest.fail("a shell must never be spawned from a refused ruleset")
+
+    def test_the_refusal_reaches_the_model_as_an_error_not_a_traceback(
+        self, projects, monkeypatch
+    ):
+        """Refusing is only useful if the refusal is legible where it lands.
+
+        ``ShellSession`` turns a failed spawn into a ``_start_error`` the model
+        reads back; an exception outside that envelope escapes as a traceback
+        from a constructor, which is why the refusal is an ``OSError``.
+        """
+        monkeypatch.setattr(LandlockAbi, "probe", staticmethod(lambda: LandlockAbi(version=5)))
+        monkeypatch.setattr(landlock, "_syscall", lambda *_a: -1)
+        scope = ShellScope(denied=(projects["beta"],))
+        payload = _run(f"cat {projects['beta']}/secret.env", projects["alpha"], scope)
+        assert payload["exit_code"] != 0
+        assert "SECRET_BETA" not in str(payload["output"])
+        assert "refusing to continue unscoped" in str(payload["output"])
+
+    def test_a_server_launch_still_decides_for_itself(self, projects, monkeypatch):
+        """The self-application half reports the same refusal without raising.
+
+        A model-authored shell command has no claim to run, but a language or MCP
+        server that fails to start takes tool discovery or editor diagnostics down
+        wholesale — so that caller is handed the fact and chooses.
+        """
+        monkeypatch.setattr(LandlockAbi, "probe", staticmethod(lambda: LandlockAbi(version=5)))
+        monkeypatch.setattr(landlock, "_syscall", lambda *_a: -1)
+        assert ShellScope(denied=(projects["beta"],)).apply_to_self() is False
 
 
 class TestCompilation:

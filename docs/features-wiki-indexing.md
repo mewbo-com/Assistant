@@ -1,9 +1,13 @@
 # Indexing &amp; Generation
 
-Generating a wiki is a normal Mewbo session, not a separate service: an agent owns the run, persists state as it goes, and streams progress back to the console live. Point it at a repository and the run does the rest.
+## Turn a repo into a wiki
+
+Generating a wiki is a normal Mewbo session, not a separate service. One agent owns the run, persists
+state as it goes, and streams progress to the console.
 
 > [!IMPORTANT] Install the wiki extra first
-> Before you can index anything, the wiki extra has to be installed and the API server running. See [Enabling it](features-wiki.md#enabling-it) on the Agentic Wiki overview.
+> Indexing needs the wiki extra installed and the API server
+> running. → [Enabling it](features-wiki.md#enabling-it)
 
 <div class="swiper ms-shots">
 <div class="swiper-wrapper">
@@ -21,29 +25,32 @@ Generating a wiki is a normal Mewbo session, not a separate service: an agent ow
 
 ## The indexing pipeline
 
-A run is a fixed seven-phase pipeline:
+A run is a fixed pipeline of seven phases.
 
+```mermaid
+flowchart LR
+    C([clone]) --> S([scan]) --> G([graph]) --> E([enrich])
+    E --> P([plan]) --> PG([pages]) --> F([finalize])
 ```
-clone → scan → graph → enrich → plan → pages → finalize
-```
 
-1. **Clone** the repository (private repos accept an access token in the wizard).
-2. **Scan** every source file.
-3. **Graph** the code into a property graph: parse each file's AST with tree-sitter, then lift files, classes, functions, methods, and interfaces into nodes linked by their call, import, and definition relationships.
-4. **Enrich:** extract the abstract entity layer over that structure. → [The Knowledge Graph](features-wiki-graph.md)
-5. **Plan** the set of pages to write.
-6. **Pages:** sub-agents write each page in parallel, grounded in the scanned source. → [Sub-agents](features-agents.md)
-7. **Finalize:** dedupe, attach the repository description, and publish.
+1. **Clone.** Fetch the repository, with the wizard's access token for a private one.
+2. **Scan.** Read every source file.
+3. **Graph.** Parse each file's AST with tree-sitter, then lift files, classes, functions, methods
+   and interfaces into nodes linked by their call, import and definition edges.
+4. **Enrich.** Extract the abstract entity
+   layer. → [The Knowledge Graph](features-wiki-graph.md)
+5. **Plan.** Choose the pages to write.
+6. **Pages.** Sub-agents write them in parallel, grounded in the scanned
+   source. → [Sub-agents](features-agents.md)
+7. **Finalize.** Dedupe, attach the repository description and publish.
 
-The landing-page card and the indexing screen read the same progress signal, so they never disagree about which phase a run is in.
-
-As it writes, the indexer also **deposits a few durable notes** into the memory layer: short, anchored facts about each subsystem. The wiki starts out already knowing the non-obvious things about the codebase. → [The memory grows as the wiki is used](features-wiki-graph.md#the-memory-grows-as-the-wiki-is-used)
+The landing card and the indexing screen read one progress signal, so they never disagree about which
+phase a run is in. The run also deposits anchored facts about each subsystem into the
+memory. → [The memory grows as the wiki is used](features-wiki-graph.md#the-memory-grows-as-the-wiki-is-used)
 
 ---
 
 ## Supported languages
-
-The graph phase parses source with tree-sitter, so the structural code graph is built only for languages Mewbo ships a grammar for. Today that set is:
 
 | Language | File extensions |
 |---|---|
@@ -55,26 +62,40 @@ The graph phase parses source with tree-sitter, so the structural code graph is 
 | Kotlin | `.kt` |
 | Java | `.java` |
 
-A file in any other language is still scanned, and page-writing sub-agents can still read it, but it contributes no nodes to the code graph. Markdown is the common case. A `README`, a `CLAUDE.md`, or a docs page is read as source prose and seeds the entity layer (the concepts it names can become entities), yet it produces no code-graph nodes of its own.
+/// table-caption
+The languages the graph phase parses with tree-sitter. Only these reach the structural
+layer.
+///
+
+A file in any other language is still scanned and read, but it adds no nodes to the code graph.
+Markdown is the common case. A `README` seeds the entity layer, so the concepts it names become
+entities with no structural node behind them.
 
 ---
 
 ## Tailor the index first
 
-Before the run starts, a short wizard scopes it to your repository in three steps:
+The wizard's three steps are shown above. What the screenshots do not say:
 
-- **Source**: point at a Git repository or a document catalogue. The host is auto-detected (GitHub, GitLab, Gitea, Bitbucket, Azure DevOps, or any generic Git URL), and a private repo can take an access token that is held only for the session.
-- **Generation**: choose the depth (**Comprehensive** for full coverage, or **Concise** for a fast tour), the wiki language, and the model that authors every page.
-- **Scope**: trim what gets indexed. Lockfiles, build output, and vendored code are excluded by default; switch to *Include only* to index a focused subset.
+- The host is detected across GitHub, GitLab, Gitea, Bitbucket, Azure DevOps and any generic Git URL.
+  A private repo takes an access token that is held only for the session.
+- Depth is **Comprehensive** for the repository in full or **Concise** for a fast tour.
+- Lockfiles, build output and vendored code are excluded by default. Switch to *Include only* to
+  index a focused subset instead.
 
 > [!TIP] Resilient to model changes
-> If the model assigned to an indexing run becomes unavailable mid-run (retired, quota-exceeded, or otherwise unreachable), Mewbo automatically switches to the next model on its fallback ladder and continues from the last checkpoint. A transparent event is logged in the console so you can see that a switch happened and why. Long indexing runs complete even when individual models go dark.
+> If the model assigned to a run becomes unavailable, Mewbo switches to the next model on its
+> fallback ladder and continues from the last checkpoint, logging the switch and its reason. A long
+> run finishes even when individual models go dark.
 
 ---
 
 ## Re-index on demand
 
-When a repository changes, **Re-index this wiki** refreshes it **on demand**. It compares what actually changed since the last run and recomputes only the affected scope: the pages, notes, and graph nodes the edit touched. It does not rebuild everything. A small change stays a small, fast update; a stale note is retired, not silently kept.
+When a repository changes, **Re-index this wiki** refreshes it **on demand**, recomputing only the
+pages, notes and graph nodes the change touched. It does not rebuild everything. A stale note is
+retired rather than silently kept.
 
 > [!NOTE] Ground the output with repo notes
-> If the repository contains a `.mewbo/wiki.json` file, the indexer adopts its page plan and folds its notes into the page-writing prompts. It's the simplest way to steer which pages get written and to inject facts the code alone won't reveal.
+> If the repository contains a `.mewbo/wiki.json` file, the indexer adopts its page plan and folds its
+> notes into the prompts that write each page.

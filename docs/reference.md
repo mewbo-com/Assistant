@@ -1,5 +1,7 @@
 # API Reference
 
+## Python modules and classes
+
 This page is generated from inline docstrings via mkdocstrings. The sections below are grouped by package or client.
 
 ## packages/mewbo_core (core runtime)
@@ -67,9 +69,9 @@ This page is generated from inline docstrings via mkdocstrings. The sections bel
 ::: mewbo_tools.integration.lsp.servers
 
 ## packages/mewbo_graph (knowledge-graph capability library)
-The optional substrate shared by MewboWiki and Mewbo Search. Requires the library extras (`treesitter`, `retrieval`); absent when uninstalled.
+The optional substrate shared by Agentic Wiki and Mewbo Search. Requires the library extras (`treesitter`, `retrieval`); absent when uninstalled.
 
-### MewboWiki substrate (`mewbo_graph.wiki`)
+### Agentic Wiki substrate (`mewbo_graph.wiki`)
 ::: mewbo_graph.wiki.graph
 
 ::: mewbo_graph.wiki.structure_provider

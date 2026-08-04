@@ -146,6 +146,39 @@ _PLATFORM_SUPPORTED = (
 _REFUSAL_NOTICE = b"mewbo: landlock restrict_self failed; refusing to run unscoped\n"
 
 
+class SandboxUnavailableError(OSError):
+    """Landlock is present, was asked for a ruleset, and produced none.
+
+    Distinct from a kernel that has no Landlock at all, which is a documented
+    degradation every caller passes through as "spawn exactly as before". This
+    is the case where the control WAS available and still yielded nothing, and
+    the repo's own law applies: a filter that cannot be applied must refuse,
+    never fall back to everything.
+
+    **An ``OSError`` on purpose, and the base class is load-bearing.** It IS a
+    failed syscall, and every spawn seam already wraps its ``Popen`` in
+    ``except OSError`` to turn a failure into that seam's own graceful envelope
+    — ``ShellSession`` into a ``_start_error`` the model can read. A bare
+    ``RuntimeError`` here would sail past all of them, so refusing to spawn
+    would surface as a traceback rather than as a refusal, and the caller that
+    is supposed to act on it would be the one place it never legibly arrived.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class RulesetBuild:
+    """What compiling a :class:`ShellScope` into a kernel ruleset produced.
+
+    Exists so a caller can tell "this kernel enforces nothing" from "confined,
+    minus these paths" — one sentinel for both is what let a lost grant read as
+    no sandbox. Plain frozen state: it crosses no trust boundary and lives for
+    the length of one spawn.
+    """
+
+    fd: int | None
+    ungranted: tuple[str, ...] = ()
+
+
 class _RulesetAttr(ctypes.Structure):
     """``struct landlock_ruleset_attr`` — the access classes we take charge of."""
 
@@ -393,7 +426,19 @@ class ShellScope:
 
             candidates.add(os.path.dirname(os.path.realpath(_resolve_config_path("app.json"))))
         except Exception as exc:  # pragma: no cover - config layout is deployment-specific
-            logger.debug("Could not derive the harness config directory: {}", exc)
+            # WARNING, not DEBUG, and it names the consequence: a failure here
+            # drops the directory holding the API keys out of the deny set, and
+            # a trace below the default sink level makes that indistinguishable
+            # from a boundary that held. It stays non-fatal because this is one
+            # component of a set — the packages and apps roots still apply, and
+            # the config layout is deployment-specific enough that refusing
+            # would fail shells on a layout that was never in danger.
+            logger.warning(
+                "Could not derive the harness config directory ({}); the directory holding "
+                "app.json is NOT denied to sandboxed shells. Name it in "
+                "agent.shell_denied_paths to close it explicitly.",
+                exc,
+            )
 
         return {os.path.realpath(c) for c in candidates if c and os.path.isdir(c)}
 
@@ -546,6 +591,16 @@ class ShellScope:
         permitted.extend(p for p in self.allowed if p and os.path.isdir(p))
         return permitted
 
+    # The ``isdir`` filters above are a CORRECTNESS gate, not a security one,
+    # and they stay. Naming a directory-only access bit on a regular file is an
+    # EINVAL (see :meth:`_add_rule`), so without them every regular file in an
+    # expanded ancestor would reach the add-rule path and fail there. They do
+    # open a window — a path can vanish between the filter and the open — but
+    # that window is no longer load-bearing: :meth:`_create_ruleset` drops the
+    # one path rather than the ruleset, so losing the race costs a grant and
+    # never the sandbox. Removing the filter would trade a harmless race for a
+    # guaranteed failure on every file.
+
     @contextmanager
     def enforced(self) -> Iterator[Callable[[], None] | None]:
         """Yield a ``preexec_fn`` that confines the child to this scope.
@@ -563,16 +618,23 @@ class ShellScope:
         mean giving up ``preexec_fn`` as the seam.
 
         Yields ``None`` when the kernel cannot enforce anything, which callers
-        pass to ``Popen`` unchanged to get today's behaviour.
+        pass to ``Popen`` unchanged to get today's behaviour. That is the ONLY
+        thing ``None`` means here. A kernel that HAS Landlock and still refused
+        the ruleset raises :exc:`SandboxUnavailableError` instead of yielding,
+        because a shell is not worth spawning on the terms it would then get: a
+        model-authored command has no claim to run, and the operator believing
+        it confined is the whole failure. A grant that could not be added is
+        neither — it narrows the scope and the shell still runs, since a
+        transient path error must not be able to fail a run either.
         """
-        fd = self._create_ruleset()
-        if fd is None:
+        build = self._create_ruleset()
+        if build.fd is None:
             yield None
             return
         try:
-            yield self._child_hook(fd)
+            yield self._child_hook(build.fd)
         finally:
-            os.close(fd)
+            os.close(build.fd)
 
     def apply_to_self(self) -> bool:
         """Confine THIS process — and everything it goes on to ``exec`` — here.
@@ -598,7 +660,16 @@ class ShellScope:
 
         Cost: O(entries in the denied paths' parent directories).
         """
-        fd = self._create_ruleset()
+        try:
+            build = self._create_ruleset()
+        except SandboxUnavailableError as exc:
+            # The shell's half re-raises this; here it is caught and reported,
+            # for the reason the docstring above gives — the alternative to an
+            # unconfined server is no server, and that decision is the
+            # caller's, not this method's.
+            logger.warning("{} This process runs unscoped.", exc)
+            return False
+        fd = build.fd
         if fd is None:
             return False
         try:
@@ -634,11 +705,29 @@ class ShellScope:
         finally:
             os.close(fd)
 
-    def _create_ruleset(self) -> int | None:
-        """Create the ruleset and add every compiled grant."""
+    def _create_ruleset(self) -> RulesetBuild:
+        """Create the ruleset and add every compiled grant.
+
+        Three outcomes, and conflating any two of them is how this became a
+        security defect. They are distinguished in the return value rather than
+        in a log line, because the process that has to act on the difference is
+        the caller, and a log sink is not a return channel.
+
+        * **The kernel has no Landlock** — nothing to enforce anywhere, so the
+          build is empty and every caller spawns exactly as before. Documented
+          degradation; a missing sandbox must never fail a run.
+        * **Landlock is present and the ruleset was still refused** — the control
+          was asked for and produced nothing. :exc:`SandboxUnavailableError`, so
+          the caller decides rather than silently receiving no sandbox.
+        * **One grant could not be added** — the path is dropped and the build
+          continues. This can only ever make the scope NARROWER, so it is the
+          safe direction by construction.
+
+        Cost: O(compiled grants), one syscall each.
+        """
         abi = LandlockAbi.probe()
         if not abi.available:
-            return None
+            return RulesetBuild(fd=None)
         attr = _RulesetAttr(handled_access_fs=abi.handled_access_fs(), handled_access_net=0)
         # ABI 4 grew the network field; an older kernel is handed the shorter
         # struct it knows about.
@@ -652,28 +741,49 @@ class ShellScope:
             )
         )
         if fd < 0:
-            logger.warning(
-                "Landlock ruleset creation failed (errno {}); this shell runs unscoped.",
-                ctypes.get_errno(),
+            raise SandboxUnavailableError(
+                f"Landlock ruleset creation failed (errno {ctypes.get_errno()}) on a kernel "
+                "that supports it; refusing to continue unscoped."
             )
-            return None
-        try:
-            access = abi.grant_access()
-            for path in self.grants():
+        access = abi.grant_access()
+        # Compiled once: `grants()` is a `listdir` per expanded ancestor, so
+        # re-deriving it to count the failures would double the compile.
+        compiled = self.grants()
+        ungranted: list[str] = []
+        for path in compiled:
+            # Per PATH, never per ruleset. Letting one failure out of this loop
+            # is what turned a transient path error — a directory removed by
+            # another process, a mount going away, a permissions flap, an fd
+            # limit — into a shell with no sandbox at all.
+            try:
                 self._add_rule(fd, path, access)
-        except OSError as exc:
-            os.close(fd)
-            logger.warning("Landlock rule setup failed ({}); this shell runs unscoped.", exc)
-            return None
-        return fd
+            except OSError as exc:
+                ungranted.append(path)
+                logger.debug("Landlock could not grant {!r} ({}); it stays unreachable.", path, exc)
+        if ungranted:
+            # One line for the whole build: a per-path warning on a compile that
+            # is ~95 rules on a real deployment shape would bury its own signal.
+            logger.warning(
+                "Landlock granted {} of {} paths; this shell IS confined, and these stay "
+                "unreachable to it: {}. A path the session needs here surfaces as a "
+                "permission error inside the shell, not as a refusal to start.",
+                len(compiled) - len(ungranted),
+                len(compiled),
+                ", ".join(sorted(ungranted)),
+            )
+        return RulesetBuild(fd=fd, ungranted=tuple(ungranted))
 
     @staticmethod
     def _add_rule(fd: int, path: str, access: int) -> None:
         """Permit *access* beneath *path*.
 
-        Regular files are skipped: naming a directory-only access bit on a file is
-        an EINVAL that fails the whole ruleset, and every file worth granting is
-        covered by its parent.
+        Regular files are filtered out before they reach here (see
+        :meth:`grants`): naming a directory-only access bit on a file is an
+        EINVAL, and every file worth granting is covered by its parent.
+
+        Raises ``OSError``, which :meth:`_create_ruleset` catches per PATH — one
+        refused rule costs that grant and nothing else. It used to fail the whole
+        ruleset, which meant an unconfined shell.
         """
         parent_fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
         try:

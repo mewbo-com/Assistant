@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 
 from mewbo_core.secrets.key_store_mongo import MongoKeyStore
 from mewbo_core.session.session_store import SessionStoreBase
 from mewbo_core.triggers.store import TriggerStoreBase
+from mewbo_core.workspaces.project_store import MongoProjectStore, VirtualProject
 
 from mewbo_demo_seeder.models import SeedApiKey, SeedBundle, SeedSession, SeedTrigger
 
@@ -30,6 +31,7 @@ class SeedReport:
     sessions: list[str] = field(default_factory=list)
     triggers: list[str] = field(default_factory=list)
     api_keys: list[str] = field(default_factory=list)
+    projects: list[str] = field(default_factory=list)
 
 
 class DemoSeeder:
@@ -50,19 +52,22 @@ class DemoSeeder:
         bundle: SeedBundle,
         t0: datetime,
         key_store: MongoKeyStore | None = None,
+        project_store: MongoProjectStore | None = None,
     ) -> None:
         """Store the injected collaborators and the frozen ``t0`` clock.
 
-        ``key_store`` is optional so the existing unit tests (sessions +
-        triggers against mongomock) keep constructing the seeder unchanged; a
-        bundle carrying ``api_keys`` without a key store fails loudly in
-        :meth:`seed` rather than silently skipping them.
+        ``key_store`` and ``project_store`` are optional so the existing unit
+        tests (sessions + triggers against mongomock) keep constructing the
+        seeder unchanged; a bundle carrying ``api_keys`` or ``projects``
+        without its store fails loudly in :meth:`seed` rather than silently
+        skipping them.
         """
         self._sessions = session_store
         self._triggers = trigger_store
         self._bundle = bundle
         self._t0 = t0
         self._keys = key_store
+        self._projects = project_store
 
     def seed(self) -> SeedReport:
         """Write every session, trigger and API key in the bundle."""
@@ -82,6 +87,13 @@ class DemoSeeder:
             for api_key in self._bundle.api_keys:
                 self._seed_api_key(api_key)
                 report.api_keys.append(api_key.id)
+        if self._bundle.projects:
+            if self._projects is None:
+                raise ValueError(
+                    "bundle declares projects but no project_store was injected — "
+                    "the Workspace settings facet would render its empty state"
+                )
+            self._seed_projects(report)
         return report
 
     def _seed_session(self, session: SeedSession) -> None:
@@ -158,6 +170,35 @@ class DemoSeeder:
         }
         # Idempotent by id so a re-seed replaces rather than duplicates.
         self._keys._col().replace_one({"_id": api_key.id}, record, upsert=True)
+
+    def _seed_projects(self, report: SeedReport) -> None:
+        """Upsert every managed project, parents before the worktrees under them.
+
+        Same deviation from "write through the store contract" as
+        :meth:`_seed_api_key`, and for the same intrinsic reason:
+        ``create_project`` mints ``uuid4()`` and stamps the wall clock, and
+        ``create_worktree`` shells out to ``git worktree add`` against a repo
+        that does not exist in this container — so neither can produce a
+        byte-identical row, and no contract seam accepts a caller-supplied id.
+        What IS preserved is the SHAPE: each row is core's own
+        ``VirtualProject`` dataclass, so ``list_projects`` reads a seeded
+        project back through ``_to_project`` exactly like a real one.
+
+        Cost: ``O(collection)`` in the bundle's own project count, which is
+        fixture-bounded — this is an offline seed job, never a request path.
+        """
+        assert self._projects is not None  # guarded by seed()
+        written: dict[str, VirtualProject] = {}
+        for project in self._bundle.projects_in_write_order:
+            parent = written.get(project.parent_id) if project.parent_id else None
+            record = project.to_project(self._t0, parent=parent)
+            # Idempotent by project_id so a re-seed replaces rather than
+            # duplicates (the store's own index is unique on that key).
+            self._projects._col.replace_one(
+                {"project_id": record.project_id}, asdict(record), upsert=True
+            )
+            written[record.project_id] = record
+            report.projects.append(record.project_id)
 
     @staticmethod
     def _root_agent_id(session_id: str) -> str:

@@ -12,6 +12,11 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+
+# DockerContainerBackend (mewbo_api.ide) is dev/CI-only — the deployed api
+# never imports it (see apps/mewbo_api/CLAUDE.md, "Web IDE"). A lean install
+# without the `docker` extra must still collect the rest of the suite.
+pytest.importorskip("docker")
 from docker.errors import APIError, NotFound
 from mewbo_api.ide import (
     DockerContainerBackend,

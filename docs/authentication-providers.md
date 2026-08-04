@@ -1,10 +1,10 @@
 # Identity Providers
 
-Pick a connection mode, pick your provider, and go to its walkthrough. Read [Authentication & Access](authentication.md) first for the concepts and the security preconditions; this page is the chooser.
+## Pick OIDC, SAML or LDAP
 
-Each provider has one home, its own guide, which carries the full configuration. This page carries only what no single provider page can: the comparison.
+Pick a connection mode, pick your provider, and go to its walkthrough. Read [Authentication & Access](authentication.md) first for the concepts and the security preconditions.
 
-All examples use placeholder hostnames. Substitute your own:
+Each provider's own guide carries the full configuration. This page carries only the comparison, which no single provider page can. All examples use placeholder hostnames. Substitute your own.
 
 | Placeholder | What it is |
 |---|---|
@@ -13,7 +13,7 @@ All examples use placeholder hostnames. Substitute your own:
 | `https://idp.example.com` | Your identity provider |
 
 > [!IMPORTANT] The redirect URI is derived, not configured
-> Mewbo builds the OIDC redirect URI as `<origin>/api/auth/callback`, where `<origin>` comes from the request: `X-Forwarded-Proto` and `X-Forwarded-Host` when a reverse proxy sets them, otherwise the request's own scheme and host. Register that exact URL with your provider. If the value your provider rejects looks like `http://` when you expected `https://`, your proxy is not forwarding `X-Forwarded-Proto`.
+> Mewbo builds the OIDC redirect URI as `<origin>/api/auth/callback`, where `<origin>` comes from the request. It reads `X-Forwarded-Proto` and `X-Forwarded-Host` when a reverse proxy sets them, otherwise the request's own scheme and host. Register that exact URL with your provider.
 
 The SAML equivalents are `<origin>/api/auth/saml/acs` for the assertion consumer service and `<origin>/api/auth/saml/metadata` for the service-provider metadata document.
 
@@ -21,7 +21,7 @@ The SAML equivalents are `<origin>/api/auth/saml/acs` for the assertion consumer
 
 ## Step 1: pick a connection mode
 
-Several providers can be connected more than one way, so this decision comes before the provider choice.
+Several providers connect more than one way, so this decision comes first.
 
 | Mode | Choose it when | What Mewbo trusts | Cost |
 |---|---|---|---|
@@ -30,9 +30,7 @@ Several providers can be connected more than one way, so this decision comes bef
 | **SAML** | Your provider speaks SAML and not OIDC, which is common with older enterprise identity providers | A signed assertion | More setup, and the replay caveat below |
 | **LDAP** | You want a username and password form against a directory, with no browser redirect | The directory and its TLS certificate | Passwords transit Mewbo, so certificate verification is critical |
 
-**Prefer OIDC over trusted-header when you have the choice.** Trusting a signature holds regardless of network topology; trusting a network address holds only as long as nothing else can reach the server. The trusted-header mode is faster to drop into an existing gateway setup, and that convenience is its whole argument. Read [the trusted-header precondition](authentication.md#trusted-header-mode) before committing to it.
-
-**On SAML**, note that replay protection is per process, so a multi-worker deployment does not share it. See [Known limits](authentication.md#known-limits).
+**Prefer OIDC over trusted-header when you have the choice.** A signature holds regardless of network topology. A network address holds only as long as nothing else can reach the server. Read [the trusted-header precondition](authentication.md#trusted-header-mode) before committing to it, and [Known limits](authentication.md#known-limits) for the SAML replay caveat.
 
 ---
 
@@ -52,19 +50,19 @@ Any other SAML 2.0 provider uses the [generic SAML setup](#any-other-saml-provid
 
 ### Why claim paths are the recurring theme
 
-Four of the seven quirks above are the same underlying thing: providers disagree about where group membership lives in a token. Mewbo reads claim paths as dotted strings and walks nesting, so `realm_access.roles` reaches into a nested object and `cognito:groups` is read literally because paths split on `.` and nothing else.
+Four of the seven quirks above are the same underlying thing. Providers disagree about where group membership lives in a token. Mewbo reads claim paths as dotted strings and walks nesting, so `realm_access.roles` reaches into a nested object and `cognito:groups` is read literally because paths split on `.` and nothing else.
 
-The failure mode is quiet, and worth recognising: **a wrong claim path yields no groups rather than an error**, so every user lands on `default_role` and nothing in the log says why. If a whole organisation shows up as `viewer`, suspect the claim path before anything else.
+The failure mode is quiet. **A wrong claim path yields no groups rather than an error**, so every user lands on `default_role` and nothing in the log says why. If a whole organisation shows up as `viewer`, suspect the claim path before anything else.
 
-One related trap that is not a claim path: `group_delimiter` applies to trusted-header mode only. An OIDC provider that packs several groups into one delimited string is not split apart.
+One related trap is not a claim path at all. **`group_delimiter` exists only on the `trusted_header` authenticator.** No OIDC or SAML path splits anything, so the groups claim must be a JSON array. A single delimited string such as `"admins,engineering"` becomes one group whose name contains the comma, and it matches no rule.
 
 ---
 
 ## Any other SAML provider
 
-The seven guides above cover the providers people most often connect. Any other SAML 2.0 identity provider is configured directly, and this is its only home:
+Any SAML 2.0 provider without a guide above is configured directly, and this is its only home.
 
-```json
+```json title="configs/app.json"
 {
   "name": "saml-idp",
   "kind": "saml",
@@ -78,22 +76,22 @@ The seven guides above cover the providers people most often connect. Any other 
 }
 ```
 
-Supply exactly one metadata source, either `idp_metadata_url` or `idp_metadata_xml`, never both and never neither. That is validated at startup. Register these two URLs with your provider:
+Supply exactly one metadata source, either `idp_metadata_url` or `idp_metadata_xml`, validated at startup. Register these two URLs with your provider.
 
 | Purpose | URL |
 |---|---|
 | Assertion consumer service | `https://mewbo.example.com/api/auth/saml/acs` |
 | Service-provider metadata | `https://mewbo.example.com/api/auth/saml/metadata` |
 
-The metadata endpoint is served without authentication by design, since publishing it to identity-provider administrators is its entire purpose.
+The metadata endpoint is served without authentication by design. Publishing it to identity-provider administrators is its entire purpose.
 
 ---
 
 ## Running more than one at once
 
-`authenticators` is an ordered list and every entry is live simultaneously:
+`authenticators` is an ordered list and every entry is live simultaneously.
 
-```json
+```json title="configs/app.json"
 "authenticators": [
   { "name": "keycloak", "kind": "oidc", "...": "..." },
   { "name": "directory", "kind": "ldap", "...": "..." },
@@ -101,9 +99,7 @@ The metadata endpoint is served without authentication by design, since publishi
 ]
 ```
 
-The console discovers what to offer on the login screen from the server, so adding an authenticator changes the login options with no frontend change. When several OIDC authenticators are configured, `GET /api/auth/login?authenticator=<name>` selects one by its `name`; with no parameter the first enabled OIDC authenticator is used.
-
-Set `"enabled": false` on any entry to keep its configuration in place while taking it out of service.
+The console reads the login options from the server, so adding an authenticator changes the login screen with no frontend change. With several OIDC authenticators configured, `GET /api/auth/login?authenticator=<name>` selects one. With no parameter, the first enabled OIDC authenticator is used. Set `"enabled": false` on any entry to keep its configuration while taking it out of service.
 
 ---
 
@@ -124,7 +120,7 @@ Set `"enabled": false` on any entry to keep its configuration in place while tak
 
 ## Optional dependencies
 
-Provider integrations are heavy, so each sits behind an extra. A configured authenticator whose driver is missing is a **boot failure by design**, naming the kind, the extra and the missing module, rather than a login method that mysteriously never works.
+Provider integrations are heavy, so each sits behind an extra. A configured authenticator whose driver is missing is a **boot failure by design**, naming the kind, the extra and the missing module, rather than a login method that never works.
 
 | Extra | Install | Needed for |
 |---|---|---|

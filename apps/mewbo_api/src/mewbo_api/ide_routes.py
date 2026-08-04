@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, ClassVar, Protocol
 
 from flask import request
 from flask_restx import Namespace, Resource, fields
 from loguru import logger
+from mewbo_core.workspaces.project_catalog import ProjectCatalog, ProjectResolutionError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from mewbo_api.auth.guard_registry import guard
@@ -87,10 +89,20 @@ AuthResult = tuple[dict, int] | None
 # Populated by ``init_ide`` at app startup.
 _manager: IdeManager | None = None
 _runtime: SessionRuntime | None = None
+_resolver: IdeWorkspaceResolver | None = None
 
 
-def init_ide(manager: IdeManager, runtime: SessionRuntime) -> None:
+def init_ide(
+    manager: IdeManager,
+    runtime: SessionRuntime,
+    catalog_source: Callable[[], ProjectCatalog],
+) -> None:
     """Wire the namespace to its collaborators (called once at app startup).
+
+    ``catalog_source`` is a CALLABLE rather than a bound catalog because the
+    composition root re-points its catalog at the config and project store the
+    process currently holds on every call; capturing the instance here would
+    freeze whichever sources existed at startup.
 
     Authentication and authorization are NOT wired here: every view in this
     module declares its own requirement with ``@guard.requires``, which resolves
@@ -98,9 +110,10 @@ def init_ide(manager: IdeManager, runtime: SessionRuntime) -> None:
     guard here as well would be a second, silently-unused path to the same
     decision.
     """
-    global _manager, _runtime
+    global _manager, _runtime, _resolver
     _manager = manager
     _runtime = runtime
+    _resolver = IdeWorkspaceResolver.over_catalog(catalog_source)
 
 
 class ExtendBody(BaseModel):
@@ -132,7 +145,9 @@ def _precheck(session_id: str) -> AuthResult:
     """
     if not SESSION_ID_RE.match(session_id):
         return {"message": "session not found"}, 404
-    if _manager is None:  # pragma: no cover - only hit if init_ide wasn't called
+    # ``_manager`` and ``_resolver`` are set together by ``init_ide``; both are
+    # named so a caller may use either unconditionally afterwards.
+    if _manager is None or _resolver is None:  # pragma: no cover - init_ide not called
         return {"message": "ide feature not initialized"}, 503
     return None
 
@@ -180,24 +195,47 @@ class IdeMountTier(Protocol):
         ...
 
 
-class ConfigProjectMount:
-    """Tier 1 — the session's context ``project`` names a configured project.
+class CatalogProjectMount:
+    """Tier 1 — the session's context ``project`` names a project in the catalog.
 
-    ``O(1)`` on the Mongo driver, ``O(one session)`` on the base store —
-    ``latest_event_of_type`` is bounded by the TYPE, so this reads the one event
-    it needs instead of a whole transcript to pull one string out of its tail.
+    **The trap this exists to close: a private "project name → directory" rule
+    beside the one catalog.** Reading the key straight out of ``app.json``
+    recognised a CONFIGURED project and nothing else, so every console session
+    anchored to a managed project (``managed:<id>``), a worktree or a repository
+    slug fell out of the walk and read as "session has no project in context" —
+    a name the server resolves everywhere else, refused only here. The catalog
+    is the one resolver; this tier is a caller, never a second copy of it.
 
-    Two narrowings that look optional and are not. A tail bounded by COUNT would
-    be cheaper still and wrong: the newest ``context`` event sits arbitrarily
-    far back after a long run, and missing it turns a launchable session into a
-    ``409``. And ``payload_key`` is what keeps this equivalent to the backwards
-    transcript scan it replaced — context events merge key-by-key, so the newest
-    one need not be the newest one MENTIONING a project (measured on the
-    deployed store: 15 of 204 such sessions).
+    ``O(1)`` on the Mongo driver, ``O(one session)`` on the base store for the
+    event read — ``latest_event_of_type`` is bounded by the TYPE, so this reads
+    the one event it needs instead of a whole transcript to pull one string out
+    of its tail. Catalog resolution then adds an ``O(collection)`` leg over the
+    project and repository stores.
+
+    Two narrowings on the event read that look optional and are not. A tail
+    bounded by COUNT would be cheaper still and wrong: the newest ``context``
+    event sits arbitrarily far back after a long run, and missing it turns a
+    launchable session into a ``409``. And ``payload_key`` is what keeps this
+    equivalent to the backwards transcript scan it replaced — context events
+    merge key-by-key, so the newest one need not be the newest one MENTIONING a
+    project (measured on the deployed store: 15 of 204 such sessions).
     """
 
+    # Refusal codes that mean "not something this tier can bind", so the walk
+    # continues into the wiki and app tiers. Every OTHER code means the catalog
+    # RECOGNISED the project and still cannot hand over a directory, which is
+    # the tier's own refusal — and the catalog already writes an actionable
+    # sentence for it, so it is surfaced verbatim rather than restated.
+    FALL_THROUGH_CODES: ClassVar[frozenset[str]] = frozenset(
+        {"not_found", "empty", "auto_sentinel"}
+    )
+
+    def __init__(self, catalog_source: Callable[[], ProjectCatalog]) -> None:
+        """Bind the catalog accessor; a callable so late-bound sources are read."""
+        self.catalog_source = catalog_source
+
     def resolve(self, session_id: str, runtime: SessionRuntime) -> IdeWorkspace | None:
-        """Return the configured project's mount, or ``None`` to fall through."""
+        """Return the catalog project's mount, ``None``, or refuse with a sentence."""
         event = runtime.session_store.latest_event_of_type(
             session_id, "context", payload_key="project"
         )
@@ -207,14 +245,23 @@ class ConfigProjectMount:
         candidate = payload.get("project") if isinstance(payload, dict) else None
         if not isinstance(candidate, str) or not candidate.strip():
             return None
-        project_name = candidate.strip()
+        project_key = candidate.strip()
 
-        from mewbo_core.config import get_config
-
-        project = get_config().projects.get(project_name)
-        if project is None or not project.path:
-            return None
-        return IdeWorkspace(project_name=project_name, project_path=project.path)
+        catalog = self.catalog_source()
+        try:
+            path = catalog.resolve(project_key)
+        except ProjectResolutionError as exc:
+            if exc.code in self.FALL_THROUGH_CODES:
+                return None
+            raise IdeWorkspaceUnavailable(exc.message) from exc
+        # The DISPLAY name, looked up only on the resolving path: a raw
+        # ``managed:<uuid>`` is persisted on ``IdeInstance`` and echoed into the
+        # console capsule, where it names nothing a user recognises.
+        entry = catalog.find(project_key)
+        return IdeWorkspace(
+            project_name=entry.name if entry is not None else project_key,
+            project_path=path,
+        )
 
 
 class WikiCheckoutMount:
@@ -301,12 +348,27 @@ class IdeWorkspaceResolver:
     (:class:`IdeWorkspaceUnavailable`) propagates — it is the answer.
     """
 
-    def __init__(self, tiers: tuple[IdeMountTier, ...] | None = None) -> None:
+    def __init__(self, tiers: tuple[IdeMountTier, ...]) -> None:
         """Bind the tier order; injectable so a test can drive one tier alone."""
-        self.tiers: tuple[IdeMountTier, ...] = tiers or (
-            ConfigProjectMount(),
-            WikiCheckoutMount(),
-            AppStagingMount(),
+        self.tiers: tuple[IdeMountTier, ...] = tiers
+
+    @classmethod
+    def over_catalog(
+        cls, catalog_source: Callable[[], ProjectCatalog]
+    ) -> IdeWorkspaceResolver:
+        """The production tier order, with the catalog handed to the tier needing it.
+
+        A classmethod rather than a default argument because the first tier can
+        no longer be constructed without a collaborator: a default that reached
+        for the composition root's catalog itself would put an app-global back
+        inside the class the injection exists to keep free of one.
+        """
+        return cls(
+            tiers=(
+                CatalogProjectMount(catalog_source),
+                WikiCheckoutMount(),
+                AppStagingMount(),
+            )
         )
 
     def resolve(self, session_id: str, runtime: SessionRuntime | None) -> IdeWorkspace | None:
@@ -326,12 +388,6 @@ class IdeWorkspaceResolver:
             if workspace is not None:
                 return workspace
         return None
-
-
-# The one resolver the routes consult. A module-level handle is composition-root
-# state, not request state: the routes read it once per POST and a test points it
-# at a single tier by reassignment (the pre-existing pattern in this module).
-_resolver = IdeWorkspaceResolver()
 
 
 def _session_exists(session_id: str) -> bool:
@@ -354,11 +410,12 @@ class IdeResource(Resource):
             "one. Returns `201` on first create and `200` on reconnect; the response "
             "body is the IDE instance and — uniquely on this verb — includes the "
             "`password` so any browser tab can open the IDE. The session must exist "
-            "and resolve to a directory (else `404`/`409`): a configured project in "
-            "its context, the surviving checkout of the wiki project it maintains, or "
-            "the staging directory of the Mewbo App it maintains — which is "
-            "materialized on demand. Idempotent: call it again from another tab to "
-            "reconnect."
+            "and resolve to a directory, else `404`/`409`. It resolves when the "
+            "session's context names a project the catalog knows (configured, managed, "
+            "worktree, or a checked-out repository), when the session maintains a wiki "
+            "project whose checkout still exists, or when it maintains a Mewbo App, "
+            "whose staging directory is materialized on demand. Idempotent: call it "
+            "again from another tab to reconnect."
         )
     )
     @ide_ns.response(201, "IDE container created", _ide_instance_model)
@@ -372,6 +429,7 @@ class IdeResource(Resource):
         if error:
             return error
         assert _manager is not None
+        assert _resolver is not None
         if not _session_exists(session_id):
             return {"message": "session not found"}, 404
         try:
@@ -520,7 +578,7 @@ class IdeExtendResource(Resource):
 
 __all__ = [
     "AppStagingMount",
-    "ConfigProjectMount",
+    "CatalogProjectMount",
     "ExtendBody",
     "IdeExtendResource",
     "IdeResource",

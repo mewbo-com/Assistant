@@ -43,6 +43,32 @@ for path in SOURCE_PATHS:
 # top-level ``tests`` package is on sys.path.
 collect_ignore_glob = ["tests/wiki/fixtures/*"]
 
+# ``mongomock`` — the Mongo double every store suite runs against — lags
+# pymongo's operation models. pymongo's ``UpdateOne`` unconditionally forwards a
+# ``sort`` argument into the bulk builder, and mongomock's ``add_update`` has no
+# such parameter, so ANY ``bulk_write`` of updates raises ``TypeError`` against
+# the double while working against a real server. Absorb the argument once,
+# here, rather than letting a driver method avoid ``bulk_write`` to keep a test
+# double happy. A non-``None`` sort would change what the operation means, so it
+# is refused instead of dropped — mongomock cannot honour it either way.
+try:
+    from mongomock.collection import BulkOperationBuilder as _MongomockBulk
+except Exception:  # pragma: no cover - mongomock is a dev-only dependency
+    pass
+else:
+    import inspect as _inspect
+
+    if "sort" not in _inspect.signature(_MongomockBulk.add_update).parameters:
+        _mongomock_add_update = _MongomockBulk.add_update
+
+        def _add_update_absorbing_sort(self, *args, sort=None, **kwargs):
+            """Drop pymongo's unsupported ``sort`` before mongomock sees it."""
+            if sort is not None:
+                raise NotImplementedError("mongomock cannot apply a sorted bulk update")
+            return _mongomock_add_update(self, *args, **kwargs)
+
+        _MongomockBulk.add_update = _add_update_absorbing_sort
+
 import pytest
 
 from mewbo_core.config import (
@@ -56,7 +82,7 @@ from mewbo_core.config import (
 _pytest_configs = Path(_pytest_home) / "configs"
 _pytest_configs.mkdir(parents=True, exist_ok=True)
 (_pytest_configs / "app.json").write_text("{}\n")
-os.environ.setdefault("MEWBO_CONFIG_DIR", str(_pytest_configs))
+os.environ["MEWBO_CONFIG_DIR"] = str(_pytest_configs)
 set_app_config_path(_pytest_configs / "app.json")
 # Pin the config DIRECTORY at import time, for the same reason MEWBO_HOME is
 # pinned above and not by a fixture: ``mewbo_api.backend`` calls
@@ -70,8 +96,17 @@ set_app_config_path(_pytest_configs / "app.json")
 # large part of this suite probes behaviour in SUBPROCESSES, and an in-process
 # override cannot reach them: each child re-runs the walk from its own CWD —
 # the repo root — and finds that same config again. The env var is the only
-# form of the redirect a child inherits. ``setdefault`` respects an
-# operator/CI-supplied value.
+# form of the redirect a child inherits.
+#
+# It ASSIGNS rather than ``setdefault``s, and the difference is the whole point
+# of the pin. ``setdefault`` lets an inherited value win, so the one environment
+# the isolation exists to defend against — a developer's shell, already carrying
+# a redirect at their own live config — is exactly the one where it silently did
+# nothing. Nothing supplies this variable ahead of a run: no workflow and no
+# compose file sets it for pytest, and ``scripts/ci/generate_openapi_spec.py``
+# sets it in-process long after this line, save-and-restore, so it is unaffected.
+# The deliberate redirects both still work: ``--config`` on the CLI, and
+# ``monkeypatch.setenv`` inside a test that means to probe the chain itself.
 
 
 @pytest.fixture(autouse=True)
