@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Regression tests for the agent-pickup CI workflow contract.
+"""Regression tests for the CI workflow contracts.
+
+Most of this file pins the agent-pickup workflow. The last test sweeps EVERY
+workflow for the one mistake that costs the whole file rather than one step.
+
 
 The workflow runs on BOTH GitHub Actions and Gitea Actions and posts to
 ``POST /api/automation/vcs-pickup`` — these tests pin the trigger set, the
@@ -140,3 +144,22 @@ def test_agent_pickup_run_scripts_never_inline_event_payload() -> None:
     env = workflow["jobs"]["start-session"]["env"]
     assert "ITEM_BODY" in env
     assert "COMMENT_BODY" in env
+
+
+# ---------------------------------------------------------------------------
+# Expression contexts: `secrets` is unavailable in `if:`
+# ---------------------------------------------------------------------------
+
+
+def test_no_workflow_reads_secrets_from_an_if_expression() -> None:
+    """GitHub refuses to parse the whole file rather than failing one step."""
+    offenders: list[str] = []
+    for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for job_id, job in workflow.get("jobs", {}).items():
+            if "secrets." in str(job.get("if", "")):
+                offenders.append(f"{path.name}:jobs.{job_id}.if")
+            for index, step in enumerate(job.get("steps", [])):
+                if "secrets." in str(step.get("if", "")):
+                    offenders.append(f"{path.name}:jobs.{job_id}.steps[{index}].if")
+    assert not offenders, f"if expressions read the unavailable secrets context: {offenders}"
